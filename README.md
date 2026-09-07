@@ -135,3 +135,14 @@ Config lives in `%APPDATA%\com.aerowave.radio\aerowave.json`.
   empty; each picked file is opened to it individually at the moment it is chosen.
 - Everything renders in stock Windows fonts (Bahnschrift, Cascadia Mono, Segoe
   UI) — the webview loads no webfonts.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
+
+Three.js is bundled in `src/vendor/` under its own MIT licence, kept alongside
+it in `src/vendor/THREE-LICENSE.txt`.
+
+The seeded stations are other people's broadcasts: the URLs are here, the audio
+is theirs, and each broadcaster sets its own terms for listening and
+redistribution.

@@ -2,6 +2,7 @@
 name = "aerowave-core"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Parsing and scheduling rules, with no GUI dependencies so they can be unit tested"
 
 [dependencies]
