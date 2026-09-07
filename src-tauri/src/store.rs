@@ -176,6 +176,21 @@ fn default_stations() -> Vec<Station> {
         .collect()
 }
 
+/// A `data` folder beside the executable makes this a portable install:
+/// settings and the webview's cache stay in the app directory and nothing is
+/// written to the user profile. That is how the Scoop package ships, with
+/// `data` persisted across updates. Without that folder, settings go to the
+/// usual per-user config directory.
+pub fn portable_data_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.join("data");
+    if dir.is_dir() {
+        Some(dir)
+    } else {
+        None
+    }
+}
+
 pub struct Store {
     path: PathBuf,
     pub data: Mutex<AppData>,
@@ -183,10 +198,9 @@ pub struct Store {
 
 impl Store {
     pub fn load(app: &AppHandle) -> Store {
-        let dir = app
-            .path()
-            .app_config_dir()
-            .unwrap_or_else(|_| PathBuf::from("."));
+        let dir = portable_data_dir()
+            .or_else(|| app.path().app_config_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("aerowave.json");
         let data = fs::read_to_string(&path)
@@ -207,6 +221,11 @@ impl Store {
 
     pub fn snapshot(&self) -> AppData {
         self.data.lock().unwrap().clone()
+    }
+
+    /// Where the settings file actually ended up, for the UI to show.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
     }
 
     pub fn save(&self) -> Result<(), String> {

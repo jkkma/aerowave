@@ -1292,6 +1292,20 @@ function wire() {
 
 }
 
+/** Portable copies keep their settings beside the exe; say which this is. */
+async function showConfigLocation() {
+  try {
+    const where = await invoke("config_location");
+    const line = $("#config-where");
+    line.textContent = "";
+    const label = document.createElement("b");
+    label.textContent = where.portable ? "Portable copy. " : "Installed copy. ";
+    line.append(label, "Settings: " + where.path);
+  } catch {
+    /* nothing worth saying if the backend will not tell us */
+  }
+}
+
 // ----------------------------------------------------------------- boot ---
 
 async function boot() {
@@ -1313,6 +1327,7 @@ async function boot() {
     else stopPlayback();
   });
 
+  showConfigLocation();
   say("aerowave online", "good");
 }
 
