@@ -1,0 +1,17 @@
+{
+  "name": "aerowave",
+  "version": "0.1.0",
+  "description": "Internet radio player and alarm clock with a Frutiger Aero face",
+  "private": true,
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  }
+}

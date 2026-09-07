@@ -1,0 +1,62 @@
+<!doctype html>
+<!--
+  A standalone view of the orb, for working on how it looks without
+  rebuilding the app every time. Serve the repo root and open
+  /tools/orb-preview.html; tools/orb-shot.ps1 does both and screenshots it.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>orb preview</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    display: grid;
+    place-items: center;
+    /* the same backdrop the orb sits on in the app */
+    background: radial-gradient(120% 96% at 20% 4%,
+      #a8f0f8 0%, #63cfe4 9%, #2ba5c6 21%, #10769a 38%,
+      #084c6d 56%, #063850 72%, #04222f 88%, #02131c 100%);
+  }
+  #stage {
+    position: relative;
+    width: 340px;
+    height: 340px;
+    border-radius: 50%;
+    box-shadow: 0 0 40px rgba(90, 220, 250, .28), 0 18px 34px rgba(0, 0, 0, .5);
+  }
+  #stage canvas { position: absolute; inset: -15%; width: 130%; height: 130%; image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script type="module">
+import * as THREE from "../src/vendor/three.module.min.js";
+import { buildOrb, lightScene, RENDER_SIZE } from "../src/orb3d.js";
+
+const stage = document.getElementById("stage");
+const canvas = document.createElement("canvas");
+stage.appendChild(canvas);
+
+const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: false });
+renderer.setPixelRatio(1);
+renderer.setSize(RENDER_SIZE, RENDER_SIZE, false);
+renderer.setClearAlpha(0);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
+camera.position.z = 4.4;
+lightScene(scene, THREE);
+
+const orb = buildOrb();
+scene.add(orb);
+
+let t = 0;
+renderer.setAnimationLoop(() => {
+  t += 0.004;
+  for (const mesh of orb.userData.spinning) mesh.rotation.y = t;
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

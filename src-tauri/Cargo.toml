@@ -1,0 +1,52 @@
+[workspace]
+members = ["core"]
+
+[package]
+name = "aerowave"
+version = "0.1.0"
+description = "Internet radio player and alarm clock"
+authors = ["jkkma"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "aerowave_lib"
+# Desktop only. The cdylib/staticlib pair the mobile templates use makes the
+# mingw linker fall over ("export ordinal too large") when building the tests.
+crate-type = ["rlib"]
+# A test binary built from this crate links WebView2 and the Win32 GUI stack
+# and will not load outside a real app process. Everything worth unit testing
+# lives in the aerowave-core crate, which links none of that.
+test = false
+
+[[bin]]
+name = "aerowave"
+path = "src/main.rs"
+test = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+aerowave-core = { path = "core" }
+tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+walkdir = "2"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "charset", "http2"] }
+tokio = { version = "1", features = ["time", "sync"] }
+futures-util = "0.3"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
