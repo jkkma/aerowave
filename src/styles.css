@@ -737,6 +737,14 @@ body.playing .gel.big { box-shadow: 0 0 26px rgba(120, 236, 255, .7), 0 2px 0 rg
 
 .about { min-width: 0; overflow-wrap: anywhere; padding: 12px 6px 2px; font-size: 12.5px; line-height: 1.5; color: rgba(206, 236, 248, .78); }
 .about p { margin: 8px 0; }
+.wherefrom {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: rgba(170, 212, 230, .7);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.wherefrom b { color: var(--alien); font-weight: 600; }
 
 /* ----------------------------------------------------------- editors --- */
 

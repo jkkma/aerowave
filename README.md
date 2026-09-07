@@ -58,10 +58,31 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   it rings on wake as long as it is less than 15 minutes late.
 - Ringing raises the window over whatever else is on screen.
 
-## Running it
+## Installing it
 
-Needs Rust, Node, the MSVC or MinGW build tools and WebView2 (which ships with
-Windows 11).
+With [Scoop](https://scoop.sh):
+
+```
+scoop bucket add ayylmao https://github.com/jkkma/nmkoder
+scoop install aerowave
+```
+
+`ayylmao` is only what the bucket is called on your machine — Scoop takes whatever
+name you type there, and the bucket carries other apps besides this one.
+
+Or portable: take the zip from [Releases](https://github.com/jkkma/aerowave/releases),
+unzip it anywhere and run `aerowave.exe`. Keep the `data` folder next to the exe and
+the copy stays portable — settings live in `data\aerowave.json` and the webview's
+cache in `data\webview\`, and nothing is written to your user profile. Delete `data`
+and it falls back to `%APPDATA%\com.aerowave.radio`. SETUP tells you which of the two
+a running copy is using.
+
+Either way it needs the WebView2 runtime, which ships with Windows 11 and current
+Windows 10. `WebView2Loader.dll` sits beside the exe in the zip and has to stay there.
+
+## Building it
+
+Needs Rust, Node, the MSVC or MinGW build tools and WebView2.
 
 ```
 npm install
@@ -103,6 +124,8 @@ tools/make_icon.py   draws the app icon (Pillow)
 tools/shot.ps1       screenshots the running window, for checking the look
 tools/orb-preview.html  the orb on its own, for working on it without a rebuild
                         (serve the repo root, then open /tools/orb-preview.html)
+tools/package.py     builds the portable zip and prints its hash
+tools/drive.ps1      clicks and types at the running window, for end-to-end tests
 ```
 
 **The clock lives in Rust, deliberately.** WebView2 throttles timers in hidden and
@@ -111,12 +134,20 @@ while you were already looking at it. The Rust thread ticks once a second and
 emits `alarm-fire`; the webview is told when to ring and what to play, and only
 does the playing. Snooze goes back through Rust for the same reason.
 
-Config lives in `%APPDATA%\com.aerowave.radio\aerowave.json`.
+Config lives in `data\aerowave.json` beside the exe when that folder exists, and in
+`%APPDATA%\com.aerowave.radio\aerowave.json` otherwise.
+
+`python tools/package.py --build` produces the portable zip the Scoop manifest points
+at, and prints its SHA-256.
 
 ## Notes and limits
 
 - Closing the window hides it to the tray by default, so alarms keep working.
-  Turn that off in SETUP, or use QUIT AEROWAVE to really exit.
+  Turn that off in SETUP, or use QUIT AEROWAVE to really exit. Alarms only ring
+  while Aerowave is running.
+- The one thing a portable copy writes outside its own folder is the
+  "Start with Windows" registry entry, which is off by default and is removed
+  again when you turn it off.
 - The window is undecorated with its own titlebar, to get the glass look. It is
   draggable by the titlebar and resizable from the edges.
 - The orb is a flat-shaded icosahedron with a 64-pixel texture stretched over

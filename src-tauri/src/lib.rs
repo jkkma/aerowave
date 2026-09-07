@@ -30,6 +30,13 @@ pub struct AppState {
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct ConfigLocation {
+    pub path: String,
+    pub portable: bool,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct TrackPick {
     pub path: String,
     pub name: String,
@@ -230,8 +237,27 @@ fn surface(app: &AppHandle) {
     }
 }
 
+/// Tells the UI where its settings live, and whether this is a portable copy.
+#[tauri::command]
+fn config_location(state: State<AppState>) -> ConfigLocation {
+    ConfigLocation {
+        path: state.store.path().to_string_lossy().to_string(),
+        portable: store::portable_data_dir().is_some(),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A portable copy keeps the webview's cache in the app directory too,
+    // rather than leaving it behind in the user profile. WebView2 reads this
+    // before the environment is created, so it has to be set first thing.
+    if let Some(data) = store::portable_data_dir() {
+        let webview = data.join("webview");
+        if std::fs::create_dir_all(&webview).is_ok() {
+            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &webview);
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // A second launch just brings the running one forward.
@@ -296,6 +322,7 @@ pub fn run() {
             dismiss_alarm,
             hide_window,
             quit_app,
+            config_location,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Aerowave");
