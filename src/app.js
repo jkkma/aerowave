@@ -916,6 +916,23 @@ function fillStationSelect(selected) {
   });
 }
 
+/**
+ * Point a select at a value, adding an option for it when the list does not
+ * already offer it. A number hand-written into aerowave.json survives a trip
+ * through the editor instead of being quietly reset to the nearest preset.
+ */
+function setSelectValue(select, value, describe) {
+  const wanted = String(value);
+  const known = Array.prototype.some.call(select.options, (o) => o.value === wanted);
+  if (!known) {
+    const option = document.createElement("option");
+    option.value = wanted;
+    option.textContent = describe(value);
+    select.append(option);
+  }
+  select.value = wanted;
+}
+
 function openAlarmEditor(alarm) {
   editingAlarm = alarm || null;
   const now = new Date();
@@ -947,9 +964,11 @@ function openAlarmEditor(alarm) {
   $("#al-volume").value = Math.round((base.volume ?? 0.8) * 100);
   $("#al-volval").textContent = $("#al-volume").value;
   $("#al-volume").style.setProperty("--fill", $("#al-volume").value + "%");
-  $("#al-fade").value = String(base.fadeSecs ?? 20);
-  $("#al-snooze").value = String(base.snoozeMins ?? 9);
-  $("#al-autostop").value = String(base.autoStopMins ?? 30);
+  setSelectValue($("#al-fade"), base.fadeSecs ?? 20, (v) => v + " s");
+  setSelectValue($("#al-snooze"), base.snoozeMins ?? 9, (v) => v + " min");
+  setSelectValue($("#al-autostop"), base.autoStopMins ?? 30, (v) =>
+    v === 0 ? "never" : v + " min"
+  );
 
   $("#al-delete").classList.toggle("hidden", !alarm);
   $("#alarm-editor").classList.remove("hidden");
