@@ -80,6 +80,57 @@ pub fn sort_key(name: &str) -> String {
     lower.strip_prefix("the ").unwrap_or(&lower).to_string()
 }
 
+/// What kind of image these bytes are, by what they start with, or `None` if
+/// they are not an image at all.
+///
+/// The Content-Type a logo arrives under is not worth trusting: station art
+/// is hosted on whatever the broadcaster had lying around, and comes back
+/// labelled `text/html`, `application/octet-stream` and worse. The bytes
+/// themselves are not so easily wrong - and something that is not an image
+/// must not be handed to the webview as one.
+pub fn image_kind(bytes: &[u8]) -> Option<&'static str> {
+    const PNG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    const JPEG: [u8; 3] = [0xff, 0xd8, 0xff];
+    // An icon directory: two zero bytes, then type 1 (icon) or 2 (cursor).
+    const ICO: [u8; 4] = [0, 0, 1, 0];
+    const CUR: [u8; 4] = [0, 0, 2, 0];
+
+    if bytes.starts_with(&PNG) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&JPEG) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    // RIFF carries a good deal besides; the tag four bytes further in is the
+    // part that says which - and a WAV file opens exactly the same way.
+    if bytes.starts_with(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    if bytes.starts_with(&ICO) || bytes.starts_with(&CUR) {
+        return Some("image/x-icon");
+    }
+
+    // SVG has no magic number, so this is the best that can be done: what the
+    // document opens with, and whether the root element is in there at all.
+    // Both halves are needed - an RSS feed also starts with the XML
+    // declaration. Shown in an <img>, an SVG runs no script and fetches
+    // nothing, so it is no more dangerous than a PNG.
+    let head = String::from_utf8_lossy(bytes.get(..512).unwrap_or(bytes));
+    let head = head.trim_start();
+    let opens_a_document =
+        head.starts_with("<svg") || head.starts_with("<?xml") || head.starts_with("<!DOCTYPE svg");
+    if opens_a_document && head.contains("<svg") {
+        return Some("image/svg+xml");
+    }
+    None
+}
+
 /// Is this a plain hostname, and so safe to build an API URL out of?
 ///
 /// The mirror list is fetched over the network, and a name carrying a slash
@@ -97,6 +148,32 @@ pub fn is_hostname(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_an_image_by_its_first_bytes() {
+        assert_eq!(image_kind(&[0x89, b'P', b'N', b'G', 13, 10, 26, 10]), Some("image/png"));
+        assert_eq!(image_kind(&[0xff, 0xd8, 0xff, 0xe0]), Some("image/jpeg"));
+        assert_eq!(image_kind(b"GIF89a...."), Some("image/gif"));
+        assert_eq!(image_kind(b"RIFF____WEBPVP8 "), Some("image/webp"));
+        assert_eq!(image_kind(b"BM__"), Some("image/bmp"));
+        assert_eq!(image_kind(&[0, 0, 1, 0, 1, 0]), Some("image/x-icon"));
+        assert_eq!(
+            image_kind(br#"  <svg xmlns="http://www.w3.org/2000/svg"/>"#),
+            Some("image/svg+xml")
+        );
+    }
+
+    #[test]
+    fn refuses_what_is_not_an_image() {
+        // The ones that actually turn up: a logo link that has rotted into an
+        // error page, a host that answers with nothing, and a RIFF file that
+        // is not a picture at all.
+        assert_eq!(image_kind(b"<!DOCTYPE html><html>404"), None);
+        assert_eq!(image_kind(b""), None);
+        assert_eq!(image_kind(b"RIFF____WAVEfmt "), None);
+        assert_eq!(image_kind(&[0, 0, 3, 0]), None);
+        assert_eq!(image_kind(br#"<?xml version="1.0"?><rss><channel/></rss>"#), None);
+    }
 
     #[test]
     fn flattens_and_trims_a_name() {

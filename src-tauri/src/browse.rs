@@ -15,8 +15,10 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use aerowave_core::directory::{
-    clean_name, first_tag, is_country_code, is_hostname, playable_url, sort_key,
+    clean_name, first_tag, image_kind, is_country_code, is_hostname, playable_url, sort_key,
 };
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use futures_util::StreamExt;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
@@ -49,6 +51,14 @@ const FACET_TAGS: usize = 200;
 /// you are reading down is easier to find something in than one ranked by a
 /// popularity you cannot see.
 const ORDER: &str = "name";
+/// A station logo is an icon: a few kilobytes as a rule, and the biggest ones
+/// worth having are a couple of hundred. Past this it is not artwork, and it
+/// has to be carried into the webview as text besides.
+const MAX_LOGO_BYTES: usize = 512 * 1024;
+/// Artwork addresses to try for one station. The directory offers several
+/// where a station has been submitted more than once, and the first one is
+/// often a link that has rotted - but a station with four dead ones has none.
+const MAX_ART_TRIES: usize = 4;
 /// Genres to offer. The directory holds tens of thousands of tags, almost all
 /// of them one station's private label; the busiest couple of hundred are the
 /// ones worth putting in a list, and they reach down to around 150 stations.
@@ -102,6 +112,16 @@ pub struct Query {
     /// ISO 3166-1 alpha-2, or empty for anywhere.
     #[serde(default)]
     pub country_code: String,
+    /// Exactly what the directory calls a format - "MP3", "AAC+" - or empty
+    /// for any of them. It matches the whole string, so AAC and AAC+ are two
+    /// different answers rather than one being a sort of the other.
+    #[serde(default)]
+    pub codec: String,
+    /// The floor a station's bitrate has to clear, in kbps. 0 for any, which
+    /// is also the only setting that keeps the many stations the directory
+    /// has no bitrate on file for.
+    #[serde(default)]
+    pub bitrate_min: u32,
     #[serde(default)]
     pub limit: u32,
     #[serde(default)]
@@ -152,6 +172,17 @@ pub struct Country {
     pub stations: u32,
 }
 
+/// A station's artwork: where it was found, and the picture itself.
+///
+/// Both, because the address is worth remembering on the station - so this
+/// costs one lookup ever - while the picture is what actually goes on screen.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Art {
+    pub url: String,
+    pub picture: String,
+}
+
 /// One search result, cleaned up enough to show and to save.
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -167,6 +198,8 @@ pub struct BrowseStation {
     pub country: String,
     pub codec: String,
     pub bitrate: u32,
+    /// The station's own artwork, if it has any that could be played back.
+    pub favicon: String,
     pub votes: i64,
     /// WebView2 has no HLS decoder. These are flagged rather than hidden: the
     /// station may still be worth keeping, but it will not make a sound here.
@@ -187,6 +220,7 @@ struct Raw {
     tags: Option<String>,
     country: Option<String>,
     countrycode: Option<String>,
+    favicon: Option<String>,
     codec: Option<String>,
     bitrate: Option<Value>,
     votes: Option<Value>,
@@ -388,6 +422,19 @@ pub async fn tags() -> Result<Vec<Tag>, String> {
 /// country counts and nothing crossed - so the stations themselves are read
 /// and tallied. That is a megabyte or two, which is why the webview asks only
 /// when a filter actually changes, and remembers the answer.
+/// The format and bitrate filters as the directory wants them. Both are left
+/// out when unset: `codec=` empty asks for stations whose format is the empty
+/// string, which is not what "any format" means.
+fn quality_params(query: &Query, params: &mut Vec<(&'static str, String)>) {
+    let codec = clean_name(&query.codec, 16);
+    if !codec.is_empty() {
+        params.push(("codec", codec));
+    }
+    if query.bitrate_min > 0 {
+        params.push(("bitrateMin", query.bitrate_min.min(10_000).to_string()));
+    }
+}
+
 pub async fn facets(query: Query) -> Result<Facets, String> {
     let mut params: Vec<(&str, String)> = vec![
         ("hidebroken", "true".into()),
@@ -399,6 +446,10 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
     if is_country_code(&code) {
         params.push(("countrycode", code));
     }
+    // Counted under the format and bitrate as well. A country offered as
+    // "Paraguay (68)" while the format filter leaves it four is worse than no
+    // count at all: it promises stations that the next search cannot find.
+    quality_params(&query, &mut params);
 
     let body = get("stations/search", &params, 60, MAX_FACET_BYTES).await?;
     let raw: Vec<Raw> = serde_json::from_str(&body)
@@ -453,6 +504,109 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
     })
 }
 
+/// Fetch a station's artwork and hand it back as a data URL.
+///
+/// It has to come through here rather than being loaded by the webview: the
+/// content security policy allows no remote images, and even without it a
+/// broadcaster's logo host does not send the CORS headers WebGL wants before
+/// it will accept a cross-origin picture as a texture. Reading it here and
+/// passing the bytes along inline sidesteps both.
+pub async fn logo(url: &str) -> Result<String, String> {
+    let url = playable_url(url, "").ok_or("that is not an http address")?;
+    let response = client()?
+        .get(&url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| describe(&e))?;
+    if !response.status().is_success() {
+        return Err(format!("the logo host answered {}", response.status()));
+    }
+
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| describe(&e))?;
+        if bytes.len() + chunk.len() > MAX_LOGO_BYTES {
+            return Err("that is far larger than a station logo".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
+    // By what it is, not by what it was labelled: half of these are served as
+    // octet-stream, and a fair few links have rotted into an error page.
+    let kind = image_kind(&bytes).ok_or("that address is not a picture")?;
+    Ok(format!("data:{kind};base64,{}", BASE64.encode(&bytes)))
+}
+
+/// The artwork addresses one directory search offers, in the order given.
+async fn art_candidates(path: &str, params: &[(&str, String)]) -> Vec<String> {
+    let Ok(body) = get(path, params, 20, MAX_BODY_BYTES).await else {
+        return Vec::new();
+    };
+    let Ok(raw) = serde_json::from_str::<Vec<Raw>>(&body) else {
+        return Vec::new();
+    };
+    raw.iter()
+        .filter_map(|entry| playable_url(text(&entry.favicon), ""))
+        .collect()
+}
+
+/// Find a station's artwork in the directory, for one that has none on file.
+///
+/// Stations kept from BROWSE arrive with their own; the ones this app ships
+/// with, and anything typed in by hand, do not. Asked in order of how sure
+/// the answer is: the exact stream first, then the exact name, then the
+/// closest name the directory knows. Every candidate is fetched before it is
+/// offered, so an address that has rotted - and plenty have - is passed over
+/// rather than remembered as this station's picture.
+pub async fn art(name: &str, url: &str) -> Result<Option<Art>, String> {
+    let name = clean_name(name, 60);
+    let url = url.trim().to_string();
+    let listing = |extra: Vec<(&'static str, String)>| {
+        let mut params: Vec<(&'static str, String)> = vec![
+            ("hidebroken", "true".into()),
+            ("order", "votes".into()),
+            ("reverse", "true".into()),
+            ("limit", "20".into()),
+        ];
+        params.extend(extra);
+        params
+    };
+
+    let mut searches: Vec<(&str, Vec<(&'static str, String)>)> = Vec::new();
+    if !url.is_empty() {
+        searches.push(("stations/byurl", vec![("url", url)]));
+    }
+    if !name.is_empty() {
+        searches.push((
+            "stations/search",
+            listing(vec![("name", name.clone()), ("nameExact", "true".into())]),
+        ));
+        searches.push(("stations/search", listing(vec![("name", name)])));
+    }
+
+    let mut tried: Vec<String> = Vec::new();
+    for (path, params) in searches {
+        for favicon in art_candidates(path, &params).await {
+            if tried.iter().any(|seen| seen == &favicon) {
+                continue;
+            }
+            if tried.len() >= MAX_ART_TRIES {
+                return Ok(None);
+            }
+            tried.push(favicon.clone());
+            if let Ok(picture) = logo(&favicon).await {
+                return Ok(Some(Art {
+                    url: favicon,
+                    picture,
+                }));
+            }
+        }
+    }
+    Ok(None)
+}
+
 pub async fn search(query: Query) -> Result<Page, String> {
     let mut params: Vec<(&str, String)> = vec![
         // Stations the directory's own checker cannot reach are not worth
@@ -472,6 +626,7 @@ pub async fn search(query: Query) -> Result<Page, String> {
     if is_country_code(&code) {
         params.push(("countrycode", code));
     }
+    quality_params(&query, &mut params);
 
     let body = get("stations/search", &params, 20, MAX_BODY_BYTES).await?;
     let raw: Vec<Raw> = serde_json::from_str(&body)
@@ -504,6 +659,9 @@ pub async fn search(query: Query) -> Result<Page, String> {
             tag: first_tag(&tags, 24),
             tags,
             country: clean_name(text(&entry.country), 40),
+            // http(s) only, and by the same rule a stream URL is held to: the
+            // directory carries `file:` and worse in this field.
+            favicon: playable_url(text(&entry.favicon), "").unwrap_or_default(),
             codec: clean_name(text(&entry.codec), 12),
             bitrate: number(&entry.bitrate).clamp(0, 100_000) as u32,
             votes: number(&entry.votes),

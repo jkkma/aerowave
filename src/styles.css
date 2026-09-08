@@ -433,6 +433,10 @@ body.playing .orb.gl.kick { animation: orbhop .5s cubic-bezier(.3, .8, .35, 1); 
 
 .gel {
   position: relative;
+  /* The ::after gloss below is a stadium, and the button it sits in may be a
+     circle. Without this its corners stand outside the button - on the big
+     round one they read as a paler shape behind it. */
+  overflow: hidden;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -598,9 +602,9 @@ body.playing .gel.big { box-shadow: 0 0 26px rgba(120, 236, 255, .7), 0 2px 0 rg
 .pane.on { display: grid; }
 #pane-settings.on { grid-template-rows: auto 1fr; }
 #pane-browse.on { grid-template-rows: auto auto 1fr auto; }
-/* The two directory filters, sharing the row evenly. */
-.browsefilters { display: flex; gap: 8px; min-width: 0; }
-.browsefilters .field { flex: 1 1 0; min-width: 0; }
+/* The directory filters, two to a row and evenly split. */
+.browsefilters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-width: 0; }
+.browsefilters .field { min-width: 0; }
 
 .paneheader { display: flex; gap: 8px; align-items: center; min-width: 0; }
 .paneheader .field { min-width: 0; }

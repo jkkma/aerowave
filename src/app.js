@@ -147,12 +147,14 @@ function stopPlayback(quiet) {
   // otherwise look like a stream failure and start a reconnect.
   player.source = null;
   audio.pause();
+  audio.loop = false;
   audio.removeAttribute("src");
   audio.load();
   player.retries = 0;
   player.resolved = null;
   markPlaying(false);
   if (!quiet) {
+    setOrbArt(null);
     setStatus("STANDBY", "");
     $("#np-station").textContent = "NO CARRIER";
     $("#np-track").textContent = "Pick a station, choose a folder, or set an alarm.";
@@ -259,6 +261,7 @@ async function play(source, opts = {}) {
   const volume = opts.volume !== undefined ? opts.volume : state.settings.volume ?? 0.8;
 
   showNowPlaying(source.title, source.subtitle || "", source.meta || "");
+  setOrbArt(source);
   markPlaying(true);
 
   setStatus("CONNECTING", "busy");
@@ -283,6 +286,9 @@ async function play(source, opts = {}) {
   // every time it asks for a title.
   if (source.kind === "station") player.resolved = url;
   audio.src = url;
+  // A ringing alarm plays its one file over and over rather than moving on to
+  // another; anything else is heard once and then the `ended` handler decides.
+  audio.loop = !!source.loop;
   audio.volume = opts.fadeSecs > 0 ? 0.02 : volume;
   player.target = volume;
   try {
@@ -298,6 +304,88 @@ async function play(source, opts = {}) {
   if (opts.fadeSecs > 0) fadeTo(volume, opts.fadeSecs);
 
   if (source.kind === "station") startMetadata(source);
+}
+
+/*
+ * The orb wears the artwork of whatever station is playing.
+ *
+ * A station kept from BROWSE arrives with its own. The ones this app ships
+ * with, and anything typed in by hand, have none - so the directory is asked
+ * once what the station looks like and the answer is written back onto it.
+ *
+ * Either way the picture itself is fetched in Rust and handed over as a data
+ * URL: the content security policy allows the webview no remote images, and
+ * even with one a broadcaster's logo host almost never sends the CORS headers
+ * WebGL demands before it will upload a cross-origin image as a texture.
+ */
+
+/** Pictures already fetched, by the address they came from, oldest first. */
+const orbArt = new Map();
+/** How many to hold on to: a few hundred kilobytes each, so not many. */
+const ORB_ART_CACHE = 8;
+/** Stations already asked about, so one the directory has never heard of is
+ *  not looked up again every time it is played. */
+const orbAsked = new Set();
+/** What the orb is showing, and which request owns it. */
+let orbArtKey = "";
+let orbArtRequest = 0;
+
+async function setOrbArt(source) {
+  const orb = window.aerowaveOrb;
+  // No WebGL: the CSS orb underneath cannot wear anything.
+  if (!orb || !orb.ok) return;
+  // Only stations have artwork; a track off a folder puts the crystal back.
+  const station = source && source.kind === "station" ? source : null;
+  const key = station ? station.logo || station.url : "";
+  if (key === orbArtKey) return;
+  orbArtKey = key;
+  const mine = ++orbArtRequest;
+
+  if (!key) {
+    orb.setImage(null);
+    return;
+  }
+  if (orbArt.has(key)) {
+    orb.setImage(orbArt.get(key));
+    return;
+  }
+  // Back to the crystal while this one is on its way, rather than leaving the
+  // last station's picture up over the new station's name.
+  orb.setImage(null);
+
+  let picture = null;
+  let from = station.logo || "";
+  try {
+    if (from) {
+      picture = await invoke("station_logo", { url: from });
+    } else if (!orbAsked.has(key)) {
+      orbAsked.add(key);
+      const found = await invoke("station_art", { name: station.title, url: station.url });
+      if (found) {
+        from = found.url;
+        picture = found.picture;
+        // Written back so this costs one lookup ever, not one a play.
+        const saved = station.stationId ? stationById(station.stationId) : null;
+        if (saved) {
+          saved.logo = from;
+          saveStations();
+        }
+      }
+    }
+  } catch {
+    /* a station with no usable picture simply keeps the crystal */
+  }
+
+  if (picture) {
+    orbArt.set(key, picture);
+    // Under the address it was found at as well: the station now carries that
+    // one, so the next play looks itself up by it.
+    if (from && from !== key) orbArt.set(from, picture);
+    while (orbArt.size > ORB_ART_CACHE) orbArt.delete(orbArt.keys().next().value);
+  }
+  // A station switched away from while this was in flight owns nothing now.
+  if (mine !== orbArtRequest) return;
+  if (picture) orb.setImage(picture);
 }
 
 function startMetadata(source) {
@@ -482,6 +570,7 @@ function playStation(station, opts) {
       url: station.url,
       title: station.name,
       subtitle: state.settings.showMetadata === false ? station.url : "…",
+      logo: station.logo,
       stationId: station.id,
     },
     opts
@@ -549,6 +638,9 @@ let browseTag = "";
 let browseTagLabel = "";
 let browseCountry = "";
 let browseCountryLabel = "";
+/** The directory's own name for a format, and the floor a bitrate must clear. */
+let browseCodec = "";
+let browseBitrate = 0;
 /** The directory's global lists, and the narrowed ones it works out for us. */
 let browseCountries = null;
 let browseTags = null;
@@ -609,6 +701,8 @@ async function browseSearch(more) {
         name,
         tag: browseTag,
         countryCode: browseCountry,
+        codec: browseCodec,
+        bitrateMin: browseBitrate,
         limit: BROWSE_PAGE,
         offset: browseOffset,
       },
@@ -673,37 +767,71 @@ async function loadBrowseFilters() {
 }
 
 /** What one filter leaves available to the other, worked out once and kept. */
-async function facetsFor(query) {
+function facetsFor(query) {
   const key = JSON.stringify(query);
   if (!browseFacets.has(key)) {
-    browseFacets.set(key, await invoke("browse_facets", { query }));
+    // The request is kept, not the answer it settles on. Both dropdowns ask
+    // the moment a format is picked, and with nothing else set they ask the
+    // same question - which, cached only once it had returned, was a megabyte
+    // fetched twice. A failure is dropped so the next try is a real one.
+    browseFacets.set(
+      key,
+      invoke("browse_facets", { query }).catch((e) => {
+        browseFacets.delete(key);
+        throw e;
+      })
+    );
   }
   return browseFacets.get(key);
 }
 
 /**
- * Point each dropdown at what the other one leaves: the genres that a chosen
- * country actually has, and the countries that carry a chosen genre, both
- * counted within that filter rather than across the whole directory. With
- * nothing set on the other side, the directory's own list is the right list.
+ * A facet tally under everything else that is currently filtering.
+ *
+ * Only what is actually set goes in, so that the two dropdowns asking with
+ * nothing but a format between them build the same question - and so share
+ * the one tally rather than each fetching it.
+ */
+function facetQuery(base) {
+  const query = {};
+  if (base.countryCode) query.countryCode = base.countryCode;
+  if (base.tag) query.tag = base.tag;
+  if (browseCodec) query.codec = browseCodec;
+  if (browseBitrate) query.bitrateMin = browseBitrate;
+  return query;
+}
+
+/**
+ * Point each dropdown at what the others leave: the genres that a chosen
+ * country actually has, the countries that carry a chosen genre, and both of
+ * them counted under whatever format and bitrate are set. With nothing set
+ * anywhere else, the directory's own list is the right list.
+ *
+ * The counts have to answer for the format and bitrate too. "Paraguay (68)"
+ * beside a 320k filter is a promise the next search cannot keep - the country
+ * has 68 stations and none of them are 320k - and a filter that lies about
+ * what it will find is worse than one that offers no count at all.
  *
  * The tally is megabytes, so it happens only when a filter changes - not on
  * every search - and each answer is kept for the rest of the run.
  */
 async function refreshBrowseFilters() {
   const jobs = [];
+  // Format and bitrate narrow both lists, so neither global list is right
+  // any more once one of them is set.
+  const narrowed = !!browseCodec || browseBitrate > 0;
 
-  if (browseCountry) {
+  if (browseCountry || narrowed) {
     jobs.push(
-      narrow("#browse-tag", { countryCode: browseCountry }, (f) => f.tags, asTag, "genre")
+      narrow("#browse-tag", facetQuery({ countryCode: browseCountry }), (f) => f.tags, asTag, "genre")
     );
   } else if (browseTags) {
     setBrowseOptions("#browse-tag", browseTags, asTag, browseTag, browseTagLabel);
   }
 
-  if (browseTag) {
+  if (browseTag || narrowed) {
     jobs.push(
-      narrow("#browse-country", { tag: browseTag }, (f) => f.countries, asCountry, "country")
+      narrow("#browse-country", facetQuery({ tag: browseTag }), (f) => f.countries, asCountry, "country")
     );
   } else if (browseCountries) {
     setBrowseOptions("#browse-country", browseCountries, asCountry, browseCountry, browseCountryLabel);
@@ -787,6 +915,7 @@ function previewBrowse(st) {
     // start. Plenty of Shoutcast servers answer `ICY 200 OK` rather than an
     // HTTP status line, and the metadata probe cannot read those at all.
     meta: [st.codec, st.bitrate ? st.bitrate + " kbps" : ""].filter(Boolean).join("  ·  "),
+    logo: st.favicon,
     stationId: null,
   });
   if (st.hls) say("that one is HLS — the player has no decoder for it", "bad");
@@ -800,7 +929,14 @@ function addBrowseStation(st) {
   // The genre that was searched for beats the directory's own first tag: it
   // is what this station is to the person keeping it.
   const tag = browseTagLabel || st.tag;
-  state.stations.push({ id: newId(), name: st.name, url: st.url, tag, favorite: false });
+  state.stations.push({
+    id: newId(),
+    name: st.name,
+    url: st.url,
+    tag,
+    logo: st.favicon,
+    favorite: false,
+  });
   saveStations();
   renderStations();
   renderBrowse();
@@ -1068,7 +1204,21 @@ function onAlarmFire(payload) {
     // A note means Rust could not use the alarm's own source and reached for
     // the backup folder; keep pulling from there for the rest of the ring.
     const folder = payload.note || !own ? BACKUP : own;
-    play({ kind: "folder", url: convertFileSrc(payload.path), title: payload.title, subtitle: payload.label, folder }, opts);
+    // The alarm's own file repeats until somebody answers it. The backup
+    // folder does not: it is already the sound of something having gone
+    // wrong, and one track of it looping is a worse thing to wake up to than
+    // the folder played through.
+    play(
+      {
+        kind: "folder",
+        url: convertFileSrc(payload.path),
+        title: payload.title,
+        subtitle: payload.label,
+        folder,
+        loop: folder !== BACKUP,
+      },
+      opts
+    );
     armRingWatchdog(
       8000,
       "That track would not play - playing the backup folder.",
@@ -1487,7 +1637,7 @@ function setKind(kind) {
   note.className = "editor-note";
   note.textContent =
     kind === "folder"
-      ? "One file is picked at random from the folder each time it rings."
+      ? "One file is picked at random from the folder each time it rings, and repeats until the alarm is answered."
       : "If the stream will not start within twelve seconds, the backup folder plays instead.";
   // Both kinds fall back to the backup folder, so both are silent without one.
   if (!state.settings.backupFolder) {
@@ -1557,7 +1707,7 @@ function openAlarmEditor(alarm) {
     source: { kind: "station", stationId: (state.stations[0] || {}).id },
     volume: 0.8,
     fadeSecs: 20,
-    snoozeMins: 9,
+    snoozeMins: 10,
     autoStopMins: 30,
     autoSnoozes: 0,
   };
@@ -1579,7 +1729,7 @@ function openAlarmEditor(alarm) {
   $("#al-volval").textContent = $("#al-volume").value;
   $("#al-volume").style.setProperty("--fill", $("#al-volume").value + "%");
   setSelectValue($("#al-fade"), base.fadeSecs ?? 20, (v) => v + " s");
-  setSelectValue($("#al-snooze"), base.snoozeMins ?? 9, (v) => v + " min");
+  setSelectValue($("#al-snooze"), base.snoozeMins ?? 10, (v) => v + " min");
   setSelectValue($("#al-autostop"), base.autoStopMins ?? 30, (v) =>
     v === 0 ? "never" : v + " min"
   );
@@ -1822,6 +1972,16 @@ function wire() {
   $("#browse-tag").addEventListener("change", (e) => {
     browseTag = e.target.value;
     browseTagLabel = labelOf(e.target);
+    refreshBrowseFilters();
+    browseSearch(false);
+  });
+  $("#browse-codec").addEventListener("change", (e) => {
+    browseCodec = e.target.value;
+    refreshBrowseFilters();
+    browseSearch(false);
+  });
+  $("#browse-bitrate").addEventListener("change", (e) => {
+    browseBitrate = +e.target.value || 0;
     refreshBrowseFilters();
     browseSearch(false);
   });

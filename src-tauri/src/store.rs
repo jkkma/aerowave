@@ -20,6 +20,10 @@ pub struct Station {
     pub url: String,
     #[serde(default)]
     pub tag: String,
+    /// The station's own artwork, as the directory had it. Empty for anything
+    /// typed in by hand, and for everything saved before this field existed.
+    #[serde(default)]
+    pub logo: String,
     #[serde(default)]
     pub favorite: bool,
 }
@@ -85,7 +89,7 @@ fn default_fade() -> u32 {
     20
 }
 fn default_snooze() -> u32 {
-    9
+    10
 }
 fn default_auto_stop() -> u32 {
     30
@@ -177,6 +181,10 @@ fn default_stations() -> Vec<Station> {
             name: name.to_string(),
             url: url.to_string(),
             tag: tag.to_string(),
+            // No artwork: these are hand-written, not directory entries, and
+            // pinning third-party image hosts into the seed list would only
+            // rot. Anything added from BROWSE brings its own.
+            logo: String::new(),
             favorite: i < 3,
         })
         .collect()
