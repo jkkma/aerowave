@@ -18,6 +18,10 @@ mod stream;
 #[path = "../src/relay.rs"]
 mod relay;
 
+#[allow(dead_code)]
+#[path = "../src/hls.rs"]
+mod hls;
+
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -104,8 +108,10 @@ async fn main() {
     // element on the other end, not another Rust client.
     if args.first().map(|a| a == "--serve").unwrap_or(false) {
         args.remove(0);
+        let hls_port = serve_hls_for_testing().await;
         println!("{{");
         println!("  \"port\": {},", relay.port);
+        println!("  \"hlsPort\": {},", hls_port);
         println!("  \"routes\": {{");
         let last = args.len().saturating_sub(1);
         for (i, url) in args.iter().enumerate() {
@@ -167,4 +173,254 @@ async fn main() {
     }
 
     println!("\n{played}/{} streamed audio", urls.len());
+
+    hls_checks().await;
+    probe_checks().await;
+}
+
+/// What the now-playing poll actually gets back. The third line of the display
+/// is built from name / bitrate / genre, and the second from the title.
+async fn probe_checks() {
+    println!("\nprobe_stream (what fills the now-playing lines):");
+    for url in [
+        "https://ice1.somafm.com/groovesalad-128-mp3",
+        "https://stream.radioparadise.com/mp3-192",
+        "https://icecast.radiofrance.fr/fip-midfi.mp3",
+        "https://stream0.wfmu.org/freeform-128k",
+        "https://strm112.1.fm/chilloutlounge_mobile_mp3",
+    ] {
+        let label = url.split('/').next_back().unwrap_or(url);
+        match stream::probe(url, true, false).await {
+            Ok(info) => println!(
+                "  {:<28} name={:<22} br={:<5} genre={:<14} title={}",
+                label,
+                info.name.unwrap_or_else(|| "-".into()).chars().take(20).collect::<String>(),
+                info.bitrate.unwrap_or_else(|| "-".into()),
+                info.genre.unwrap_or_else(|| "-".into()).chars().take(12).collect::<String>(),
+                info.title.unwrap_or_else(|| "(none)".into())
+            ),
+            Err(e) => println!("  {label:<28} FAILED: {e}"),
+        }
+    }
+}
+
+/// A stand-in for the app's `awhls` custom protocol, so a browser can drive
+/// the REAL hls.rs. Testing only: the app serves these over a Tauri protocol,
+/// which no other process can reach, whereas this is an open loopback port
+/// with permissive CORS. Never wire this into the app.
+///
+///   GET /open?u=<base64url station url>  -> session id
+///   GET /h/<session>?u=<base64url url>   -> the playlist or segment
+async fn serve_hls_for_testing() -> u16 {
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("could not bind the HLS test listener");
+    let port = listener.local_addr().unwrap().port();
+    let sessions = Arc::new(hls::Hls::default());
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let sessions = sessions.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let Ok(read) = socket.read(&mut buf).await else {
+                    return;
+                };
+                let head = String::from_utf8_lossy(&buf[..read]).to_string();
+                let mut parts = head.split_whitespace();
+                let method = parts.next().unwrap_or("");
+                let target = parts.next().unwrap_or("");
+                let cors = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Expose-Headers: X-Aerowave-Final\r\n";
+
+                if method == "OPTIONS" {
+                    let _ = socket
+                        .write_all(
+                            format!("HTTP/1.1 204 No Content\r\n{cors}Content-Length: 0\r\nConnection: close\r\n\r\n")
+                                .as_bytes(),
+                        )
+                        .await;
+                    return;
+                }
+
+                let (path, query) = target.split_once('?').unwrap_or((target, ""));
+                let param = |key: &str| -> Option<String> {
+                    query
+                        .split('&')
+                        .filter_map(|p| p.split_once('='))
+                        .find(|(k, _)| *k == key)
+                        .map(|(_, v)| v.to_string())
+                };
+                let decode = |v: &str| {
+                    use base64::Engine;
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .decode(v)
+                        .ok()
+                        .and_then(|b| String::from_utf8(b).ok())
+                };
+
+                if path == "/open" {
+                    let body = param("u")
+                        .and_then(|v| decode(&v))
+                        .and_then(|url| sessions.open(&url))
+                        .unwrap_or_default();
+                    let _ = socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\n{cors}Content-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                    return;
+                }
+
+                let session = path.trim_start_matches("/h/").to_string();
+                let url = param("u").and_then(|v| decode(&v)).unwrap_or_default();
+                match sessions.fetch(&session, &url, None).await {
+                    Ok(got) => {
+                        let head = format!(
+                            "HTTP/1.1 {} OK\r\n{cors}Content-Type: {}\r\nX-Aerowave-Final: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            got.status,
+                            got.content_type,
+                            got.final_url,
+                            got.body.len()
+                        );
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        let _ = socket.write_all(&got.body).await;
+                    }
+                    Err(e) => {
+                        eprintln!("hls test listener: {url}: {e}");
+                        let _ = socket
+                            .write_all(
+                                format!("HTTP/1.1 502 Bad Gateway\r\n{cors}Content-Length: 0\r\nConnection: close\r\n\r\n")
+                                    .as_bytes(),
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+/// Exercise hls.rs directly - no transport in the way. In the app these calls
+/// sit behind the `awhls` custom protocol; here they are just functions.
+async fn hls_checks() {
+    println!("\nHLS sub-resource fetching:");
+    // Two shapes on purpose: a media playlist that lists segments directly,
+    // and a master whose variants live on another host - which is the case
+    // that proves origin harvesting, since the session starts trusting only
+    // the station's own origin.
+    for station in [
+        "https://stream.radiofrance.fr/franceinter/franceinter_hifi.m3u8",
+        "https://live.m6radio.quortex.io/webM89Hc99XApzgfhXNX8ASN5/grouprtl/national/short/audio-64000/index.m3u8",
+    ] {
+        walk(station).await;
+    }
+
+    println!("\n  refusals:");
+    let sessions = hls::Hls::default();
+    let station = "https://stream.radiofrance.fr/franceinter/franceinter_hifi.m3u8";
+    let session = sessions.open(station).unwrap_or_default();
+    let cases: Vec<(&str, String, String)> = vec![
+        ("unknown session", "0000000000000000".to_string(), station.to_string()),
+        ("untrusted origin", session.clone(), "https://example.com/evil.m3u8".to_string()),
+        ("loopback target", session.clone(), "http://127.0.0.1:9/x.ts".to_string()),
+        ("private LAN target", session.clone(), "http://192.168.1.1/x.ts".to_string()),
+        ("file scheme", session.clone(), "file:///etc/passwd".to_string()),
+        ("closed session", session.clone(), station.to_string()),
+    ];
+    for (what, sess, url) in cases {
+        if what == "closed session" {
+            sessions.close(&session);
+        }
+        match sessions.fetch(&sess, &url, None).await {
+            Ok(got) => println!("  {:20} -> ALLOWED ({} B) <-- SHOULD NOT HAPPEN", what, got.body.len()),
+            Err(e) => println!("  {:20} -> refused: {}", what, e),
+        }
+    }
+}
+
+fn host_of(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Follow a station the way hls.js would: playlist, then variant if it is a
+/// master, then one real segment.
+async fn walk(station: &str) {
+    let sessions = hls::Hls::default();
+    let label = host_of(station);
+    println!("\n  {label}");
+    let Some(session) = sessions.open(station) else {
+        println!("    could not open a session");
+        return;
+    };
+
+    let mut url = station.to_string();
+    for hop in 0..3 {
+        let got = match sessions.fetch(&session, &url, None).await {
+            Ok(got) => got,
+            Err(e) => {
+                println!("    FAILED at hop {hop}: {e}");
+                return;
+            }
+        };
+        let cross = if host_of(&url) == label { "" } else { "  CROSS-HOST" };
+        let text = String::from_utf8_lossy(&got.body).to_string();
+
+        if !text.starts_with("#EXTM3U") {
+            let kind = if got.body.first() == Some(&0x47) {
+                "MPEG-TS"
+            } else if got.body.starts_with(b"ID3") {
+                "ID3 + elementary AAC"
+            } else {
+                "unrecognised"
+            };
+            println!(
+                "    segment   {} {:>7} B  {:<28} {}{}",
+                got.status, got.body.len(), got.content_type, kind, cross
+            );
+            return;
+        }
+
+        let master = text.contains("#EXT-X-STREAM-INF");
+        println!(
+            "    {:<9} {} {:>7} B  {:<28} {}{}",
+            if master { "master" } else { "media" },
+            got.status,
+            got.body.len(),
+            got.content_type,
+            if master { "variants" } else { "segments" },
+            cross
+        );
+
+        let base = match reqwest::Url::parse(&got.final_url) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let next = text
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('#'))
+            .and_then(|l| base.join(l).ok());
+        match next {
+            Some(n) => url = n.to_string(),
+            None => {
+                println!("    (nothing to follow)");
+                return;
+            }
+        }
+    }
 }

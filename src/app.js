@@ -124,6 +124,7 @@ const player = {
   probed: false,      // ...and whether a probe, rather than the station, chose it
   relayed: false,     // is <audio> playing through the local relay?
   triedDirect: false, // ...and have we already fallen back off it?
+  hls: false,         // is hls.js driving the element instead?
   get playing() {
     return !!this.source;
   },
@@ -158,6 +159,7 @@ function stopPlayback(quiet) {
   player.probed = false;
   player.relayed = false;
   player.triedDirect = false;
+  stopHls();
   markPlaying(false);
   if (!quiet) {
     setOrbArt(null);
@@ -252,6 +254,240 @@ function showNowPlaying(title, sub, meta) {
   if (meta !== undefined) $("#np-meta").textContent = meta || "";
 }
 
+/*
+ * HLS.
+ *
+ * WebView2 will not play an .m3u8 by itself - it reads the playlist, reports
+ * metadata, and then stalls at readyState 1 for ever. hls.js does the work
+ * instead: it fetches the playlists and segments over XHR, demuxes MPEG-TS or
+ * ADTS, and feeds the result to the element through Media Source Extensions.
+ *
+ * Every one of those fetches goes through Rust, the same as ordinary audio,
+ * and for the same reason - the request headers are ours to choose. But not
+ * through the loopback relay: XHR is not a media load, so it needs CORS and an
+ * origin the page is allowed to reach, and reaching a loopback port would have
+ * meant opening the policy to `http://127.0.0.1:*` - every service on this
+ * machine that happens to be bound to loopback. A Tauri custom protocol is one
+ * static origin instead, and no other process on the machine can knock on it.
+ * See src-tauri/src/hls.rs.
+ */
+
+let hlsPlayer = null;
+let hlsBase = null;
+/** Titles read out of the segments, waiting for playback to reach them. */
+let hlsTitles = [];
+/** What the demuxer says it is actually decoding, for the third line. */
+let hlsCodec = null;
+
+function b64url(text) {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  bytes.forEach((b) => (binary += String.fromCharCode(b)));
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * The loader hls.js uses for every fetch it makes.
+ *
+ * Two things it must get right. It copies the context rather than editing it,
+ * because hls.js indexes in-flight loads by `context.url` and would lose track
+ * of its own requests. And it puts the broadcaster's URL back into
+ * `response.url` before handing the reply on, because hls.js resolves every
+ * relative URI in a playlist against that - point it at us and the next
+ * request would be for a segment relative to our own origin.
+ */
+function relayLoader(Base) {
+  return class extends Base {
+    load(context, config, callbacks) {
+      const upstream = context.url;
+      const proxied = Object.assign({}, context, {
+        url: hlsBase + "?u=" + b64url(upstream),
+      });
+      const wrapped = Object.assign({}, callbacks, {
+        onSuccess: (response, stats, _ctx, networkDetails) => {
+          let final = null;
+          try {
+            final = networkDetails && networkDetails.getResponseHeader
+              ? networkDetails.getResponseHeader("X-Aerowave-Final")
+              : null;
+          } catch { /* not an XHR we can read headers off */ }
+          response.url = final || upstream;
+          callbacks.onSuccess(response, stats, context, networkDetails);
+        },
+        onError: (error, _ctx, networkDetails, stats) =>
+          callbacks.onError(error, context, networkDetails, stats),
+        onTimeout: (stats, _ctx, networkDetails) =>
+          callbacks.onTimeout(stats, context, networkDetails),
+      });
+      if (callbacks.onProgress) {
+        wrapped.onProgress = (stats, _ctx, data, networkDetails) =>
+          callbacks.onProgress(stats, context, data, networkDetails);
+      }
+      super.load(proxied, config, wrapped);
+    }
+  };
+}
+
+/**
+ * ID3v2 out of a segment. hls.js parses these internally but does not export
+ * the parser, and its own has two faults worth avoiding: it decodes every text
+ * frame as UTF-8 whatever the encoding byte says, and it reads ID3v2.3 frame
+ * sizes as synchsafe when they are plain big-endian - one frame of 128 bytes
+ * or more and the rest of the tag is misread.
+ */
+function id3Text(body) {
+  if (!body.length) return "";
+  const encoding = body[0];
+  const label =
+    encoding === 0 ? "iso-8859-1" : encoding === 1 ? "utf-16" : encoding === 2 ? "utf-16be" : "utf-8";
+  const data = body.subarray(1);
+  let text;
+  try {
+    text = new TextDecoder(label).decode(data);
+  } catch {
+    text = new TextDecoder().decode(data);
+  }
+  return text.replace(/\0+$/, "").trim();
+}
+
+function readId3(bytes) {
+  const found = {};
+  let at = 0;
+  // One sample can hold several tags end to end - the RFC 8216 timestamp tag
+  // and then the broadcaster's own.
+  while (at + 10 <= bytes.length && bytes[at] === 0x49 && bytes[at + 1] === 0x44 && bytes[at + 2] === 0x33) {
+    const major = bytes[at + 3];
+    const size =
+      (bytes[at + 6] << 21) | (bytes[at + 7] << 14) | (bytes[at + 8] << 7) | bytes[at + 9];
+    const end = Math.min(at + 10 + size, bytes.length);
+    let p = at + 10;
+    if (bytes[at + 5] & 0x40) {
+      // Extended header: skip whatever it says it is.
+      const ext =
+        major >= 4
+          ? (bytes[p] << 21) | (bytes[p + 1] << 14) | (bytes[p + 2] << 7) | bytes[p + 3]
+          : ((bytes[p] << 24) | (bytes[p + 1] << 16) | (bytes[p + 2] << 8) | bytes[p + 3]) >>> 0;
+      p += major >= 4 ? ext : ext + 4;
+    }
+    while (p + 10 <= end && bytes[p] !== 0) {
+      const id = String.fromCharCode(bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]);
+      const frameSize =
+        major >= 4
+          ? (bytes[p + 4] << 21) | (bytes[p + 5] << 14) | (bytes[p + 6] << 7) | bytes[p + 7]
+          : ((bytes[p + 4] << 24) | (bytes[p + 5] << 16) | (bytes[p + 6] << 8) | bytes[p + 7]) >>> 0;
+      if (frameSize <= 0 || p + 10 + frameSize > end) break;
+      if (id === "TIT2" || id === "TPE1") {
+        found[id] = id3Text(bytes.subarray(p + 10, p + 10 + frameSize));
+      }
+      p += 10 + frameSize;
+    }
+    at = end;
+  }
+  return found;
+}
+
+/** Tear down an Hls instance and let Rust forget the session. */
+function stopHls() {
+  hlsTitles = [];
+  hlsCodec = null;
+  if (hlsPlayer) {
+    try {
+      hlsPlayer.destroy();
+    } catch { /* already gone */ }
+    hlsPlayer = null;
+  }
+  if (hlsBase) {
+    const session = hlsBase.split("/").pop();
+    hlsBase = null;
+    invoke("hls_close", { session }).catch(() => {});
+  }
+  player.hls = false;
+}
+
+/**
+ * Point hls.js at a playlist. Returns false when it could not start, having
+ * already said why.
+ */
+async function startHls(source, url, generation) {
+  if (typeof Hls === "undefined" || !Hls.isSupported()) {
+    failure("this build cannot play HLS", { fatal: true });
+    return false;
+  }
+  let base = null;
+  try {
+    base = await invoke("hls_session", { url });
+  } catch { /* falls through to the null check */ }
+  if (superseded(generation) || player.source !== source) return false;
+  if (!base) {
+    failure("could not open an HLS session", { fatal: true });
+    return false;
+  }
+  hlsBase = base;
+
+  const hls = new Hls({
+    // The default worker is spawned from a blob: URL, which this app's policy
+    // refuses - and it fails silently rather than throwing, which would look
+    // like a station that simply never starts. Demuxing one audio stream on
+    // the main thread costs nothing worth having.
+    enableWorker: false,
+    loader: relayLoader(Hls.DefaultConfig.loader),
+  });
+  hlsPlayer = hls;
+  player.hls = true;
+
+  hls.on(Hls.Events.ERROR, (_event, data) => {
+    if (hlsPlayer !== hls || superseded(generation) || player.source !== source) return;
+    // hls.js spends its own retry budget - two for a playlist, six for a
+    // fragment - before it calls anything fatal, so by here it has already
+    // tried. Non-fatal errors are its business, not ours.
+    if (!data || !data.fatal) return;
+    failure("HLS " + (data.details || data.type || "error"));
+  });
+
+  hls.on(Hls.Events.FRAG_PARSING_METADATA, (_event, data) => {
+    if (hlsPlayer !== hls || !data || !data.samples) return;
+    for (const sample of data.samples) {
+      if (!sample || !sample.data) continue;
+      const tags = readId3(sample.data);
+      const title = [tags.TPE1, tags.TIT2].filter(Boolean).join(" — ");
+      // These arrive when the segment is parsed, which is up to half a minute
+      // before it is audible, so they queue against the playback clock rather
+      // than going straight on screen.
+      if (title) hlsTitles.push({ at: sample.pts, title });
+    }
+    hlsTitles.sort((a, b) => a.at - b.at);
+  });
+
+  // startMetadata() is skipped for HLS - the poll asks probe_stream, and an
+  // .m3u8 resolves with no name, bitrate or genre to report. hls.js has been
+  // told all of it by the playlist, so the third line comes from there instead.
+  const showLevel = () => {
+    if (hlsPlayer !== hls) return;
+    const levels = hls.levels || [];
+    const level = levels[hls.currentLevel >= 0 ? hls.currentLevel : 0];
+    const bits = [];
+    // A master playlist declares BANDWIDTH; a bare media playlist declares
+    // nothing at all, which is most radio, so neither of these is a given.
+    if (level && level.bitrate) bits.push(Math.round(level.bitrate / 1000) + " kbps");
+    const codec = (level && level.audioCodec) || hlsCodec;
+    if (codec) bits.push(codec);
+    bits.push("HLS");
+    $("#np-meta").textContent = bits.join("  ·  ");
+  };
+  hls.on(Hls.Events.MANIFEST_PARSED, showLevel);
+  hls.on(Hls.Events.LEVEL_SWITCHED, showLevel);
+  // The playlist may say nothing about the codec; the demuxer always knows.
+  hls.on(Hls.Events.BUFFER_CODECS, (_event, data) => {
+    if (hlsPlayer !== hls) return;
+    if (data && data.audio && data.audio.codec) hlsCodec = data.audio.codec;
+    showLevel();
+  });
+
+  hls.loadSource(url);
+  hls.attachMedia(audio);
+  return true;
+}
+
 /**
  * What to hand <audio>.
  *
@@ -298,13 +534,16 @@ async function play(source, opts = {}) {
   setStatus("CONNECTING", "busy");
   let url = source.url;
 
+  let useHls = false;
   if (source.kind === "station" && /\.(pls|m3u|m3u8|asx)(\?|$)/i.test(url)) {
-    // A playlist file cannot be handed to <audio> - resolve it first.
+    // A playlist file cannot be handed to <audio> - resolve it first, and
+    // find out which of the two players it wants on the way past.
     try {
       const info = await invoke("probe_stream", { url, wantTitle: false });
       url = info.url;
       player.resolved = info.url;
       player.probed = true;
+      useHls = !!info.hls;
       if (info.warning) say(info.warning, "bad");
     } catch (e) {
       if (!superseded(generation)) failure(String(e));
@@ -317,10 +556,16 @@ async function play(source, opts = {}) {
   // broadcaster directly - it wants a title, not audio - so it must not be
   // pointed at the relay, which would only hand it back its own stream.
   if (source.kind === "station") player.resolved = url;
-  const playUrl = await playable(source, url);
-  if (superseded(generation)) return;
-  player.relayed = playUrl !== url;
-  audio.src = playUrl;
+  if (useHls) {
+    // hls.js sets the element's source itself, to a MediaSource blob.
+    if (!(await startHls(source, url, generation))) return;
+    if (superseded(generation)) return;
+  } else {
+    const playUrl = await playable(source, url);
+    if (superseded(generation)) return;
+    player.relayed = playUrl !== url;
+    audio.src = playUrl;
+  }
   // A ringing alarm plays its one file over and over rather than moving on to
   // another; anything else is heard once and then the `ended` handler decides.
   audio.loop = !!source.loop;
@@ -338,7 +583,7 @@ async function play(source, opts = {}) {
   if (superseded(generation)) return;
   if (opts.fadeSecs > 0) fadeTo(volume, opts.fadeSecs);
 
-  if (source.kind === "station") startMetadata(source);
+  if (source.kind === "station" && !player.hls) startMetadata(source);
 }
 
 /*
@@ -536,10 +781,18 @@ function failure(detail, opts = {}) {
       } catch { /* stay with the original */ }
     }
     const upstream = player.resolved || source.url;
-    const playUrl = player.triedDirect ? upstream : await playable(source, upstream);
-    if (superseded(generation) || player.source !== source) return;
-    player.relayed = playUrl !== upstream;
-    audio.src = playUrl;
+    if (player.hls) {
+      // Start the HLS player over rather than assigning a source: the element
+      // plays a MediaSource, and pointing it at the .m3u8 would give it a
+      // playlist it cannot read.
+      stopHls();
+      if (!(await startHls(source, upstream, generation))) return;
+    } else {
+      const playUrl = player.triedDirect ? upstream : await playable(source, upstream);
+      if (superseded(generation) || player.source !== source) return;
+      player.relayed = playUrl !== upstream;
+      audio.src = playUrl;
+    }
     audio.play().catch((e) => {
       if (superseded(generation) || isAbort(e)) return;
       failure(String(e && e.message ? e.message : e));
@@ -575,8 +828,21 @@ audio.addEventListener("playing", () => {
 });
 // The only event that means audio is genuinely coming out, rather than that
 // something was asked to start.
+let lastMediaTime = 0;
 audio.addEventListener("timeupdate", () => {
-  if (player.source) player.lastProgress = Date.now();
+  if (!player.source) return;
+  const now = audio.currentTime;
+  // Under HLS the element is fed by hls.js, which writes currentTime itself to
+  // step over gaps - and every write fires this. Only forward motion counts as
+  // audio having arrived, or the alarm watchdog would be reassured by a stream
+  // that had stopped.
+  if (!player.hls || now > lastMediaTime) player.lastProgress = Date.now();
+  lastMediaTime = now;
+
+  if (!hlsTitles.length) return;
+  let due = null;
+  while (hlsTitles.length && hlsTitles[0].at <= now + 0.25) due = hlsTitles.shift().title;
+  if (due) $("#np-track").textContent = due;
 });
 audio.addEventListener("waiting", () => player.source && setStatus("BUFFERING", "busy"));
 audio.addEventListener("stalled", () => player.source && setStatus("STALLED", "busy"));
@@ -595,7 +861,10 @@ audio.addEventListener("error", () => {
   // the engine really will refuse however many times we ask.
   if (err && err.code === 4) {
     const source = player.source;
-    if (source && source.kind === "station" && player.relayed && !player.triedDirect) {
+    // Not while hls.js is driving: the element's source is a MediaSource blob,
+    // and fallBackToDirect would hand it the .m3u8 that WebView2 cannot read
+    // in the first place.
+    if (source && source.kind === "station" && player.relayed && !player.triedDirect && !player.hls) {
       fallBackToDirect(source, playGeneration);
       return;
     }
@@ -987,7 +1256,7 @@ function previewBrowse(st) {
     logo: st.favicon,
     stationId: null,
   });
-  if (st.hls) say("that one is HLS — the player has no decoder for it", "bad");
+  if (st.hls) say("HLS — this one plays through hls.js");
   // Nothing in the saved list is playing any more; both lists should say so.
   renderStations();
   renderBrowse();
@@ -1048,13 +1317,13 @@ function renderBrowse() {
     name.append(b, small);
     li.append(idx, name);
 
-    // Worth saying out loud rather than quietly dropping: the station may be
-    // perfectly good, but WebView2 has no HLS decoder to play it with.
+    // Still worth flagging, but as a fact rather than a warning: HLS plays,
+    // it just takes the other player to do it.
     if (st.hls) {
       const flag = document.createElement("span");
-      flag.className = "tag warn";
+      flag.className = "tag";
       flag.textContent = "HLS";
-      flag.title = "The player has no HLS decoder - this one will stay quiet.";
+      flag.title = "Played through hls.js rather than by the webview itself.";
       li.append(flag);
     }
 
@@ -2010,6 +2279,15 @@ function wire() {
       if (info.warning) {
         note.className = "editor-note bad";
         note.textContent = "⚠ " + info.warning + " — " + (bits || info.url);
+        return;
+      }
+
+      // An .m3u8 will never satisfy the decode check - the media element is
+      // not what plays it. Saying so beats reporting a working station as
+      // broken because the wrong player was asked.
+      if (info.hls) {
+        note.className = "editor-note good";
+        note.textContent = "✓ HLS — plays through hls.js — " + (bits || info.url);
         return;
       }
 
