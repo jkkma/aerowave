@@ -154,11 +154,18 @@ impl Default for AppData {
     }
 }
 
-/// Stations the app ships with. Every one of these was checked by loading it
-/// in a Chromium media element, not just by fetching it: plenty of stations
-/// answer a plain HTTP request perfectly well and are still refused by the
-/// media element (SomaFM's mounts, for one), and a station that cannot play
-/// is worse than no station at all.
+/// Stations the app ships with, each checked by loading it in a Chromium media
+/// element rather than merely by fetching it: a server answering and a player
+/// playing are different questions, and a station that cannot play is worse
+/// than no station at all.
+///
+/// SomaFM was named here as a station that answers perfectly well and is
+/// refused by the media element anyway. That was wrong about why - it answers
+/// `403 text/html` to the webview's User-Agent and `200 audio/mpeg` to an
+/// ordinary browser's, and `MEDIA_ERR_SRC_NOT_SUPPORTED` is all the element
+/// can say about an error page. Stations play through the relay now, which
+/// asks in terms a broadcaster will serve, so that whole class has stopped
+/// being a reason to leave one out.
 fn default_stations() -> Vec<Station> {
     let seed: &[(&str, &str, &str)] = &[
         ("FIP", "https://icecast.radiofrance.fr/fip-midfi.mp3", "eclectic"),

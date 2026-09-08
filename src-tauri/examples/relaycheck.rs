@@ -97,7 +97,27 @@ async fn main() {
     };
     println!("relay listening on 127.0.0.1:{}\n", relay.port);
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+
+    // --serve: route the given stations, print the table, and stay up, so a
+    // real browser can pull from the real relay. Verification wants a media
+    // element on the other end, not another Rust client.
+    if args.first().map(|a| a == "--serve").unwrap_or(false) {
+        args.remove(0);
+        println!("{{");
+        println!("  \"port\": {},", relay.port);
+        println!("  \"routes\": {{");
+        let last = args.len().saturating_sub(1);
+        for (i, url) in args.iter().enumerate() {
+            let comma = if i == last { "" } else { "," };
+            println!("    \"{}\": \"{}\"{}", url, relay.route(url), comma);
+        }
+        println!("  }}");
+        println!("}}");
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    }
     let defaults = vec![
         // The station the whole exercise is about.
         "https://ice1.somafm.com/groovesalad-128-mp3".to_string(),
