@@ -68,6 +68,11 @@ pub struct Alarm {
     pub snooze_mins: u32,
     #[serde(default = "default_auto_stop")]
     pub auto_stop_mins: u32,
+    /// How many times giving up snoozes the alarm instead of ending it. 0 -
+    /// the default - stops on the first give-up, which is what every alarm
+    /// written before this field existed did.
+    #[serde(default)]
+    pub auto_snoozes: u32,
 }
 
 fn yes() -> bool {

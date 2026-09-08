@@ -55,6 +55,7 @@ pub struct FirePayload {
     pub fade_secs: u32,
     pub snooze_mins: u32,
     pub auto_stop_mins: u32,
+    pub auto_snoozes: u32,
     /// Set when the intended source was unusable and the tone stood in.
     pub note: Option<String>,
 }
@@ -116,6 +117,7 @@ pub fn resolve_source(app: &AppHandle, alarm: &Alarm, trigger: &str) -> FirePayl
         fade_secs: alarm.fade_secs,
         snooze_mins: alarm.snooze_mins,
         auto_stop_mins: alarm.auto_stop_mins,
+        auto_snoozes: alarm.auto_snoozes,
         note: None,
     };
 

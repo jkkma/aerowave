@@ -184,6 +184,28 @@ function fadeTo(target, seconds) {
 }
 
 /**
+ * Ramp the element volume down to silence over `seconds`.
+ *
+ * The curve is the fade-in's mirrored: away quickly while it is still loud,
+ * where a change in level is least noticeable, then a long quiet tail. The
+ * caller decides what happens at the end - this only moves the knob, so a
+ * fade that gets cancelled halfway cannot take the ending with it.
+ */
+function fadeOut(seconds) {
+  clearInterval(player.fadeTimer);
+  const from = audio.volume;
+  const started = Date.now();
+  player.fadeTimer = setInterval(() => {
+    const t = Math.min(1, (Date.now() - started) / (seconds * 1000));
+    const away = 1 - t;
+    audio.volume = Math.min(1, Math.max(0, from * away * away));
+    if (t < 1) return;
+    clearInterval(player.fadeTimer);
+    player.fadeTimer = null;
+  }, 120);
+}
+
+/**
  * Will the player actually decode this? The Rust probe only proves the
  * server answers - plenty of stations serve a perfectly good HTTP response
  * that the media element then refuses. This is the check that counts.
@@ -322,6 +344,13 @@ function failure(detail, opts = {}) {
   const source = player.source;
   if (!source) return;
 
+  // Already receding: what failed was on its way to silence anyway, and a
+  // fallback would only come in at full volume over the fade.
+  if (givingUp) {
+    endGiveUp();
+    return;
+  }
+
   if (ringing && ringing.alarmId) {
     // An alarm must make a noise. Reach for the backup folder and say why.
     if (source.folder === BACKUP) {
@@ -416,6 +445,11 @@ audio.addEventListener("error", () => {
 });
 audio.addEventListener("ended", () => {
   if (!player.source) return;
+  // Mid fade-out: the next track would only bring the alarm back up again.
+  if (givingUp) {
+    endGiveUp();
+    return;
+  }
   if (player.source.kind === "folder") {
     // Local file finished: keep going with another random track.
     if (player.source.folder === BACKUP) {
@@ -499,6 +533,13 @@ function step(delta) {
 let ringing = null;
 let ringWatchdog = null;
 let autoStopTimer = null;
+/** Set from the moment the give-up timeout fires until the ring is over. */
+let givingUp = false;
+/** Give-ups this ring has turned into a snooze, and the alarm they belong to. */
+let autoSnoozed = 0;
+let autoSnoozedFor = null;
+/** How long an alarm takes to recede once it has given up. */
+const GIVE_UP_FADE_SECS = 6;
 
 /**
  * The fallback for everything: a random track from the backup folder. Used
@@ -592,7 +633,14 @@ function onAlarmFire(payload) {
   setSleep(0);
   clearInterval(ringWatchdog);
   clearTimeout(autoStopTimer);
+  givingUp = false;
   player.backupAttempts = 0;
+  // The auto-snooze budget belongs to the ring rather than to the alarm: a
+  // snooze carries the tally on, anything else starts it over.
+  if (payload.trigger !== "snooze" || payload.alarmId !== autoSnoozedFor) {
+    autoSnoozedFor = payload.alarmId;
+    autoSnoozed = 0;
+  }
   $("#ringcard").classList.remove("silent");
 
   const overlay = $("#ringing");
@@ -646,17 +694,64 @@ function onAlarmFire(payload) {
   }
 
   if (payload.autoStopMins > 0) {
-    autoStopTimer = setTimeout(() => {
-      say("alarm gave up after " + payload.autoStopMins + " minutes");
-      dismissRing();
-    }, payload.autoStopMins * 60000);
+    autoStopTimer = setTimeout(giveUp, payload.autoStopMins * 60000);
   }
+}
+
+/**
+ * The give-up timeout has run out. Let the sound recede rather than cutting
+ * it dead mid-bar - the last thing a room hears from an alarm nobody
+ * answered should not be a click - and then stop, or hand it to a snooze.
+ */
+function giveUp() {
+  if (!ringing || givingUp) return;
+  givingUp = true;
+  // On the way out. A fallback track started now would come in at full
+  // volume over the fade, and there is nothing left to rescue anyway.
+  clearInterval(ringWatchdog);
+  ringWatchdog = null;
+  // Nothing is making a sound - the silent card, or a source that never
+  // started - so there is nothing to let go of.
+  if (!player.playing) {
+    endGiveUp();
+    return;
+  }
+  fadeOut(GIVE_UP_FADE_SECS);
+  // The ending is its own timer rather than the fade's callback. Touching the
+  // volume knob cancels a fade, and a ring that then never ended would be a
+  // good deal worse than one that ends at the volume you just chose.
+  autoStopTimer = setTimeout(endGiveUp, GIVE_UP_FADE_SECS * 1000);
+}
+
+/** Should this give-up come back later instead of being the end of it? */
+function autoSnoozeDue() {
+  if (!ringing || autoSnoozed >= (ringing.autoSnoozes || 0)) return false;
+  // A test ring must not schedule a real one: nobody expects the alarm they
+  // auditioned at teatime to go off again ten minutes later.
+  return ringing.trigger !== "test";
+}
+
+/** The fade is over, or there was nothing to fade: snooze, or stop. */
+function endGiveUp() {
+  if (!ringing) return;
+  clearTimeout(autoStopTimer);
+  clearInterval(player.fadeTimer);
+  autoStopTimer = player.fadeTimer = null;
+  const mins = ringing.autoStopMins;
+  if (autoSnoozeDue()) {
+    autoSnoozed += 1;
+    snoozeRing("gave up after " + mins + " min");
+    return;
+  }
+  say("alarm gave up after " + mins + " minutes");
+  dismissRing();
 }
 
 function closeRingUi() {
   clearInterval(ringWatchdog);
   clearTimeout(autoStopTimer);
   ringWatchdog = autoStopTimer = null;
+  givingUp = false;
   $("#ringing").hidden = true;
   ringing = null;
 }
@@ -669,13 +764,14 @@ async function dismissRing() {
   refreshNextAlarm();
 }
 
-async function snoozeRing() {
+/** `why` is set when the alarm snoozed itself rather than being asked to. */
+async function snoozeRing(why) {
   if (!ringing) return;
   const { alarmId, snoozeMins } = ringing;
   closeRingUi();
   stopPlayback();
   await invoke("snooze_alarm", { alarmId, minutes: snoozeMins });
-  say("snoozed for " + snoozeMins + " minutes", "good");
+  say((why ? why + " - " : "") + "snoozed for " + snoozeMins + " minutes", "good");
   refreshNextAlarm();
 }
 
@@ -1050,6 +1146,19 @@ function setSelectValue(select, value, describe) {
   select.value = wanted;
 }
 
+/**
+ * Auto-snooze hangs off the give-up timeout: an alarm that never gives up
+ * never reaches it, so say so by greying it out rather than letting the
+ * setting sit there looking as though it does something.
+ */
+function syncAutoSnooze() {
+  const select = $("#al-autosnooze");
+  select.disabled = +$("#al-autostop").value === 0;
+  select.title = select.disabled
+    ? "Only applies when the alarm gives up"
+    : "When it gives up, snooze instead of stopping";
+}
+
 function openAlarmEditor(alarm) {
   editingAlarm = alarm || null;
   const now = new Date();
@@ -1063,6 +1172,7 @@ function openAlarmEditor(alarm) {
     fadeSecs: 20,
     snoozeMins: 9,
     autoStopMins: 30,
+    autoSnoozes: 0,
   };
 
   $("#al-hour").value = pad2(base.hour);
@@ -1086,6 +1196,10 @@ function openAlarmEditor(alarm) {
   setSelectValue($("#al-autostop"), base.autoStopMins ?? 30, (v) =>
     v === 0 ? "never" : v + " min"
   );
+  setSelectValue($("#al-autosnooze"), base.autoSnoozes ?? 0, (v) =>
+    v === 0 ? "off" : v + " times"
+  );
+  syncAutoSnooze();
 
   $("#al-delete").classList.toggle("hidden", !alarm);
   $("#alarm-editor").classList.remove("hidden");
@@ -1123,6 +1237,7 @@ function readAlarmEditor() {
       fadeSecs: +$("#al-fade").value,
       snoozeMins: +$("#al-snooze").value,
       autoStopMins: +$("#al-autostop").value,
+      autoSnoozes: +$("#al-autosnooze").value,
     },
   };
 }
@@ -1344,6 +1459,8 @@ function wire() {
       : "No playable audio in that folder — the backup folder would ring instead.";
   });
 
+  $("#al-autostop").addEventListener("change", syncAutoSnooze);
+
   $("#al-volume").addEventListener("input", (e) => {
     e.target.style.setProperty("--fill", e.target.value + "%");
     $("#al-volval").textContent = e.target.value;
@@ -1397,7 +1514,7 @@ function wire() {
   });
 
   // ringing overlay
-  $("#ring-snooze").addEventListener("click", snoozeRing);
+  $("#ring-snooze").addEventListener("click", () => snoozeRing());
   $("#ring-dismiss").addEventListener("click", dismissRing);
 
   // settings
