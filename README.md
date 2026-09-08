@@ -42,13 +42,18 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 **Alarms**
 
 - Any number of them, each with its own time, repeat days, source, volume,
-  fade-in, snooze length and give-up timeout.
+  fade-in, snooze length, give-up timeout and auto-snooze.
 - A ringing alarm keeps going until you dismiss it, or until its give-up
   timeout: anything from a minute to two hours, or `never` to make dismissing
   it the only way to stop it. It does not fall quiet between tracks either -
   when a local file ends the next random one starts. A value written straight
   into `aerowave.json` that the dropdown does not offer is kept rather than
   reset, so any number of minutes works.
+- Giving up fades out over six seconds instead of cutting the sound dead, and can
+  hand the alarm to a snooze rather than ending it: auto-snooze off, once, twice,
+  or as many rounds as you set. The tally belongs to the ring — dismissing it, or
+  the next day's alarm, starts the budget over. A test ring fades out too but
+  never schedules a real snooze.
 - No repeat days set means "once, at the next occurrence", and the alarm disables
   itself afterwards.
 - Fade-in ramps the volume over up to 90 s.
