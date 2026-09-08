@@ -36,7 +36,11 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   servers still speaking it are `http://` to a one.
 - A dropped stream reconnects four times with a lengthening backoff; from the
   second attempt it retries through the playlist-resolved URL.
-- Sleep timer: 15 / 30 / 60 / 90 minutes.
+- Sleep timer: 15 / 30 / 60 / 90 minutes, fading out over the last twenty seconds
+  so it arrives at silence as the countdown reaches zero rather than starting to
+  go quiet there. Turning it off mid-fade puts the volume back. It never touches
+  a ringing alarm: an alarm cancels the timer when it fires, and a timer that
+  lapses mid-ring lapses quietly.
 
 **Browsing**
 

@@ -1587,9 +1587,27 @@ function readAlarmEditor() {
 // --------------------------------------------------------- sleep timer ---
 
 let sleepUntil = 0;
+let sleepFading = false;
+/**
+ * How long the sound takes to go. It is subtracted from the time left rather
+ * than added to it: a thirty-minute timer should be silent at thirty minutes,
+ * not just starting to think about it.
+ */
+const SLEEP_FADE_SECS = 20;
+
+/** Put the volume back, if the timer had already started taking it away. */
+function endSleepFade() {
+  if (!sleepFading) return;
+  sleepFading = false;
+  clearInterval(player.fadeTimer);
+  player.fadeTimer = null;
+  if (player.playing) audio.volume = player.target;
+}
 
 function setSleep(mins) {
   sleepUntil = mins > 0 ? Date.now() + mins * 60000 : 0;
+  // Changing the timer - or turning it off - undoes a fade in progress.
+  endSleepFade();
   $$("#sleep-chips .chip").forEach((c) => c.classList.toggle("on", +c.dataset.mins === mins));
   $("#sleep-left").textContent = "";
   if (mins > 0) say("sleep timer set for " + mins + " minutes", "good");
@@ -1600,6 +1618,7 @@ setInterval(() => {
   const left = sleepUntil - Date.now();
   if (left <= 0) {
     sleepUntil = 0;
+    sleepFading = false;
     $$("#sleep-chips .chip").forEach((c) => c.classList.toggle("on", c.dataset.mins === "0"));
     $("#sleep-left").textContent = "";
     // Covers the timer set *while* an alarm rings, which onAlarmFire cannot:
@@ -1608,6 +1627,13 @@ setInterval(() => {
     stopPlayback();
     say("sleep timer — goodnight");
     return;
+  }
+  // Fade out over whatever is actually left rather than a fixed twenty
+  // seconds, so a tick that arrives late - the window was hidden, and
+  // WebView2 throttles timers there - still lands on silence at zero.
+  if (!sleepFading && !ringing && player.playing && left <= SLEEP_FADE_SECS * 1000) {
+    sleepFading = true;
+    fadeOut(Math.max(1, left / 1000));
   }
   $("#sleep-left").textContent = fmtDuration(left / 1000) + " LEFT";
 }, 1000);
