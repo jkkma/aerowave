@@ -8,6 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
@@ -193,6 +194,16 @@ pub fn portable_data_dir() -> Option<PathBuf> {
 
 pub struct Store {
     path: PathBuf,
+    /// Set when a config file existed but could not be used. Without it a
+    /// reset is indistinguishable from a first run, and on an alarm clock
+    /// that means every alarm quietly ceases to exist.
+    pub load_error: Option<String>,
+    /// Held across the whole of `save()` - snapshot, write, rename. The temp
+    /// file is shared, so without this the scheduler thread and the UI thread
+    /// can interleave two writes into it and rename the mixture into place,
+    /// producing exactly the unparseable file this struct then has to cope
+    /// with.
+    write_lock: Mutex<()>,
     pub data: Mutex<AppData>,
 }
 
@@ -203,18 +214,57 @@ impl Store {
             .unwrap_or_else(|| PathBuf::from("."));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("aerowave.json");
-        let data = fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| match serde_json::from_str::<AppData>(&raw) {
-                Ok(d) => Some(d),
+
+        let (data, load_error) = match fs::read_to_string(&path) {
+            // No file is the normal first run, and says nothing.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (AppData::default(), None),
+
+            // There but unreadable: it may be perfectly good and merely locked
+            // this once, so leave it exactly where it is and say so.
+            Err(e) => (
+                AppData::default(),
+                Some(format!(
+                    "Could not read {} ({e}). Showing defaults - your settings have not been \
+                     overwritten, but they will be as soon as anything is changed.",
+                    path.display()
+                )),
+            ),
+
+            Ok(raw) => match serde_json::from_str::<AppData>(&raw) {
+                Ok(d) => (d, None),
+                // Unparseable. Move it aside now, before the first settings
+                // change writes the defaults straight over it.
                 Err(e) => {
-                    eprintln!("aerowave: config unreadable ({e}), starting fresh");
-                    None
+                    let kept = dir.join(format!(
+                        "aerowave.bad-{}.json",
+                        Local::now().format("%Y%m%d-%H%M%S")
+                    ));
+                    let note = match fs::rename(&path, &kept) {
+                        Ok(()) => format!(
+                            "{} could not be parsed ({e}). It was kept as {} and the app \
+                             started from defaults.",
+                            path.display(),
+                            kept.display()
+                        ),
+                        Err(rename_err) => format!(
+                            "{} could not be parsed ({e}) and could not be set aside \
+                             ({rename_err}). The app started from defaults.",
+                            path.display()
+                        ),
+                    };
+                    (AppData::default(), Some(note))
                 }
-            })
-            .unwrap_or_default();
+            },
+        };
+
+        if let Some(note) = &load_error {
+            eprintln!("aerowave: {note}");
+        }
+
         Store {
             path,
+            load_error,
+            write_lock: Mutex::new(()),
             data: Mutex::new(data),
         }
     }
@@ -229,6 +279,8 @@ impl Store {
     }
 
     pub fn save(&self) -> Result<(), String> {
+        // One writer at a time, all the way through the rename.
+        let _writing = self.write_lock.lock().unwrap();
         let data = self.snapshot();
         let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
         let tmp = self.path.with_extension("json.tmp");

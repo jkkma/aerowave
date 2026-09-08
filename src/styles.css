@@ -745,6 +745,11 @@ body.playing .gel.big { box-shadow: 0 0 26px rgba(120, 236, 255, .7), 0 2px 0 rg
   user-select: text;
 }
 .wherefrom b { color: var(--alien); font-weight: 600; }
+.wherefrom.warn { color: var(--alert); }
+
+/* The backup folder is the end of every fallback chain; an empty one is not
+   the same kind of nothing as an empty shuffle folder. */
+.folderpath.warn { color: var(--alert); }
 
 /* ----------------------------------------------------------- editors --- */
 

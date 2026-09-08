@@ -67,19 +67,19 @@ pub struct NextAlarm {
 
 /// Try to turn a folder into a playable track, opening it to the asset
 /// protocol (whose scope starts empty) on the way out.
-fn track_from_folder(app: &AppHandle, dir: &std::path::Path) -> Option<(String, String)> {
+fn track_from_folder(app: &AppHandle, dir: &std::path::Path) -> Option<(String, String, usize)> {
     let state = app.state::<AppState>();
-    let track = library::pick_random(dir, &state.recent)?;
+    let (track, total) = library::pick_random(dir, &state.recent)?;
     let _ = app.asset_protocol_scope().allow_file(&track);
     let name = track
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "track".into());
-    Some((track.to_string_lossy().to_string(), name))
+    Some((track.to_string_lossy().to_string(), name, total))
 }
 
 /// The backup folder from settings, if it has anything playable in it.
-pub fn backup_track(app: &AppHandle) -> Option<(String, String)> {
+pub fn backup_track(app: &AppHandle) -> Option<(String, String, usize)> {
     let folder = app
         .state::<AppState>()
         .store
@@ -141,7 +141,7 @@ pub fn resolve_source(app: &AppHandle, alarm: &Alarm, trigger: &str) -> FirePayl
         AlarmSource::Folder { path } => {
             let dir = std::path::Path::new(path);
             match track_from_folder(app, dir) {
-                Some((track, name)) => {
+                Some((track, name, _)) => {
                     payload.kind = "folder".into();
                     payload.path = Some(track);
                     payload.title = Some(name);
@@ -160,7 +160,7 @@ pub fn resolve_source(app: &AppHandle, alarm: &Alarm, trigger: &str) -> FirePayl
 
     // First choice unusable - reach for the backup folder.
     match backup_track(app) {
-        Some((track, name)) => {
+        Some((track, name, _)) => {
             payload.kind = "folder".into();
             payload.path = Some(track);
             payload.title = Some(name);
