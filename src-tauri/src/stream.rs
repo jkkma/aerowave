@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use aerowave_core::icy::{
-    first_url_in_playlist, head_end, is_hls, looks_like_playlist, parse_head, scan_metadata,
+    first_url_in_playlist, head_end, is_hls, looks_like_playlist, parse_head, scan_metadata, Head,
 };
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -20,6 +20,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// Directories and broadcasters both like to know who is calling, and
 /// radio-browser asks for it outright. Carry the real version.
 pub const UA: &str = concat!("Aerowave/", env!("CARGO_PKG_VERSION"));
+/// What to tell a *broadcaster* we are.
+///
+/// Not the same thing at all. A number of stations decide whether to answer on
+/// the strength of the User-Agent alone - SomaFM returns `403 text/html` to
+/// anything it does not recognise and `200 audio/mpeg` to an ordinary browser,
+/// which was measured by sending the two down the same proxy and changing
+/// nothing else. An <audio> element cannot choose its own, which is half the
+/// reason the relay exists; on this side we can, so say something every
+/// broadcaster already serves.
+pub const STREAM_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0";
 const MAX_META_BYTES: usize = 512 * 1024;
 /// A response head is a few hundred bytes. Anything still writing one after
 /// this much is not going to stop on its own.
@@ -30,21 +40,39 @@ const MAX_HEAD_BYTES: usize = 8 * 1024;
 const MAX_PLAYLIST_BYTES: usize = 256 * 1024;
 
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static RELAY_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn build_client(read_timeout: Option<Duration>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent(STREAM_UA)
+        .connect_timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::limited(6));
+    if let Some(t) = read_timeout {
+        builder = builder.read_timeout(t);
+    }
+    builder.build().map_err(|e| e.to_string())
+}
 
 pub fn client() -> Result<reqwest::Client, String> {
     if let Some(existing) = CLIENT.get() {
         return Ok(existing.clone());
     }
-    let built = reqwest::Client::builder()
-        .user_agent(UA)
-        .connect_timeout(Duration::from_secs(8))
-        // A body that simply stops arriving must not swallow the whole
-        // twelve-second deadline while a caller waits on it.
-        .read_timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::limited(6))
-        .build()
-        .map_err(|e| e.to_string())?;
+    // A body that simply stops arriving must not swallow the whole
+    // twelve-second deadline while a caller waits on it.
+    let built = build_client(Some(Duration::from_secs(5)))?;
     Ok(CLIENT.get_or_init(|| built).clone())
+}
+
+/// The relay holds one connection open for as long as the station plays, so
+/// the probe's five-second read timeout would cut it off at the first quiet
+/// stretch. Longer, but not infinite: a broadcaster that stops sending should
+/// still end the connection so the player's reconnect can take over.
+fn relay_client() -> Result<reqwest::Client, String> {
+    if let Some(existing) = RELAY_CLIENT.get() {
+        return Ok(existing.clone());
+    }
+    let built = build_client(Some(Duration::from_secs(30)))?;
+    Ok(RELAY_CLIENT.get_or_init(|| built).clone())
 }
 
 /// reqwest's own Display is the outer wrapper - "error sending request for
@@ -132,8 +160,7 @@ fn content_type_of(resp: &reqwest::Response) -> String {
 }
 
 /// Follow playlist files until a direct stream turns up (max 3 hops).
-async fn resolve(url: &str) -> Result<Resolved, String> {
-    let client = client()?;
+async fn resolve(client: &reqwest::Client, url: &str) -> Result<Resolved, String> {
     let mut current = url.trim().to_string();
 
     for _ in 0..3 {
@@ -228,7 +255,7 @@ fn unproven(message: impl Into<String>) -> IcyFailure {
 /// Plaintext only. ICY predates TLS by decades and the servers still speaking
 /// it are `http://` to a one, so an `https://` failure is a real failure and
 /// is left to stand.
-async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure> {
+async fn icy_connect(url: &str) -> Result<(tokio::net::TcpStream, Head, Vec<u8>), IcyFailure> {
     let parsed = reqwest::Url::parse(url.trim()).map_err(|e| unproven(format!("{url}: {e}")))?;
     if parsed.scheme() != "http" {
         return Err(unproven("only a plaintext URL can be read this way"));
@@ -257,7 +284,7 @@ async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure
     // HTTP/1.0 is what the players these servers were written for send, and
     // it settles the question of keeping the connection open afterwards.
     let request = format!(
-        "GET {target} HTTP/1.0\r\nHost: {host}:{port}\r\nUser-Agent: {UA}\r\n\
+        "GET {target} HTTP/1.0\r\nHost: {host}:{port}\r\nUser-Agent: {STREAM_UA}\r\n\
          Icy-MetaData: 1\r\nConnection: close\r\n\r\n"
     );
     socket
@@ -284,9 +311,10 @@ async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure
         buf.extend_from_slice(&chunk[..read]);
     };
 
-    let head = String::from_utf8_lossy(&buf[..head_len]);
-    let head =
-        parse_head(&head).ok_or_else(|| unproven(format!("{host} sent no status line")))?;
+    let head = {
+        let text = String::from_utf8_lossy(&buf[..head_len]);
+        parse_head(&text).ok_or_else(|| unproven(format!("{host} sent no status line")))?
+    };
     // Only a station that really is speaking ICY. Anything answering HTTP was
     // reqwest's job, and it has already failed for a reason this cannot mend -
     // claiming it here would bury the real error under a worse one.
@@ -301,6 +329,16 @@ async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure
             message: format!("ICY {} from {host}", head.code),
         });
     }
+
+    // Whatever audio arrived alongside the head belongs to the caller.
+    let body = buf.split_off(body_at);
+    Ok((socket, head, body))
+}
+
+/// The Shoutcast v1 probe: connect as above, then read far enough into the
+/// audio to catch a title.
+async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure> {
+    let (mut socket, head, mut body) = icy_connect(url).await?;
 
     let mut info = StreamInfo {
         url: url.trim().to_string(),
@@ -317,8 +355,6 @@ async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure
         _ => return Ok(info),
     };
 
-    // Whatever audio arrived alongside the head counts towards the first block.
-    let mut body = buf.split_off(body_at);
     let mut cursor = 0usize;
     let mut blocks_read = 0;
     while body.len() < MAX_META_BYTES && blocks_read < 2 {
@@ -364,7 +400,7 @@ async fn http_probe(url: &str, want_title: bool, skip_resolve: bool) -> Result<S
         let final_url = resp.url().to_string();
         (resp, final_url, content_type)
     } else {
-        match resolve(url).await? {
+        match resolve(&client()?, url).await? {
             Resolved::Hls {
                 final_url,
                 content_type,
@@ -421,6 +457,65 @@ async fn http_probe(url: &str, want_title: bool, skip_resolve: bool) -> Result<S
         }
     }
     Ok(info)
+}
+
+/// An upstream the relay can pump from, however the server chose to answer.
+pub enum RelayBody {
+    Http(reqwest::Response),
+    /// Shoutcast v1: the socket, plus the audio that arrived with the head.
+    Icy {
+        socket: tokio::net::TcpStream,
+        primed: Vec<u8>,
+    },
+}
+
+pub struct RelaySource {
+    pub content_type: String,
+    pub body: RelayBody,
+}
+
+/// Open a station on behalf of the relay: playlists followed, redirects
+/// followed, Shoutcast v1 handled - the same three problems `probe` already
+/// solves, and the reason relaying is worth doing in Rust rather than in the
+/// webview.
+///
+/// HLS is refused outright. Splicing segments is a different job from copying
+/// bytes, and handing the playlist through unchanged breaks the one thing that
+/// did work: the media element can no longer resolve the segment URLs against
+/// the relay's own origin.
+pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
+    let http = match resolve(&relay_client()?, url).await {
+        Ok(Resolved::Stream {
+            resp, content_type, ..
+        }) => {
+            let content_type = if content_type.is_empty() {
+                "audio/mpeg".to_string()
+            } else {
+                content_type
+            };
+            return Ok(RelaySource {
+                content_type,
+                body: RelayBody::Http(resp),
+            });
+        }
+        Ok(Resolved::Hls { .. }) => {
+            return Err("HLS playlist - WebView2 cannot play this natively".into())
+        }
+        Err(e) => e,
+    };
+    // Same order as `probe_inner`: HTTP first, and the hand-rolled ICY path
+    // only once the HTTP client has failed.
+    match icy_connect(url).await {
+        Ok((socket, head, primed)) => Ok(RelaySource {
+            content_type: head
+                .get("content-type")
+                .map(|c| c.to_ascii_lowercase())
+                .unwrap_or_else(|| "audio/mpeg".to_string()),
+            body: RelayBody::Icy { socket, primed },
+        }),
+        Err(icy) if icy.proven => Err(icy.message),
+        Err(_) => Err(http),
+    }
 }
 
 /// Probe with a hard deadline - a stalled radio server must not leave the

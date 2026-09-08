@@ -25,6 +25,11 @@ name = "aerowave"
 path = "src/main.rs"
 test = false
 
+# The relaycheck example runs the relay outside the app, so it needs a
+# runtime of its own. Dev-only: none of this reaches a release build.
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

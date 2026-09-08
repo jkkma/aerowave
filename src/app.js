@@ -120,7 +120,10 @@ const player = {
   retryTimer: null,
   backupAttempts: 0,  // backup tracks that have failed for one ringing alarm
   lastProgress: 0,    // when audio last actually arrived, for the ring watchdog
-  resolved: null,     // stream URL after following a playlist, if different
+  resolved: null,     // the station's own stream URL, after any playlist hop
+  probed: false,      // ...and whether a probe, rather than the station, chose it
+  relayed: false,     // is <audio> playing through the local relay?
+  triedDirect: false, // ...and have we already fallen back off it?
   get playing() {
     return !!this.source;
   },
@@ -152,6 +155,9 @@ function stopPlayback(quiet) {
   audio.load();
   player.retries = 0;
   player.resolved = null;
+  player.probed = false;
+  player.relayed = false;
+  player.triedDirect = false;
   markPlaying(false);
   if (!quiet) {
     setOrbArt(null);
@@ -247,6 +253,31 @@ function showNowPlaying(title, sub, meta) {
 }
 
 /**
+ * What to hand <audio>.
+ *
+ * Every station goes through the loopback relay. A media element cannot choose
+ * its own request headers, and enough broadcasters decide whether to answer on
+ * the strength of them that going direct is the thing that fails - SomaFM
+ * answers 403 to the webview's User-Agent and 200 to an ordinary browser's.
+ * Rust can say whatever gets served, and resolves playlists, redirects and
+ * Shoutcast v1 on the way past. See src-tauri/src/relay.rs.
+ *
+ * Files are not relayed: they are already playable and there is nothing to
+ * negotiate. Nor is anything relayed when the listener would not bind, in
+ * which case this hands back the URL untouched and playback is what it was
+ * before the relay existed.
+ */
+async function playable(source, url) {
+  if (source.kind !== "station") return url;
+  try {
+    const relayed = await invoke("relay_url", { url });
+    return relayed || url;
+  } catch {
+    return url;
+  }
+}
+
+/**
  * Start a source. `opts.fadeSecs` ramps the volume in, `opts.volume`
  * overrides the master volume (alarms have their own). `source.meta` is what
  * to show on the third line until the stream itself says otherwise - some
@@ -273,6 +304,7 @@ async function play(source, opts = {}) {
       const info = await invoke("probe_stream", { url, wantTitle: false });
       url = info.url;
       player.resolved = info.url;
+      player.probed = true;
       if (info.warning) say(info.warning, "bad");
     } catch (e) {
       if (!superseded(generation)) failure(String(e));
@@ -281,11 +313,14 @@ async function play(source, opts = {}) {
     if (superseded(generation)) return;
   }
 
-  // Remember what was actually played. The metadata poll then has a direct
-  // URL and does not have to make the broadcaster serve the playlist again
-  // every time it asks for a title.
+  // Remember the station's own URL. The metadata poll talks to the
+  // broadcaster directly - it wants a title, not audio - so it must not be
+  // pointed at the relay, which would only hand it back its own stream.
   if (source.kind === "station") player.resolved = url;
-  audio.src = url;
+  const playUrl = await playable(source, url);
+  if (superseded(generation)) return;
+  player.relayed = playUrl !== url;
+  audio.src = playUrl;
   // A ringing alarm plays its one file over and over rather than moving on to
   // another; anything else is heard once and then the `ended` handler decides.
   audio.loop = !!source.loop;
@@ -400,7 +435,7 @@ function startMetadata(source) {
       const info = await invoke("probe_stream", {
         url: player.resolved || source.url,
         wantTitle: true,
-        skipResolve: !!player.resolved,
+        skipResolve: player.probed,
       });
       if (player.source !== source) return;
       if (info.title) {
@@ -490,21 +525,47 @@ function failure(detail, opts = {}) {
     const generation = playGeneration;
     if (player.source !== source) return;
     // Second attempt onwards, try the playlist-resolved URL.
-    if (player.retries >= 2 && !player.resolved) {
+    if (player.retries >= 2 && !player.probed) {
       try {
         const info = await invoke("probe_stream", { url: source.url, wantTitle: false });
         // A stop during the probe must not write a resolved URL back into a
         // session that has already been torn down.
         if (superseded(generation) || player.source !== source) return;
         player.resolved = info.url;
+        player.probed = true;
       } catch { /* stay with the original */ }
     }
-    audio.src = player.resolved || source.url;
+    const upstream = player.resolved || source.url;
+    const playUrl = player.triedDirect ? upstream : await playable(source, upstream);
+    if (superseded(generation) || player.source !== source) return;
+    player.relayed = playUrl !== upstream;
+    audio.src = playUrl;
     audio.play().catch((e) => {
       if (superseded(generation) || isAbort(e)) return;
       failure(String(e && e.message ? e.message : e));
     });
   }, wait);
+}
+
+/**
+ * The relay could not serve this one. Try the station the old way, once.
+ *
+ * Relaying fixes more stations than it breaks, but it is one more thing
+ * between the player and the broadcaster: if the loopback listener has gone,
+ * or the relay cannot make sense of a source the media element could have
+ * handled by itself (an HLS playlist, which must not be relayed), then going
+ * direct is strictly better than going nowhere.
+ */
+function fallBackToDirect(source, generation) {
+  player.triedDirect = true;
+  player.relayed = false;
+  const upstream = player.resolved || source.url;
+  setStatus("RETRYING DIRECT", "busy");
+  audio.src = upstream;
+  audio.play().catch((e) => {
+    if (superseded(generation) || isAbort(e)) return;
+    failure(String(e && e.message ? e.message : e));
+  });
 }
 
 audio.addEventListener("playing", () => {
@@ -527,9 +588,17 @@ audio.addEventListener("error", () => {
     "net=" + audio.networkState,
     "src=" + (audio.currentSrc || "(empty)")
   );
-  // MEDIA_ERR_SRC_NOT_SUPPORTED: the engine will not play this however many
-  // times we ask. Skip the reconnects and go straight to the fallback.
+  // MEDIA_ERR_SRC_NOT_SUPPORTED. Not only "bad codec": the element reports
+  // it for an error page and for a refused connection too, which is why a
+  // relayed station that lands here is worth one attempt without the relay
+  // before it is written off. Reconnecting on the same URL is not - that part
+  // the engine really will refuse however many times we ask.
   if (err && err.code === 4) {
+    const source = player.source;
+    if (source && source.kind === "station" && player.relayed && !player.triedDirect) {
+      fallBackToDirect(source, playGeneration);
+      return;
+    }
     failure("this stream is not one the player can decode", { fatal: true });
     return;
   }
