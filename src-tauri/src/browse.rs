@@ -11,7 +11,7 @@
 //! saved is an ordinary station like any other.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use aerowave_core::directory::{
@@ -22,7 +22,7 @@ use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::stream::{client, describe};
+use crate::stream::{describe, UA};
 
 /// Round-robin DNS across every mirror: the one address that is always right.
 const SERVERS_URL: &str = "https://all.api.radio-browser.info/json/servers";
@@ -58,6 +58,39 @@ const TAG_LIMIT: u32 = 200;
 /// the directory asks, and keeps paging honest: mirrors sync on their own
 /// schedule, so a second page from another one can repeat half of the first.
 static HOST: Mutex<Option<String>> = Mutex::new(None);
+static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+/// The directory gets its own client rather than borrowing `stream`'s.
+///
+/// That one sets a five-second read timeout, which is right for a radio
+/// server - it should start talking at once - and wrong for a mirror running
+/// a five-thousand-row query before it writes a status line. reqwest applies
+/// that timeout to the wait for the response head, so sharing the client
+/// would quietly cap every request here at five seconds no matter what the
+/// per-request budget below says.
+fn client() -> Result<reqwest::Client, String> {
+    if let Some(existing) = CLIENT.get() {
+        return Ok(existing.clone());
+    }
+    let built = reqwest::Client::builder()
+        .user_agent(UA)
+        .connect_timeout(Duration::from_secs(8))
+        .read_timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(4))
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(CLIENT.get_or_init(|| built).clone())
+}
+
+/// Stop asking a mirror that would not answer. Without this one bad draw -
+/// or one momentary network gap at startup - sticks for the whole run and
+/// every search, dropdown and tally after it fails the same way.
+fn forget(host: &str) {
+    let mut slot = HOST.lock().unwrap();
+    if slot.as_deref() == Some(host) {
+        *slot = None;
+    }
+}
 
 #[derive(Deserialize, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -259,8 +292,16 @@ async fn get(
         .timeout(Duration::from_secs(seconds))
         .send()
         .await
-        .map_err(|e| format!("radio-browser: {}", describe(&e)))?;
+        .map_err(|e| {
+            forget(&host);
+            format!("radio-browser: {}", describe(&e))
+        })?;
     if !response.status().is_success() {
+        // A mirror having a bad day, rather than a question it refused: worth
+        // asking somebody else next time.
+        if response.status().is_server_error() {
+            forget(&host);
+        }
         return Err(format!(
             "radio-browser answered {} from {host}",
             response.status()

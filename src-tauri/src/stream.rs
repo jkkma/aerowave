@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Directories and broadcasters both like to know who is calling, and
 /// radio-browser asks for it outright. Carry the real version.
-const UA: &str = concat!("Aerowave/", env!("CARGO_PKG_VERSION"));
+pub const UA: &str = concat!("Aerowave/", env!("CARGO_PKG_VERSION"));
 const MAX_META_BYTES: usize = 512 * 1024;
 /// A response head is a few hundred bytes. Anything still writing one after
 /// this much is not going to stop on its own.
@@ -193,10 +193,32 @@ fn header(resp: &reqwest::Response, key: &str) -> Option<String> {
 async fn probe_inner(url: &str, want_title: bool, skip_resolve: bool) -> Result<StreamInfo, String> {
     match http_probe(url, want_title, skip_resolve).await {
         Ok(info) => Ok(info),
-        // The HTTP error is the one worth reporting: the hand-rolled attempt
-        // below only claims a station it can prove is speaking ICY, so when it
-        // fails as well it has nothing more useful to say.
-        Err(http_error) => icy_probe(url, want_title).await.map_err(|_| http_error),
+        Err(http_error) => match icy_probe(url, want_title).await {
+            Ok(info) => Ok(info),
+            // Past the head, the server has shown it really is speaking ICY
+            // and has said something specific - "ICY 401", the station is
+            // full. That beats hyper's complaint about a status line it could
+            // not read, which is true of every one of these servers.
+            Err(icy) if icy.proven => Err(icy.message),
+            // Before that point it has proved nothing, so the HTTP error is
+            // still the one worth showing.
+            Err(_) => Err(http_error),
+        },
+    }
+}
+
+/// Why the hand-rolled attempt gave up, and whether it got far enough for its
+/// own account of the failure to be worth more than the HTTP client's.
+struct IcyFailure {
+    proven: bool,
+    message: String,
+}
+
+/// Gave up before the server proved anything.
+fn unproven(message: impl Into<String>) -> IcyFailure {
+    IcyFailure {
+        proven: false,
+        message: message.into(),
     }
 }
 
@@ -206,12 +228,14 @@ async fn probe_inner(url: &str, want_title: bool, skip_resolve: bool) -> Result<
 /// Plaintext only. ICY predates TLS by decades and the servers still speaking
 /// it are `http://` to a one, so an `https://` failure is a real failure and
 /// is left to stand.
-async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, String> {
-    let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("{url}: {e}"))?;
+async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure> {
+    let parsed = reqwest::Url::parse(url.trim()).map_err(|e| unproven(format!("{url}: {e}")))?;
     if parsed.scheme() != "http" {
-        return Err("only a plaintext URL can be read this way".into());
+        return Err(unproven("only a plaintext URL can be read this way"));
     }
-    let host = parsed.host_str().ok_or("that URL has no host in it")?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| unproven("that URL has no host in it"))?;
     let port = parsed.port().unwrap_or(80);
     let mut target = parsed.path().to_string();
     if target.is_empty() {
@@ -227,8 +251,8 @@ async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, String> {
         tokio::net::TcpStream::connect((host, port)),
     )
     .await
-    .map_err(|_| format!("timed out connecting to {host}"))?
-    .map_err(|e| format!("could not connect to {host}: {e}"))?;
+    .map_err(|_| unproven(format!("timed out connecting to {host}")))?
+    .map_err(|e| unproven(format!("could not connect to {host}: {e}")))?;
 
     // HTTP/1.0 is what the players these servers were written for send, and
     // it settles the question of keeping the connection open afterwards.
@@ -239,7 +263,7 @@ async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, String> {
     socket
         .write_all(request.as_bytes())
         .await
-        .map_err(|e| format!("could not ask {host} for the stream: {e}"))?;
+        .map_err(|e| unproven(format!("could not ask {host} for the stream: {e}")))?;
 
     let mut buf: Vec<u8> = Vec::with_capacity(2048);
     let (head_len, body_at) = loop {
@@ -247,29 +271,35 @@ async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, String> {
             break found;
         }
         if buf.len() > MAX_HEAD_BYTES {
-            return Err(format!("{host} never finished its response head"));
+            return Err(unproven(format!("{host} never finished its response head")));
         }
         let mut chunk = [0u8; 2048];
         let read = socket
             .read(&mut chunk)
             .await
-            .map_err(|e| format!("{host} stopped talking: {e}"))?;
+            .map_err(|e| unproven(format!("{host} stopped talking: {e}")))?;
         if read == 0 {
-            return Err(format!("{host} closed before answering"));
+            return Err(unproven(format!("{host} closed before answering")));
         }
         buf.extend_from_slice(&chunk[..read]);
     };
 
     let head = String::from_utf8_lossy(&buf[..head_len]);
-    let head = parse_head(&head).ok_or_else(|| format!("{host} sent no status line"))?;
+    let head =
+        parse_head(&head).ok_or_else(|| unproven(format!("{host} sent no status line")))?;
     // Only a station that really is speaking ICY. Anything answering HTTP was
     // reqwest's job, and it has already failed for a reason this cannot mend -
     // claiming it here would bury the real error under a worse one.
     if !head.icy {
-        return Err(format!("{host} answered HTTP after all"));
+        return Err(unproven(format!("{host} answered HTTP after all")));
     }
+    // Past this point the server has shown what it is, so what it says about
+    // itself is worth reporting in place of the HTTP client's guess.
     if head.code != 200 {
-        return Err(format!("ICY {} from {host}", head.code));
+        return Err(IcyFailure {
+            proven: true,
+            message: format!("ICY {} from {host}", head.code),
+        });
     }
 
     let mut info = StreamInfo {
@@ -300,10 +330,12 @@ async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, String> {
             return Ok(info);
         }
         let mut chunk = [0u8; 8192];
-        let read = socket
-            .read(&mut chunk)
-            .await
-            .map_err(|e| format!("{host} stopped sending: {e}"))?;
+        // The head is already in hand at this point, so a stream that stops
+        // mid-metadata still hands back the bitrate and genre it gave us.
+        let read = match socket.read(&mut chunk).await {
+            Ok(read) => read,
+            Err(_) => break,
+        };
         if read == 0 {
             break;
         }
