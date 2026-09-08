@@ -63,12 +63,16 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 With [Scoop](https://scoop.sh):
 
 ```
-scoop bucket add ayylmao https://github.com/jkkma/nmkoder
+scoop bucket add ayylmao https://github.com/jkkma/scoop-ayylmao
 scoop install aerowave
 ```
 
 `ayylmao` is only what the bucket is called on your machine — Scoop takes whatever
 name you type there, and the bucket carries other apps besides this one.
+
+If you added that bucket before it moved out of `jkkma/nmkoder`, `scoop bucket rm
+ayylmao` first: adding the same bucket twice under two names is what produces
+Scoop's `WARN Multiple buckets contain manifest ...` line.
 
 Or portable: take the zip from [Releases](https://github.com/jkkma/aerowave/releases),
 unzip it anywhere and run `aerowave.exe`. Keep the `data` folder next to the exe and
