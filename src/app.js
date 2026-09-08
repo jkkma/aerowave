@@ -65,11 +65,14 @@ function setStatus(text, lamp) {
 }
 
 let statusMsgTimer = null;
-function say(msg, mood) {
+function say(msg, mood, sticky) {
   const el = $("#status-msg");
   el.textContent = msg.toUpperCase();
   el.style.color = mood === "bad" ? "var(--alert)" : mood === "good" ? "var(--alien)" : "";
   clearTimeout(statusMsgTimer);
+  // Most of these are passing notices. A few - settings that would not load -
+  // must not scroll past while the user is looking at another tab.
+  if (sticky) return;
   statusMsgTimer = setTimeout(() => {
     el.textContent = "READY";
     el.style.color = "";
@@ -112,6 +115,7 @@ const player = {
   retries: 0,
   retryTimer: null,
   backupAttempts: 0,  // backup tracks that have failed for one ringing alarm
+  lastProgress: 0,    // when audio last actually arrived, for the ring watchdog
   resolved: null,     // stream URL after following a playlist, if different
   get playing() {
     return !!this.source;
@@ -131,6 +135,9 @@ function clearTimers() {
 
 function stopPlayback(quiet) {
   playGeneration += 1;
+  // Load-bearing: without this an alarm firing while the radio is already
+  // playing inherits a fresh timestamp and its watchdog never trips.
+  player.lastProgress = 0;
   clearTimers();
   // Drop the source first: tearing down the element fires events that would
   // otherwise look like a stream failure and start a reconnect.
@@ -219,6 +226,7 @@ async function play(source, opts = {}) {
   stopPlayback(true);
   const generation = playGeneration;
   player.source = source;
+  player.lastProgress = Date.now();
   player.retries = 0;
   const volume = opts.volume !== undefined ? opts.volume : state.settings.volume ?? 0.8;
 
@@ -354,6 +362,11 @@ audio.addEventListener("playing", () => {
   player.retries = 0;
   setStatus(player.source.kind === "folder" ? "PLAYING FILE" : "ON AIR", "on");
 });
+// The only event that means audio is genuinely coming out, rather than that
+// something was asked to start.
+audio.addEventListener("timeupdate", () => {
+  if (player.source) player.lastProgress = Date.now();
+});
 audio.addEventListener("waiting", () => player.source && setStatus("BUFFERING", "busy"));
 audio.addEventListener("stalled", () => player.source && setStatus("STALLED", "busy"));
 audio.addEventListener("error", () => {
@@ -464,7 +477,9 @@ let autoStopTimer = null;
  * during ordinary listening.
  */
 async function playBackupTrack(reason, opts = {}) {
-  clearTimeout(ringWatchdog);
+  // Give this attempt its own quiet window. The watchdog stays armed on
+  // purpose, so it guards the backup track too.
+  player.lastProgress = Date.now();
   try {
     const pick = await invoke("backup_track");
     const title = pick.name.replace(/\.[^.]+$/, "");
@@ -496,6 +511,8 @@ async function playBackupTrack(reason, opts = {}) {
 
 /** Nothing at all can be played: keep the alarm on screen and say why. */
 function goSilent(why) {
+  clearInterval(ringWatchdog);
+  ringWatchdog = null;
   stopPlayback(true);
   markPlaying(false);
   $("#ringcard").classList.add("silent");
@@ -507,9 +524,42 @@ function goSilent(why) {
   $("#ring-note").textContent = (why ? why + ". " : "") + advice;
 }
 
+/**
+ * Watch a ringing alarm by whether audio is actually arriving.
+ *
+ * `audio.paused` goes false the moment `play()` is called, so a one-shot
+ * check on it is satisfied by any station that answers and then serves
+ * silence - which is precisely the failure this guard exists for. A progress
+ * timestamp catches that, and also a stream that starts and hangs mid-ring,
+ * which fires neither `error` nor `ended`.
+ */
+function armRingWatchdog(quietMs, note, reason, volume) {
+  clearInterval(ringWatchdog);
+  ringWatchdog = setInterval(() => {
+    if (!ringing) {
+      clearInterval(ringWatchdog);
+      ringWatchdog = null;
+      return;
+    }
+    if (Date.now() - player.lastProgress <= quietMs) return;
+
+    // One fallback per quiet window rather than one per tick.
+    player.lastProgress = Date.now();
+    if (player.backupAttempts++ >= 3) {
+      goSilent("nothing has made a sound after four attempts");
+      return;
+    }
+    $("#ring-note").textContent = note;
+    playBackupTrack(reason, { volume });
+  }, 1000);
+}
+
 function onAlarmFire(payload) {
   ringing = payload;
-  clearTimeout(ringWatchdog);
+  // Otherwise a sleep timer set before bed calls stopPlayback() mid-ring and
+  // leaves the overlay up over silence.
+  setSleep(0);
+  clearInterval(ringWatchdog);
   clearTimeout(autoStopTimer);
   player.backupAttempts = 0;
   $("#ringcard").classList.remove("silent");
@@ -534,13 +584,12 @@ function onAlarmFire(payload) {
     play({ kind: "station", url: payload.url, title: payload.title, subtitle: payload.label, stationId: null }, opts);
     // If the stream has not made a sound within twelve seconds, stop
     // waiting for it and ring something that definitely works.
-    ringWatchdog = setTimeout(() => {
-      if (ringing && audio.paused) {
-        $("#ring-note").textContent = "That stream did not start - playing the backup folder.";
-        player.backupAttempts = 0;
-        playBackupTrack("stream did not start", { volume: payload.volume });
-      }
-    }, 12000);
+    armRingWatchdog(
+      12000,
+      "That stream did not start - playing the backup folder.",
+      "stream did not start",
+      payload.volume
+    );
   } else if (payload.kind === "folder") {
     const alarm = state.alarms.find((a) => a.id === payload.alarmId);
     const own = alarm && alarm.source && alarm.source.kind === "folder" ? alarm.source.path : null;
@@ -548,12 +597,12 @@ function onAlarmFire(payload) {
     // the backup folder; keep pulling from there for the rest of the ring.
     const folder = payload.note || !own ? BACKUP : own;
     play({ kind: "folder", url: convertFileSrc(payload.path), title: payload.title, subtitle: payload.label, folder }, opts);
-    ringWatchdog = setTimeout(() => {
-      if (ringing && audio.paused) {
-        player.backupAttempts = 0;
-        playBackupTrack("that track would not play", { volume: payload.volume });
-      }
-    }, 8000);
+    armRingWatchdog(
+      8000,
+      "That track would not play - playing the backup folder.",
+      "that track would not play",
+      payload.volume
+    );
   } else {
     // Rust could not resolve any source at all.
     goSilent(payload.note || "no source available");
@@ -568,7 +617,7 @@ function onAlarmFire(payload) {
 }
 
 function closeRingUi() {
-  clearTimeout(ringWatchdog);
+  clearInterval(ringWatchdog);
   clearTimeout(autoStopTimer);
   ringWatchdog = autoStopTimer = null;
   $("#ringing").hidden = true;
@@ -778,23 +827,31 @@ function showFolderCounts(info, selector) {
 
 /** Fill in the folder rows from what is stored, with a fresh file count. */
 async function refreshFolderLabels() {
-  const pairs = [
-    [state.settings.shuffleFolder, "#folder-path"],
-    [state.settings.backupFolder, "#backup-path"],
+  // An unset shuffle folder costs nothing. An unset backup folder means every
+  // fallback in the app ends in silence, so the two must not look alike.
+  const rows = [
+    { path: state.settings.shuffleFolder, selector: "#folder-path", critical: false },
+    { path: state.settings.backupFolder, selector: "#backup-path", critical: true },
   ];
-  for (const [path, selector] of pairs) {
-    if (!path) {
-      $(selector).textContent = "No folder chosen";
+  for (const row of rows) {
+    const el = $(row.selector);
+    if (!row.path) {
+      el.textContent = row.critical
+        ? "No folder chosen — alarms have nothing to fall back on"
+        : "No folder chosen";
+      el.classList.toggle("warn", row.critical);
       continue;
     }
     try {
-      const info = await invoke("folder_info", { path });
-      $(selector).textContent = info.count
-        ? `${path}  —  ${info.count} playable file${info.count === 1 ? "" : "s"}`
-        : `${path}  —  nothing playable in here`;
-      $(selector).title = path;
+      const info = await invoke("folder_info", { path: row.path });
+      el.textContent = info.count
+        ? `${row.path}  —  ${info.count} playable file${info.count === 1 ? "" : "s"}`
+        : `${row.path}  —  nothing playable in here`;
+      el.classList.toggle("warn", row.critical && !info.count);
+      el.title = row.path;
     } catch {
-      $(selector).textContent = path + "  —  unreadable";
+      el.textContent = row.path + "  —  unreadable";
+      el.classList.toggle("warn", row.critical);
     }
   }
 }
@@ -895,6 +952,12 @@ function setKind(kind) {
     kind === "folder"
       ? "One file is picked at random from the folder each time it rings."
       : "If the stream will not start within twelve seconds, the backup folder plays instead.";
+  // Both kinds fall back to the backup folder, so both are silent without one.
+  if (!state.settings.backupFolder) {
+    note.className = "editor-note bad";
+    note.textContent +=
+      " No backup folder is set, so this alarm has nothing to fall back on - set one in SETUP.";
+  }
 }
 
 function fillStationSelect(selected) {
@@ -1028,6 +1091,9 @@ setInterval(() => {
     sleepUntil = 0;
     $$("#sleep-chips .chip").forEach((c) => c.classList.toggle("on", c.dataset.mins === "0"));
     $("#sleep-left").textContent = "";
+    // Covers the timer set *while* an alarm rings, which onAlarmFire cannot:
+    // let it lapse, but never take the alarm's audio with it.
+    if (ringing) return;
     stopPlayback();
     say("sleep timer — goodnight");
     return;
@@ -1311,6 +1377,16 @@ function wire() {
 
 }
 
+/** Take the version from the bundle rather than hand-editing the titlebar. */
+async function showBuildLabel() {
+  try {
+    const version = await window.__TAURI__.app.getVersion();
+    $("#build-label").textContent = "AERO CONSOLE v" + version;
+  } catch {
+    /* the label reads fine without it */
+  }
+}
+
 /** Portable copies keep their settings beside the exe; say which this is. */
 async function showConfigLocation() {
   try {
@@ -1320,6 +1396,15 @@ async function showConfigLocation() {
     const label = document.createElement("b");
     label.textContent = where.portable ? "Portable copy. " : "Installed copy. ";
     line.append(label, "Settings: " + where.path);
+
+    // A reset that passes for a first run is how every alarm quietly vanishes.
+    if (where.loadError) {
+      const problem = document.createElement("p");
+      problem.className = "wherefrom warn";
+      problem.textContent = where.loadError;
+      line.after(problem);
+      say("settings could not be loaded - see SETUP", "bad", true);
+    }
   } catch {
     /* nothing worth saying if the backend will not tell us */
   }
@@ -1346,6 +1431,17 @@ async function boot() {
     else stopPlayback();
   });
 
+  // The scheduler was already ticking while this page loaded. An alarm that
+  // fired in that gap emitted to nobody and will not retry, and it left the
+  // window pinned above everything - so ask, rather than trust the timing.
+  try {
+    const pending = await invoke("pending_alarm");
+    if (pending) onAlarmFire(pending);
+  } catch {
+    /* nothing ringing, or the backend is not up yet */
+  }
+
+  showBuildLabel();
   showConfigLocation();
   say("aerowave online", "good");
 }

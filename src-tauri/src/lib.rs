@@ -33,6 +33,9 @@ pub struct AppState {
 pub struct ConfigLocation {
     pub path: String,
     pub portable: bool,
+    /// Set when the settings file was there but unusable, so the UI can say
+    /// so rather than let a reset pass for a clean first run.
+    pub load_error: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -110,8 +113,7 @@ fn random_track(app: AppHandle, state: State<AppState>, path: String) -> Result<
     if !dir.is_dir() {
         return Err(format!("{path} is not a folder"));
     }
-    let total = library::scan(dir).len();
-    let track = library::pick_random(dir, &state.recent)
+    let (track, total) = library::pick_random(dir, &state.recent)
         .ok_or_else(|| "no playable audio files in that folder".to_string())?;
     app.asset_protocol_scope()
         .allow_file(&track)
@@ -139,9 +141,8 @@ fn backup_track(app: AppHandle, state: State<AppState>) -> Result<TrackPick, Str
         .backup_folder
         .clone()
         .ok_or_else(|| "no backup folder set".to_string())?;
-    let total = library::scan(std::path::Path::new(&folder)).len();
     scheduler::backup_track(&app)
-        .map(|(path, name)| TrackPick { path, name, total })
+        .map(|(path, name, total)| TrackPick { path, name, total })
         .ok_or_else(|| format!("nothing playable in the backup folder ({folder})"))
 }
 
@@ -243,6 +244,48 @@ fn config_location(state: State<AppState>) -> ConfigLocation {
     ConfigLocation {
         path: state.store.path().to_string_lossy().to_string(),
         portable: store::portable_data_dir().is_some(),
+        load_error: state.store.load_error.clone(),
+    }
+}
+
+/// Whatever is ringing right now, if anything.
+///
+/// The scheduler starts ticking in `setup`, seconds before the webview has
+/// finished loading and registered its `alarm-fire` listener - and an event
+/// emitted with nobody listening is dropped, while the tick has already
+/// written the minute into `fired` so it never retries. The page therefore
+/// asks on boot rather than trusting it was listening in time. Nothing
+/// ringing is also the moment to undo a previous ring's always-on-top, which
+/// otherwise only `dismiss` and `snooze` clear.
+#[tauri::command]
+fn pending_alarm(app: AppHandle, state: State<AppState>) -> Option<FirePayload> {
+    let ringing = state.sched.lock().unwrap().ringing.clone();
+    let Some(id) = ringing else {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.set_always_on_top(false);
+        }
+        return None;
+    };
+
+    let alarm = state
+        .store
+        .data
+        .lock()
+        .unwrap()
+        .alarms
+        .iter()
+        .find(|a| a.id == id)
+        .cloned();
+
+    match alarm {
+        // Re-resolve rather than replay: the backup folder may have changed,
+        // and a folder alarm should get a fresh track.
+        Some(a) => Some(scheduler::resolve_source(&app, &a, "catchup")),
+        None => {
+            // Deleted while it was ringing; let go of the window.
+            scheduler::dismiss(&app, &id);
+            None
+        }
     }
 }
 
@@ -323,6 +366,7 @@ pub fn run() {
             hide_window,
             quit_app,
             config_location,
+            pending_alarm,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Aerowave");
