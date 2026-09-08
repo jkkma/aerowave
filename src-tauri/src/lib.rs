@@ -15,6 +15,7 @@ use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+#[cfg(not(windows))]
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 
@@ -106,6 +107,39 @@ mod logon {
             .unwrap_or(false)
     }
 
+    /// Write the logon entry ourselves, quoted.
+    ///
+    /// tauri-plugin-autostart writes it unquoted with the argument appended -
+    /// `C:\Aero Space Test\aerowave.exe --minimized`. Windows parses that
+    /// left to right, trying `C:\Aero.exe`, then `C:\Aero Space.exe`, before
+    /// reaching the real one: if any earlier candidate exists it launches that
+    /// instead, and if none does it only works by falling through. Quoting
+    /// removes the ambiguity, and this is a feature whose failure mode is an
+    /// alarm clock that never starts.
+    pub fn enable_for_this_exe() -> Result<String, String> {
+        let exe = std::env::current_exe().map_err(|e| format!("cannot find this exe: {e}"))?;
+        let value = format!("\"{}\" --minimized", exe.display());
+        let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
+            .create_subkey(RUN)
+            .map_err(|e| format!("cannot open the Run key: {e}"))?;
+        key.set_value(VALUE, &value)
+            .map_err(|e| format!("cannot write the Run entry: {e}"))?;
+        Ok(value)
+    }
+
+    /// Remove it. Already gone counts as success.
+    pub fn disable() -> Result<(), String> {
+        let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(RUN, KEY_SET_VALUE)
+        else {
+            return Ok(());
+        };
+        match key.delete_value(VALUE) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("cannot remove the Run entry: {e}")),
+        }
+    }
+
     /// Drop that override, so the app's own toggle is the only truth again.
     pub fn clear_override() {
         if let Ok(key) =
@@ -137,12 +171,11 @@ mod logon {
 /// bare mismatch would quietly overturn the user's own choice every time.
 #[cfg(windows)]
 fn sync_autostart(app: &AppHandle, state: &AppState, want: bool) -> Result<(), String> {
-    let manager = app.autolaunch();
     let present = logon::entry().is_some();
 
-    let result = if want {
+    let result: Result<(), String> = if want {
         if !present || !logon::entry_is_this_exe() {
-            manager.enable()
+            logon::enable_for_this_exe().map(|_| ())
         } else if logon::switched_off_by_user() {
             // Present, correct, and disabled outside the app. That is the
             // user's decision; make our toggle agree rather than fight it.
@@ -153,7 +186,7 @@ fn sync_autostart(app: &AppHandle, state: &AppState, want: bool) -> Result<(), S
             Ok(())
         }
     } else if present {
-        let disabled = manager.disable();
+        let disabled = logon::disable();
         logon::clear_override();
         disabled
     } else {
@@ -427,7 +460,7 @@ pub fn run() {
                     .settings
                     .start_with_windows;
                 if want && !logon::entry_is_this_exe() {
-                    let _ = handle.autolaunch().enable();
+                    let _ = logon::enable_for_this_exe();
                 }
             }
 
