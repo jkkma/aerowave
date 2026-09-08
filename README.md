@@ -108,13 +108,30 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - Results come back in name order, A to Z, and MORE pages further in. The genre
   list is the busiest two hundred tags — the directory holds tens of thousands,
   nearly all of them one station's private label.
-- The two filters narrow each other: choose a country and the genre list becomes
-  the genres that country actually has, counted within it; choose a genre and the
-  country list becomes the countries that carry it. radio-browser publishes no
-  crossed counts, so this is tallied from the stations themselves — a megabyte or
-  two — which is why it happens only when a filter changes, and is remembered for
-  the rest of the run. For the largest countries the tally reads the first five
-  thousand stations, so those counts are a floor rather than a total.
+- **All four filters narrow each other**, and none of them counts under itself —
+  counting formats under the chosen format would only ever report the format
+  already chosen. Choose a country and the genre list becomes the genres that
+  country actually has; choose a genre and the country list becomes the
+  countries that carry it; and both are counted under whatever format and
+  bitrate are also set, because "Paraguay (68)" beside a 320k filter promises
+  stations the next search cannot find.
+- Format and bitrate are annotated rather than rebuilt. They are short fixed
+  lists — five formats the player can open, six bitrate floors — so an option
+  with nothing behind it is greyed out where it stands rather than removed: a
+  list of five that reshuffles as you narrow is harder to use than one that
+  keeps its shape. Pick Iceland and you get `MP3 (10)`, `AAC+ (15)`,
+  `FLAC (0)` greyed. A bitrate count reads as the filter does — `192k and up
+  (3)` is three stations at 192k *or better*.
+- A filter you have already set stays selectable even when it falls to zero,
+  or the dropdown would refuse to offer what it is currently set to. The
+  results simply come back empty, which is honest; silently un-setting a filter
+  you chose would not be.
+- radio-browser publishes no crossed counts, so all of this is tallied from the
+  stations themselves — a megabyte or two — which is why it happens only when a
+  filter changes, and is remembered for the rest of the run. Nothing is tallied
+  at all until something is narrowing. For the largest countries the tally reads
+  the first five thousand stations, so those counts are a floor rather than a
+  total, and say so with a `+`.
 - The searching happens in Rust: it asks the directory which mirrors are up, picks
   one at random and stays on it for the session, and says which app is calling. A
   page comes back already tidied — stations the directory's own checker cannot

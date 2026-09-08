@@ -146,10 +146,33 @@ pub struct Page {
 pub struct Facets {
     pub tags: Vec<Tag>,
     pub countries: Vec<Country>,
+    /// The formats present, counted. Only the ones the format dropdown offers:
+    /// the directory carries WMA and a long tail of others, and a filter whose
+    /// every result is a station the player cannot open is not worth offering.
+    pub codecs: Vec<Bucket>,
+    /// One per bitrate floor the dropdown offers, counted as the filter reads
+    /// it - "192" is how many stations are at 192k *or better*, not at exactly
+    /// 192k, so the numbers climb as the floor drops.
+    pub bitrates: Vec<Bucket>,
     /// Set when the directory had more stations than the tally was allowed to
     /// read, so every count below is a floor rather than the whole truth.
     pub sampled: bool,
 }
+
+/// A count against one fixed dropdown entry - a format, or a bitrate floor.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Bucket {
+    /// Exactly the `value` of the option this belongs to.
+    pub key: String,
+    pub stations: u32,
+}
+
+/// The formats the dropdown offers, matched whole against what the directory
+/// reports - "AAC" and "AAC+" are two different answers, not one with a suffix.
+const CODECS: [&str; 5] = ["MP3", "AAC", "AAC+", "OGG", "FLAC"];
+/// The floors the bitrate dropdown offers.
+const BITRATES: [u32; 6] = [64, 96, 128, 192, 256, 320];
 
 /// One genre the directory has a useful number of stations under.
 #[derive(Serialize, Clone, Debug)]
@@ -458,7 +481,19 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
 
     let mut tag_counts: HashMap<String, u32> = HashMap::new();
     let mut country_counts: HashMap<String, (String, u32)> = HashMap::new();
+    let mut codec_counts = [0u32; CODECS.len()];
+    let mut bitrate_counts = [0u32; BITRATES.len()];
     for entry in &raw {
+        let codec = clean_name(text(&entry.codec), 16).to_ascii_uppercase();
+        if let Some(slot) = CODECS.iter().position(|known| *known == codec) {
+            codec_counts[slot] += 1;
+        }
+        let bitrate = number(&entry.bitrate) as u32;
+        for (slot, floor) in BITRATES.iter().enumerate() {
+            if bitrate >= *floor {
+                bitrate_counts[slot] += 1;
+            }
+        }
         for tag in text(&entry.tags).split(',') {
             let value = tag.trim();
             if !value.is_empty() {
@@ -497,9 +532,28 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
         .collect();
     countries.sort_by_key(|country| sort_key(&country.name));
 
+    let codecs = CODECS
+        .iter()
+        .zip(codec_counts)
+        .map(|(key, stations)| Bucket {
+            key: key.to_string(),
+            stations,
+        })
+        .collect();
+    let bitrates = BITRATES
+        .iter()
+        .zip(bitrate_counts)
+        .map(|(floor, stations)| Bucket {
+            key: floor.to_string(),
+            stations,
+        })
+        .collect();
+
     Ok(Facets {
         tags,
         countries,
+        codecs,
+        bitrates,
         sampled,
     })
 }
