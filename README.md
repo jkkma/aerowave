@@ -12,17 +12,34 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 
 - Twelve stations seeded in (FIP and its sister channels, Radio Paradise, WFMU,
   1.FM); add, edit, tag, favourite and filter your own.
-- **A station that answers HTTP is not the same as a station that plays.** Several
-  well-known broadcasters (SomaFM's mounts among them) return a perfectly good
-  `audio/mpeg` response that a Chromium media element then refuses with
-  `MEDIA_ERR_SRC_NOT_SUPPORTED`. Every seeded station was checked by loading it
-  in a real browser engine, not just by fetching it, and the TEST button in the
-  station editor does the same two-part check: the Rust side proves the server
-  answers, then a hidden media element proves the player can decode it.
-- A source the player cannot decode fails immediately rather than burning four
-  reconnects on something that will never work.
-- `.pls` and `.m3u` links are followed to the real stream URL. HLS is detected and
-  called out rather than silently playing nothing — WebView2 has no HLS decoder.
+- **Stations play through a local relay, not straight off the web.** A media
+  element cannot choose its own request headers, and enough broadcasters decide
+  whether to answer on the strength of them that going direct is the thing that
+  fails. SomaFM returns `403 text/html` to the webview's User-Agent and
+  `200 audio/mpeg` to an ordinary browser's — measured by sending both down the
+  same proxy and changing nothing else. So Rust binds a listener on
+  `127.0.0.1`, fetches the stream itself with headers a broadcaster will
+  actually serve, and `<audio>` plays from there. Loopback only, unguessable
+  per-station tokens, `GET` only, and a `Host` that must be loopback too.
+  `cargo run --example relaycheck` exercises the whole of it against real
+  stations without starting the app.
+- **`MEDIA_ERR_SRC_NOT_SUPPORTED` does not mean "bad codec".** The element
+  reports the same code for an HTTP error page and for a refused connection, so
+  a station that looks undecodable usually is not — of a 24-station sample
+  across MP3, AAC, AAC+ and Ogg, every failure that had a fixable cause was the
+  server declining to answer, and none was a codec WebView2 lacked. AAC+ in
+  particular plays perfectly well. A relayed station that still fails gets one
+  attempt without the relay before it is written off; reconnecting on the same
+  URL does not, because that part the engine really will refuse every time.
+- The TEST button in the station editor does a two-part check, because the
+  server answering and the player playing are still different questions: the
+  Rust side proves the server answers, then a hidden media element proves the
+  player can decode it.
+- `.pls` and `.m3u` links are followed to the real stream URL — in the relay
+  now, so a playlist that does not admit to being one in its file name is
+  followed just the same. HLS is detected and called out rather than silently
+  playing nothing: WebView2 has no HLS decoder, and the relay refuses to carry
+  it rather than break the segment URLs by rewriting their origin.
 - Now-playing titles are read out of the ICY metadata the server interleaves with
   the audio, polled every 25 s. The `<audio>` element cannot see that metadata, so
   the Rust side opens a second short-lived connection to read it.
@@ -35,7 +52,11 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   socket and the head is parsed by hand. Plaintext only: ICY predates TLS and the
   servers still speaking it are `http://` to a one.
 - A dropped stream reconnects four times with a lengthening backoff; from the
-  second attempt it retries through the playlist-resolved URL.
+  second attempt it retries through the playlist-resolved URL, unless a probe
+  has already had its say about that station.
+- The now-playing poll still talks to the broadcaster directly rather than to
+  the relay: it wants a title, not audio, and pointing it at the relay would
+  only hand it back the app's own stream.
 - Sleep timer: 15 / 30 / 60 / 90 minutes, fading out over the last twenty seconds
   so it arrives at silence as the countdown reaches zero rather than starting to
   go quiet there. Turning it off mid-fade puts the volume back. It never touches

@@ -6,11 +6,12 @@
 
 mod browse;
 mod library;
+mod relay;
 mod scheduler;
 mod store;
 mod stream;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -28,6 +29,10 @@ pub struct AppState {
     pub store: Store,
     pub sched: Mutex<scheduler::SchedState>,
     pub recent: RecentTracks,
+    /// None if the loopback listener would not bind. Playback then falls back
+    /// to handing <audio> the station URL directly, which is what it did
+    /// before the relay existed - fewer stations, but not none.
+    pub relay: Mutex<Option<Arc<relay::Relay>>>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -276,6 +281,14 @@ fn backup_track(app: AppHandle, state: State<AppState>) -> Result<TrackPick, Str
         .ok_or_else(|| format!("nothing playable in the backup folder ({folder})"))
 }
 
+/// Hand back a loopback URL that plays `url`, or None when the relay is not
+/// running. See `relay.rs` for why a station is worth relaying at all.
+#[tauri::command]
+fn relay_url(state: State<'_, AppState>, url: String) -> Option<String> {
+    let relay = state.relay.lock().unwrap();
+    relay.as_ref().map(|r| r.route(&url))
+}
+
 #[tauri::command]
 async fn probe_stream(
     url: String,
@@ -499,6 +512,21 @@ pub fn run() {
                 store,
                 sched: Mutex::new(scheduler::SchedState::default()),
                 recent: RecentTracks::default(),
+                relay: Mutex::new(None),
+            });
+
+            // The relay binds a port, so it cannot be built before the async
+            // runtime is up. Nothing waits on it: the first station is played
+            // long after this resolves, and if it never does, playback still
+            // works the old way.
+            let relay_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                match relay::Relay::start().await {
+                    Ok(relay) => {
+                        *relay_handle.state::<AppState>().relay.lock().unwrap() = Some(relay);
+                    }
+                    Err(e) => eprintln!("aerowave: no local relay ({e}) - playing streams direct"),
+                }
             });
 
             build_tray(&handle)?;
@@ -559,6 +587,7 @@ pub fn run() {
             random_track,
             backup_track,
             probe_stream,
+            relay_url,
             browse_stations,
             station_logo,
             station_art,
