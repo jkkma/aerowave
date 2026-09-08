@@ -7,3 +7,7 @@ description = "Parsing and scheduling rules, with no GUI dependencies so they ca
 
 [dependencies]
 chrono = "0.4"
+
+[dev-dependencies]
+# Real DST transitions for the scheduling tests; FixedOffset cannot express one.
+chrono-tz = "0.10"

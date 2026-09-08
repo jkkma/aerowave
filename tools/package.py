@@ -16,6 +16,10 @@ Produces dist/Aerowave-<version>-win-x64.zip laid out as
 webview's cache there instead of into the user profile, and Scoop persists it
 across updates. The zip's single top-level folder matches the manifest's
 `extract_dir`.
+
+Paste the sha256 this prints into the GitHub release notes and into the Scoop
+manifest's `hash` field - they are what a manual downloader checks against, and
+the zip's hash changes on every repack even when nothing in it does.
 """
 
 import argparse

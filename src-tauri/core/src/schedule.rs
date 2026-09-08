@@ -34,7 +34,10 @@ pub fn next_occurrence<Tz: TimeZone>(
 ) -> Option<i64> {
     let tz = from.timezone();
     for ahead in 0..8 {
-        let date = (from.clone() + Duration::days(ahead)).date_naive();
+        // Calendar days, not 86_400-second ones: adding a fixed span to an
+        // instant skips or repeats a local date across a DST transition, and
+        // the skipped date is the one an alarm would have rung on.
+        let date = from.date_naive() + Duration::days(ahead);
         if !day_matches(days, date.weekday().num_days_from_monday()) {
             continue;
         }
@@ -64,7 +67,7 @@ pub fn last_occurrence_before<Tz: TimeZone>(
 ) -> Option<i64> {
     let tz = now.timezone();
     for back in 0..2 {
-        let date = (now.clone() - Duration::days(back)).date_naive();
+        let date = now.date_naive() - Duration::days(back);
         if !day_matches(days, date.weekday().num_days_from_monday()) {
             continue;
         }
@@ -103,6 +106,11 @@ pub fn missed_while_asleep<Tz: TimeZone>(
 mod tests {
     use super::*;
     use chrono::{FixedOffset, NaiveDate};
+
+    /// The local calendar date an instant falls on, in a given zone.
+    fn next_local_date<Tz: TimeZone>(tz: &Tz, unix: i64) -> chrono::NaiveDate {
+        tz.timestamp_opt(unix, 0).unwrap().date_naive()
+    }
 
     /// 2026-09-07 is a Monday.
     fn at(day: u32, hour: u32, minute: u32) -> DateTime<FixedOffset> {
@@ -194,6 +202,57 @@ mod tests {
         let now = at(7, 7, 31);
         let last_tick = at(7, 7, 30).timestamp() + 15;
         assert!(!missed_while_asleep(7, 30, &[], &now, last_tick));
+    }
+
+    /// Europe/Paris springs forward on the last Sunday in March: 02:00 local
+    /// jumps straight to 03:00. Walking instants rather than dates used to
+    /// skip a whole calendar day around a transition.
+    #[test]
+    fn a_transition_day_is_not_skipped() {
+        use chrono_tz::Europe::Paris;
+        // Saturday 2026-03-28 23:30, the evening before the spring forward.
+        let saturday = Paris
+            .from_local_datetime(
+                &NaiveDate::from_ymd_opt(2026, 3, 28)
+                    .unwrap()
+                    .and_hms_opt(23, 30, 0)
+                    .unwrap(),
+            )
+            .unwrap();
+        // A 07:00 alarm must land on Sunday the 29th, the transition day.
+        let next = next_occurrence(7, 0, &[], &saturday).expect("daily alarm recurs");
+        let landed = next_local_date(&Paris, next);
+        assert_eq!(landed, NaiveDate::from_ymd_opt(2026, 3, 29).unwrap());
+    }
+
+    /// An alarm inside the vanished hour has no instant to ring at, so the
+    /// next real one is the day after - never "no alarm at all".
+    #[test]
+    fn an_alarm_in_the_vanished_hour_still_resolves() {
+        use chrono_tz::Europe::Paris;
+        let saturday = Paris
+            .from_local_datetime(
+                &NaiveDate::from_ymd_opt(2026, 3, 28)
+                    .unwrap()
+                    .and_hms_opt(23, 30, 0)
+                    .unwrap(),
+            )
+            .unwrap();
+        // 02:30 does not exist on the 29th in Paris.
+        let next = next_occurrence(2, 30, &[], &saturday).expect("must still find one");
+        assert_eq!(
+            next_local_date(&Paris, next),
+            NaiveDate::from_ymd_opt(2026, 3, 30).unwrap()
+        );
+    }
+
+    /// Just before midnight, evaluated just after it: the alarm that has only
+    /// recently passed is on yesterday's date.
+    #[test]
+    fn a_late_alarm_is_caught_up_across_midnight() {
+        let now = at(8, 0, 5); // 00:05 on the 8th
+        let last_tick = at(7, 23, 50).timestamp(); // asleep since 23:50 on the 7th
+        assert!(missed_while_asleep(23, 55, &[], &now, last_tick));
     }
 
     #[test]

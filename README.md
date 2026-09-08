@@ -90,6 +90,18 @@ a running copy is using.
 Either way it needs the WebView2 runtime, which ships with Windows 11 and current
 Windows 10. `WebView2Loader.dll` sits beside the exe in the zip and has to stay there.
 
+`aerowave.exe` is not code-signed, so the first time a downloaded copy runs Windows
+SmartScreen says "Windows protected your PC" and names an unknown publisher; **More
+info** then **Run anyway** is the way past it. Scoop checks the download against the
+hash in the manifest for you. To check a manual download yourself, compare
+
+```
+Get-FileHash .\Aerowave-<version>-win-x64.zip -Algorithm SHA256
+```
+
+against the `hash` field in the [bucket manifest](https://github.com/jkkma/scoop-ayylmao/blob/main/bucket/aerowave.json)
+or the checksum quoted in the release notes.
+
 ## Building it
 
 Needs Rust, Node, the MSVC or MinGW build tools and WebView2.

@@ -45,6 +45,10 @@ futures-util = "0.3"
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
 
+[target.'cfg(windows)'.dependencies]
+# auto-launch tells us one bit; the logon entry has more to say than that.
+winreg = "0.55"
+
 [profile.release]
 codegen-units = 1
 lto = true

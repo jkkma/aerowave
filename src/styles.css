@@ -16,6 +16,9 @@
   --amber-hi: #ffdf9e;
   --alien:    #a8ff8f;
   --alert:    #ff6a4d;
+  /* The glow colour is too dark for small text on the glass; this is the
+     same alarm red lifted to about 4.6:1 for anything you have to read. */
+  --alert-text: #ff9d86;
   --steel:    #7ea3b6;
   --metal-hi: #b9d7e4;
   --metal:    #16303e;
@@ -465,6 +468,20 @@ body.playing .orb.gl.kick { animation: orbhop .5s cubic-bezier(.3, .8, .35, 1); 
 .gel:hover  { filter: brightness(1.14) saturate(1.05); }
 .gel:active { transform: translateY(1px); box-shadow: 0 1px 0 rgba(0, 0, 0, .3), inset 0 2px 6px rgba(0, 20, 30, .5); }
 .gel:focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; }
+.row:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+/* Announced, never shown. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 .gel svg { width: 15px; height: 15px; fill: currentColor; stroke: none; }
 .gel em { font-style: normal; opacity: .72; font-size: 10px; }
 
@@ -525,7 +542,7 @@ body.playing .gel.big { box-shadow: 0 0 26px rgba(120, 236, 255, .7), 0 2px 0 rg
   font-size: 10px;
   letter-spacing: .2em;
   text-transform: uppercase;
-  color: rgba(178, 220, 238, .72);
+  color: #c2e2f2;
 }
 .hud-mini.right { margin-left: auto; color: var(--amber); }
 
@@ -622,7 +639,7 @@ body.playing .gel.big { box-shadow: 0 0 26px rgba(120, 236, 255, .7), 0 2px 0 rg
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .5);
 }
 .row.on {
-  background: linear-gradient(180deg, rgba(180, 244, 255, .35), rgba(50, 160, 195, .22));
+  background: linear-gradient(180deg, rgba(180, 244, 255, .22), rgba(50, 160, 195, .22));
   border-color: rgba(220, 250, 255, .7);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .8), 0 0 18px rgba(110, 226, 250, .28);
 }
@@ -648,7 +665,7 @@ body.playing .gel.big { box-shadow: 0 0 26px rgba(120, 236, 255, .7), 0 2px 0 rg
   font-family: var(--mono);
   font-size: 9.5px;
   letter-spacing: .1em;
-  color: rgba(168, 212, 232, .6);
+  color: #c2e2f2;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -679,7 +696,7 @@ body.playing .gel.big { box-shadow: 0 0 26px rgba(120, 236, 255, .7), 0 2px 0 rg
 .row .icon:hover { color: #fff; border-color: rgba(200, 244, 255, .7); background: linear-gradient(180deg, rgba(190, 246, 255, .45), rgba(60, 170, 200, .3)); }
 .row .icon.star.on { color: var(--amber); text-shadow: 0 0 10px rgba(255, 176, 46, .8); }
 
-.empty { padding: 26px 14px; text-align: center; color: rgba(180, 216, 232, .55); font-size: 13px; }
+.empty { padding: 26px 14px; text-align: center; color: #c2e2f2; font-size: 13px; }
 
 /* alarm rows */
 .alarms .when {
@@ -745,11 +762,11 @@ body.playing .gel.big { box-shadow: 0 0 26px rgba(120, 236, 255, .7), 0 2px 0 rg
   user-select: text;
 }
 .wherefrom b { color: var(--alien); font-weight: 600; }
-.wherefrom.warn { color: var(--alert); }
+.wherefrom.warn { color: var(--alert-text); }
 
 /* The backup folder is the end of every fallback chain; an empty one is not
    the same kind of nothing as an empty shuffle folder. */
-.folderpath.warn { color: var(--alert); }
+.folderpath.warn { color: var(--alert-text); }
 
 /* ----------------------------------------------------------- editors --- */
 
@@ -814,8 +831,8 @@ select.field option { background: #062434; color: var(--foam); }
 
 .editor-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .flex { flex: 1; }
-.editor-note { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; color: rgba(180, 220, 238, .7); min-height: 1em; }
-.editor-note.bad { color: var(--alert); }
+.editor-note { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12px; letter-spacing: .06em; color: #c2e2f2; min-height: 1em; }
+.editor-note.bad { color: var(--alert-text); }
 .editor-note.good { color: var(--alien); }
 
 .timerow { display: flex; align-items: flex-end; gap: 8px; }
@@ -868,7 +885,7 @@ select.field option { background: #062434; color: var(--foam); }
   color: #04202b;
   box-shadow: 0 0 14px rgba(110, 226, 250, .45), inset 0 1px 0 rgba(255, 255, 255, .9);
 }
-.dayhint { margin-left: 6px; font-family: var(--mono); font-size: 10px; color: rgba(180, 220, 238, .62); }
+.dayhint { margin-left: 6px; font-family: var(--mono); font-size: 12px; color: #c2e2f2; }
 
 .sourcerow { display: grid; gap: 8px; min-width: 0; }
 .folderpick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
@@ -998,5 +1015,12 @@ select.field option { background: #062434; color: var(--foam); }
 .ringcard.silent .lamp.on { background: radial-gradient(circle at 35% 30%, #fff, var(--alert) 45%, #7d1f10); box-shadow: 0 0 14px rgba(255, 106, 77, .9); }
 .ringcard.silent .editor-note { color: var(--amber-hi); }
 
-.folderbox.backup { padding: 4px 4px 14px; gap: 9px; }
+/* Its own dark ground: the label and the paragraph sat on the bare glass at
+   about 2.4:1, well under the 4.5:1 floor. */
+.folderbox.backup {
+  padding: 12px;
+  gap: 9px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(2, 18, 28, .55), rgba(2, 14, 22, .42));
+}
 .folderbox.backup .editor-note { white-space: normal; line-height: 1.5; }

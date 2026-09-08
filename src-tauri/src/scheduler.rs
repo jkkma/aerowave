@@ -45,6 +45,10 @@ pub struct FirePayload {
     pub url: Option<String>,
     /// Absolute file path, for `kind == "folder"`.
     pub path: Option<String>,
+    /// The folder that path came from, when it is the alarm's own. Lets the
+    /// webview keep pulling tracks from it without looking the alarm up in
+    /// stored state - which a test ring, deliberately unsaved, is not in.
+    pub folder: Option<String>,
     /// Station name or track file name, for the display.
     pub title: Option<String>,
     pub volume: f64,
@@ -106,6 +110,7 @@ pub fn resolve_source(app: &AppHandle, alarm: &Alarm, trigger: &str) -> FirePayl
         kind: "none".into(),
         url: None,
         path: None,
+        folder: None,
         title: None,
         volume: alarm.volume,
         fade_secs: alarm.fade_secs,
@@ -144,6 +149,7 @@ pub fn resolve_source(app: &AppHandle, alarm: &Alarm, trigger: &str) -> FirePayl
                 Some((track, name, _)) => {
                     payload.kind = "folder".into();
                     payload.path = Some(track);
+                    payload.folder = Some(path.clone());
                     payload.title = Some(name);
                     return payload;
                 }
@@ -286,25 +292,53 @@ fn tick(app: &AppHandle) {
     let state = app.state::<AppState>();
     let alarms: Vec<Alarm> = state.store.data.lock().unwrap().alarms.clone();
 
-    let (due_snoozes, last_tick) = {
+    // Is something already ringing? Firing a second alarm on top of it would
+    // tear down the first mid-connect in the webview - and mark its minute
+    // consumed, so nobody ever hears it.
+    let busy = state.sched.lock().unwrap().ringing.is_some();
+    let mut fired_this_pass = false;
+
+    let (due_snoozes, stale_snoozes, last_tick) = {
         let mut sched = state.sched.lock().unwrap();
         let last = sched.last_tick;
         sched.last_tick = now_secs;
-        let due: Vec<String> = sched
+
+        let expired: Vec<(String, i64)> = sched
             .snoozed
             .iter()
             .filter(|(_, at)| **at <= now_secs)
-            .map(|(id, _)| id.clone())
+            .map(|(id, at)| (id.clone(), *at))
             .collect();
-        for id in &due {
-            sched.snoozed.remove(id);
+
+        let mut due = Vec::new();
+        let mut stale = Vec::new();
+        for (id, at) in expired {
+            // Out of the map either way: a snooze left sitting in the past
+            // reports a negative countdown in the NEXT ALARM readout.
+            sched.snoozed.remove(&id);
+            if now_secs - at > schedule::CATCHUP_GRACE_SECS {
+                // Snoozes live in memory only, so a suspended machine can wake
+                // hours later with one still due. Ringing then is not waking
+                // anybody up on time, it is just a fright.
+                stale.push(id);
+            } else if busy {
+                sched.snoozed.insert(id, at);
+            } else {
+                due.push(id);
+            }
         }
-        (due, last)
+        (due, stale, last)
     };
+
+    if !stale_snoozes.is_empty() {
+        // Nothing rings, but the readout should stop advertising it.
+        let _ = app.emit("alarms-updated", ());
+    }
 
     for id in due_snoozes {
         if let Some(alarm) = alarms.iter().find(|a| a.id == id) {
             fire(app, alarm, "snooze");
+            fired_this_pass = true;
         }
     }
 
@@ -328,11 +362,20 @@ fn tick(app: &AppHandle) {
         if already.as_deref() == Some(key.as_str()) {
             continue;
         }
+        // Deliberately before the `fired` stamp: leaving this minute unconsumed
+        // is the point. Clear the current ring inside the same minute and this
+        // alarm still gets its turn; otherwise it is dropped without being
+        // stamped, and without a one-shot being disabled for a ring nobody
+        // heard.
+        if busy || fired_this_pass {
+            continue;
+        }
         {
             let mut sched = state.sched.lock().unwrap();
             sched.fired.insert(alarm.id.clone(), key.clone());
         }
         fire(app, alarm, if missed { "catchup" } else { "scheduled" });
+        fired_this_pass = true;
     }
 }
 
