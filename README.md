@@ -126,6 +126,11 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   or the dropdown would refuse to offer what it is currently set to. The
   results simply come back empty, which is honest; silently un-setting a filter
   you chose would not be.
+- Duplicate submissions are collapsed twice over: within a page as it arrives,
+  and again against everything already on screen, so pressing MORE cannot bring
+  back a stream you are already looking at. Matching is on the stream URL,
+  normalised for case and a trailing slash, since the same stream is often
+  submitted under two names.
 - Every count is of what the list will actually show, not of what the directory
   holds. The same station is submitted more than once all the time — Albania's
   two AAC+ stations were "Radio One - Tirana 95.2 FM" and "RadioOne", the same
