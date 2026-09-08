@@ -216,7 +216,14 @@ fn sync_autostart(app: &AppHandle, _state: &AppState, want: bool) -> Result<(), 
 #[tauri::command]
 async fn pick_folder(app: AppHandle) -> Option<FolderInfo> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog().file().pick_folder(move |chosen| {
+    let mut dialog = app.dialog().file();
+    // Owned by the main window, so the picker is modal to the app and cannot
+    // end up behind it - an unowned dialog is a stray top-level window, and
+    // whatever the user does next can bury it.
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    dialog.pick_folder(move |chosen| {
         let _ = tx.send(chosen);
     });
     let chosen = rx.await.ok().flatten()?;
