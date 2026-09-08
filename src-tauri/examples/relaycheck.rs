@@ -181,6 +181,65 @@ async fn main() {
     hls_checks().await;
     probe_checks().await;
     facet_checks().await;
+    agreement_checks().await;
+}
+
+/// The number on a dropdown is a promise about the list underneath it. This
+/// checks the two agree - the count against the rows the search actually
+/// returns - which is where Albania's "AAC+ (2)" over one station came from.
+async fn agreement_checks() {
+    println!("\ncounts vs. what the search returns:");
+    for (label, country, codec, bitrate) in [
+        ("AL / AAC+ / >=128k", "AL", "AAC+", 128u32),
+        ("AL / any / any", "AL", "", 0),
+        ("IS / MP3 / any", "IS", "MP3", 0),
+        ("IS / any / >=128k", "IS", "", 128),
+    ] {
+        let mut fq = browse::Query::default();
+        fq.country_code = country.into();
+        fq.bitrate_min = bitrate;
+        // The country facet is counted without its own filter, so ask the way
+        // the format dropdown does: country applied, format left out.
+        fq.codec = codec.into();
+
+        let counted = match browse::facets(browse::Query {
+            country_code: country.into(),
+            bitrate_min: bitrate,
+            codec: codec.into(),
+            ..Default::default()
+        })
+        .await
+        {
+            Ok(f) => f
+                .countries
+                .iter()
+                .find(|c| c.code == country)
+                .map(|c| c.stations)
+                .unwrap_or(0),
+            Err(e) => {
+                println!("  {label:<22} facet FAILED: {e}");
+                continue;
+            }
+        };
+
+        let mut sq = browse::Query {
+            country_code: country.into(),
+            bitrate_min: bitrate,
+            codec: codec.into(),
+            ..Default::default()
+        };
+        sq.limit = 100;
+        let listed = match browse::search(sq).await {
+            Ok(page) => page.stations.len() as u32,
+            Err(e) => {
+                println!("  {label:<22} search FAILED: {e}");
+                continue;
+            }
+        };
+
+        let verdict = if counted == listed { "agree" } else { "MISMATCH" };
+        println!("  {label:<22} count={counted:<4} search returns={listed:<4} {verdict}");
+    }
 }
 
 /// The format and bitrate dropdowns are annotated from these counts, so they

@@ -126,6 +126,12 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   or the dropdown would refuse to offer what it is currently set to. The
   results simply come back empty, which is honest; silently un-setting a filter
   you chose would not be.
+- Every count is of what the list will actually show, not of what the directory
+  holds. The same station is submitted more than once all the time — Albania's
+  two AAC+ stations were "Radio One - Tirana 95.2 FM" and "RadioOne", the same
+  stream twice — so the tally collapses duplicate streams and drops nameless or
+  unplayable entries exactly as the search does. A count that promises two and
+  delivers one is the thing these counts exist to avoid.
 - radio-browser publishes no crossed counts, so all of this is tallied from the
   stations themselves — a megabyte or two — which is why it happens only when a
   filter changes, and is remembered for the rest of the run. Nothing is tallied
