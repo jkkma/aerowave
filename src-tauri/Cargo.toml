@@ -3,7 +3,7 @@ members = ["core"]
 
 [package]
 name = "aerowave"
-version = "0.3.0"
+version = "0.4.0"
 description = "Internet radio player and alarm clock"
 authors = ["jkkma"]
 edition = "2021"
@@ -38,6 +38,8 @@ serde_json = "1"
 chrono = "0.4"
 walkdir = "2"
 rand = "0.8"
+# Station artwork reaches the webview inline, as a data URL.
+base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "charset", "http2"] }
 # net/io-util are for the Shoutcast fallback in stream.rs, which has to
 # talk to those servers over a socket rather than through an HTTP client.

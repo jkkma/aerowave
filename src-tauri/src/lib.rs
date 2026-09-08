@@ -308,6 +308,26 @@ async fn browse_tags() -> Result<Vec<browse::Tag>, String> {
     browse::tags().await
 }
 
+/// A station's own artwork, as a data URL the orb can wear.
+///
+/// Fetched here rather than by the webview because the content security
+/// policy allows it no remote images, and because a texture uploaded to WebGL
+/// has to be same-origin or CORS-cleared, which a broadcaster's logo host
+/// will not be.
+#[tauri::command]
+async fn station_logo(url: String) -> Result<String, String> {
+    browse::logo(&url).await
+}
+
+/// Look a station's artwork up in the directory, for one saved without any.
+///
+/// `None` means the directory has nothing usable for it, which is a perfectly
+/// ordinary answer - the webview remembers that and stops asking.
+#[tauri::command]
+async fn station_art(name: String, url: String) -> Result<Option<browse::Art>, String> {
+    browse::art(&name, &url).await
+}
+
 /// What one filter leaves available to the other: the genres in a country, or
 /// the countries carrying a genre. Costly enough that the webview asks only
 /// when a filter changes.
@@ -540,6 +560,8 @@ pub fn run() {
             backup_track,
             probe_stream,
             browse_stations,
+            station_logo,
+            station_art,
             browse_countries,
             browse_tags,
             browse_facets,

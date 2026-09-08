@@ -13,6 +13,7 @@ name = "aerowave"
 version = "0.3.0"
 dependencies = [
  "aerowave-core",
+ "base64 0.22.1",
  "chrono",
  "futures-util",
  "rand 0.8.8",

@@ -62,8 +62,8 @@
         <svg class="ic-play" viewBox="0 0 24 24"><path d="M8 5l12 7-12 7z"/></svg>
         <svg class="ic-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
       </button>
-      <button class="gel" id="btn-prev" title="Previous station"><svg viewBox="0 0 24 24"><path d="M8 6v12M19 6l-9 6 9 6z"/></svg></button>
-      <button class="gel" id="btn-next" title="Next station"><svg viewBox="0 0 24 24"><path d="M16 6v12M5 6l9 6-9 6z"/></svg></button>
+      <button class="gel" id="btn-prev" title="Previous station"><svg viewBox="0 0 24 24"><path d="M6 6h2.5v12H6zM18.5 6l-8.5 6 8.5 6z"/></svg></button>
+      <button class="gel" id="btn-next" title="Next station"><svg viewBox="0 0 24 24"><path d="M15.5 6h2.5v12h-2.5zM5.5 6l8.5 6-8.5 6z"/></svg></button>
       <button class="gel" id="btn-shuffle" title="Random track from the shuffle folder"><svg viewBox="0 0 24 24"><path d="M4 7h4l8 10h4M4 17h4l2-2.5M20 7h-4l-1.6 2.1"/><path d="M17.5 4.5L20 7l-2.5 2.5M17.5 14.5L20 17l-2.5 2.5"/></svg></button>
 
       <div class="volwrap">
@@ -79,6 +79,7 @@
         <button class="chip on" data-mins="0">OFF</button>
         <button class="chip" data-mins="15">15</button>
         <button class="chip" data-mins="30">30</button>
+        <button class="chip" data-mins="45">45</button>
         <button class="chip" data-mins="60">60</button>
         <button class="chip" data-mins="90">90</button>
       </div>
@@ -143,6 +144,23 @@
         </select>
         <select class="field" id="browse-tag" aria-label="Genre">
           <option value="">Any genre</option>
+        </select>
+        <select class="field" id="browse-codec" aria-label="Format">
+          <option value="">Any format</option>
+          <option value="MP3">MP3</option>
+          <option value="AAC">AAC</option>
+          <option value="AAC+">AAC+</option>
+          <option value="OGG">OGG</option>
+          <option value="FLAC">FLAC</option>
+        </select>
+        <select class="field" id="browse-bitrate" aria-label="Minimum bitrate">
+          <option value="0">Any bitrate</option>
+          <option value="64">64k and up</option>
+          <option value="96">96k and up</option>
+          <option value="128">128k and up</option>
+          <option value="192">192k and up</option>
+          <option value="256">256k and up</option>
+          <option value="320">320k and up</option>
         </select>
       </div>
       <ul class="list" id="browse-list"></ul>
@@ -215,7 +233,7 @@
           <label class="lbl">Snooze
             <select class="field" id="al-snooze">
               <option value="5">5 min</option>
-              <option value="9" selected>9 min</option>
+              <option value="10" selected>10 min</option>
               <option value="15">15 min</option>
               <option value="20">20 min</option>
             </select>
@@ -314,7 +332,7 @@
     <div class="ringsource" id="ring-source"></div>
     <p class="editor-note" id="ring-note"></p>
     <div class="ringactions">
-      <button class="gel big-wide" id="ring-snooze">SNOOZE <em id="ring-snooze-mins">9 min</em></button>
+      <button class="gel big-wide" id="ring-snooze">SNOOZE <em id="ring-snooze-mins">10 min</em></button>
       <button class="gel big-wide primary" id="ring-dismiss">DISMISS</button>
     </div>
   </div>
