@@ -22,6 +22,10 @@ mod relay;
 #[path = "../src/hls.rs"]
 mod hls;
 
+#[allow(dead_code)]
+#[path = "../src/browse.rs"]
+mod browse;
+
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -176,6 +180,55 @@ async fn main() {
 
     hls_checks().await;
     probe_checks().await;
+    facet_checks().await;
+}
+
+/// The format and bitrate dropdowns are annotated from these counts, so they
+/// have to answer for whatever else is filtering - and never for themselves.
+async fn facet_checks() {
+    println!("\nbrowse facets (what the format/bitrate dropdowns are built from):");
+
+    let show = |label: &str, f: &browse::Facets| {
+        let codecs: Vec<String> = f
+            .codecs
+            .iter()
+            .map(|b| format!("{}={}", b.key, b.stations))
+            .collect();
+        let bitrates: Vec<String> = f
+            .bitrates
+            .iter()
+            .map(|b| format!("{}={}", b.key, b.stations))
+            .collect();
+        println!("  {label}");
+        println!("    formats  {}", codecs.join("  "));
+        println!("    bitrates {}", bitrates.join("  "));
+        println!(
+            "    (tags {}, countries {}, sampled {})",
+            f.tags.len(),
+            f.countries.len(),
+            f.sampled
+        );
+    };
+
+    // Iceland: small enough that the whole country fits inside the tally limit,
+    // so the counts are exact and the arithmetic below is checkable by eye.
+    let build = |bitrate_min: u32, codec: &str| {
+        let mut q = browse::Query::default();
+        q.country_code = "IS".into();
+        q.bitrate_min = bitrate_min;
+        q.codec = codec.into();
+        q
+    };
+    for (label, query) in [
+        ("country=IS, nothing else", build(0, "")),
+        ("country=IS, bitrate>=128 (formats must shrink)", build(128, "")),
+        ("country=IS, format=MP3 (bitrates must shrink)", build(0, "MP3")),
+    ] {
+        match browse::facets(query).await {
+            Ok(f) => show(label, &f),
+            Err(e) => println!("  {label} FAILED: {e}"),
+        }
+    }
 }
 
 /// What the now-playing poll actually gets back. The third line of the display

@@ -1130,12 +1130,14 @@ function facetsFor(query) {
  * nothing but a format between them build the same question - and so share
  * the one tally rather than each fetching it.
  */
-function facetQuery(base) {
+function facetQuery(base, omit) {
   const query = {};
   if (base.countryCode) query.countryCode = base.countryCode;
   if (base.tag) query.tag = base.tag;
-  if (browseCodec) query.codec = browseCodec;
-  if (browseBitrate) query.bitrateMin = browseBitrate;
+  // `omit` leaves out the filter the answer is for. Counting formats under the
+  // chosen format would only ever report the format already chosen.
+  if (browseCodec && omit !== "codec") query.codec = browseCodec;
+  if (browseBitrate && omit !== "bitrate") query.bitrateMin = browseBitrate;
   return query;
 }
 
@@ -1175,6 +1177,22 @@ async function refreshBrowseFilters() {
     setBrowseOptions("#browse-country", browseCountries, asCountry, browseCountry, browseCountryLabel);
   }
 
+  // The fixed lists are only worth counting once something else is narrowing
+  // them. With nothing set the answer would be the whole directory, and a
+  // tally is megabytes - the browse tab is meant to cost nothing until asked.
+  const place = { countryCode: browseCountry, tag: browseTag };
+  const anywhereElse = !!browseCountry || !!browseTag;
+  if (anywhereElse || browseBitrate > 0) {
+    jobs.push(narrowFixed("#browse-codec", facetQuery(place, "codec"), (f) => f.codecs, "format"));
+  } else {
+    resetFixed("#browse-codec");
+  }
+  if (anywhereElse || !!browseCodec) {
+    jobs.push(narrowFixed("#browse-bitrate", facetQuery(place, "bitrate"), (f) => f.bitrates, "bitrate"));
+  } else {
+    resetFixed("#browse-bitrate");
+  }
+
   await Promise.all(jobs);
 }
 
@@ -1185,6 +1203,52 @@ const filterNow = (selector) =>
     : { value: browseCountry, label: browseCountryLabel };
 
 /** Rebuild one dropdown from a facet tally, saying so while it is fetched. */
+/**
+ * Format and bitrate are fixed lists - five formats and six floors, chosen
+ * because they are what the player can open - so they are annotated rather
+ * than rebuilt: each option keeps its place and gains a count, and one with
+ * nothing behind it is disabled rather than removed. A short list that
+ * reshuffles as you narrow is harder to use than one that greys out.
+ */
+function annotateFixed(selector, buckets, sampled) {
+  const select = $(selector);
+  const counts = new Map((buckets || []).map((b) => [b.key, b.stations]));
+  Array.prototype.forEach.call(select.options, (option, index) => {
+    // Index 0 is "Any format" / "Any bitrate", which is always available.
+    if (index === 0) return;
+    if (!option.dataset.label) option.dataset.label = option.textContent;
+    const stations = counts.get(option.value) || 0;
+    option.textContent = `${option.dataset.label} (${stations}${sampled && stations ? "+" : ""})`;
+    // A filter still filtering stays selectable even at zero, or the dropdown
+    // would refuse to offer what it is currently set to.
+    option.disabled = stations === 0 && option.value !== select.value;
+  });
+}
+
+/** Back to plain labels, for when nothing is narrowing these any more. */
+function resetFixed(selector) {
+  Array.prototype.forEach.call($(selector).options, (option) => {
+    if (option.dataset.label) option.textContent = option.dataset.label;
+    option.disabled = false;
+  });
+}
+
+async function narrowFixed(selector, query, pick, what) {
+  const select = $(selector);
+  const mine = (browseNarrows.get(selector) || 0) + 1;
+  browseNarrows.set(selector, mine);
+  try {
+    const facets = await facetsFor(query);
+    if (browseNarrows.get(selector) !== mine) return;
+    annotateFixed(selector, pick(facets), facets.sampled);
+  } catch {
+    if (browseNarrows.get(selector) !== mine) return;
+    // Leave the plain list rather than a half-annotated one.
+    resetFixed(selector);
+    say(`could not work out which ${what}s are available`, "bad");
+  }
+}
+
 async function narrow(selector, query, pick, unpack, what) {
   const select = $(selector);
   // A cached tally resolves a microtask later than an uncached one, so two of
