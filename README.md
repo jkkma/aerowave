@@ -12,7 +12,7 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 
 - Twelve stations seeded in (FIP and its sister channels, Radio Paradise, WFMU,
   1.FM); add, edit, tag, favourite and filter your own.
-- **Stations play through a local relay, not straight off the web.** A media
+- **Ordinary stations play through a local relay, not straight off the web.** A media
   element cannot choose its own request headers, and enough broadcasters decide
   whether to answer on the strength of them that going direct is the thing that
   fails. SomaFM returns `403 text/html` to the webview's User-Agent and
@@ -37,9 +37,30 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   player can decode it.
 - `.pls` and `.m3u` links are followed to the real stream URL — in the relay
   now, so a playlist that does not admit to being one in its file name is
-  followed just the same. HLS is detected and called out rather than silently
-  playing nothing: WebView2 has no HLS decoder, and the relay refuses to carry
-  it rather than break the segment URLs by rewriting their origin.
+  followed just the same.
+- **HLS plays**, which is about 6% of the radio-browser directory — some 3,700
+  stations, France Inter and RTL among them. WebView2 will not play an `.m3u8`
+  itself: it reads the playlist, reports metadata, and then sits at
+  `readyState 1` for ever. So [hls.js](https://github.com/video-dev/hls.js) does
+  it instead, demuxing MPEG-TS or raw AAC and feeding the element through Media
+  Source Extensions. Segments are 6-in-10 MPEG-TS and 4-in-10 ADTS AAC in
+  practice, which is why the demuxing is not something this app does by hand.
+- **HLS fetches go through Rust too, but not through the relay.** hls.js uses
+  XHR, and an XHR is not a media load: it needs CORS and an origin the page is
+  allowed to reach. Reaching a loopback port would have meant opening the
+  policy to `http://127.0.0.1:*` — every service on the machine that happens to
+  be bound to loopback, not just ours. So HLS goes over a Tauri custom protocol
+  instead: one static origin, and nothing else on the machine can knock on it.
+  A session will only fetch from origins the app has itself seen — the
+  redirects it followed and the playlist bodies it served — because segments
+  routinely live on a different host from the playlist, so same-origin scoping
+  would break a fifth of them.
+- Now-playing for an HLS station is read from the ID3 tags inside the segments
+  and queued against the playback clock, since a segment is parsed up to half a
+  minute before it is audible. The tags are parsed here rather than by hls.js,
+  whose reader decodes every text frame as UTF-8 whatever the encoding byte
+  says and misreads ID3v2.3 frame sizes as synchsafe — either of which turns an
+  accented title into rubbish.
 - Now-playing titles are read out of the ICY metadata the server interleaves with
   the audio, polled every 25 s. The `<audio>` element cannot see that metadata, so
   the Rust side opens a second short-lived connection to read it.

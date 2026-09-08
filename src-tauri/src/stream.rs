@@ -112,6 +112,8 @@ pub struct StreamInfo {
     /// Set when the URL is a stream in principle but not one WebView2 can
     /// decode, so the UI can say why nothing is coming out.
     pub warning: Option<String>,
+    /// An HLS playlist. Not a warning any more - it is which player to use.
+    pub hls: bool,
 }
 
 /// What `resolve` arrived at. The stream arm carries the open response, so the
@@ -196,8 +198,8 @@ async fn resolve(
 
         let body = read_capped(resp).await?;
         if is_hls(&body) {
-            // WebView2 has no native HLS decoder, so say so rather than
-            // handing back a URL that will play silence.
+            // Not a failure - a fork. The caller is told it is HLS so the
+            // front end can hand it to hls.js instead of to <audio>.
             return Ok(Resolved::Hls {
                 final_url,
                 content_type,
@@ -362,6 +364,7 @@ async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure
         content_type: head.get("content-type").map(|c| c.to_ascii_lowercase()),
         title: None,
         warning: None,
+        hls: false,
     };
 
     let metaint: usize = match head.get("icy-metaint").and_then(|v| v.parse().ok()) {
@@ -422,7 +425,7 @@ async fn http_probe(url: &str, want_title: bool, skip_resolve: bool) -> Result<S
                 return Ok(StreamInfo {
                     url: final_url,
                     content_type: Some(content_type).filter(|c| !c.is_empty()),
-                    warning: Some("HLS playlist - WebView2 cannot play this natively".into()),
+                    hls: true,
                     ..Default::default()
                 })
             }
@@ -442,6 +445,7 @@ async fn http_probe(url: &str, want_title: bool, skip_resolve: bool) -> Result<S
         content_type: Some(content_type).filter(|c| !c.is_empty()),
         title: None,
         warning: None,
+        hls: false,
     };
 
     let metaint: usize = match header(&resp, "icy-metaint").and_then(|v| v.parse().ok()) {
@@ -493,10 +497,11 @@ pub struct RelaySource {
 /// solves, and the reason relaying is worth doing in Rust rather than in the
 /// webview.
 ///
-/// HLS is refused outright. Splicing segments is a different job from copying
-/// bytes, and handing the playlist through unchanged breaks the one thing that
-/// did work: the media element can no longer resolve the segment URLs against
-/// the relay's own origin.
+/// HLS is refused here, and that is deliberate rather than a gap: it plays,
+/// but not down this pipe. Splicing segments into one endless body is a
+/// different job from copying bytes, and rewriting the playlist's origin
+/// breaks hls.js's own URI resolution. HLS goes through `hls.rs` instead,
+/// which hands back one file at a time.
 pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
     // No `Icy-MetaData: 1`. Asking for it makes the server splice metadata
     // blocks into the audio every `icy-metaint` bytes, and the relay copies
@@ -521,7 +526,7 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
             });
         }
         Ok(Resolved::Hls { .. }) => {
-            return Err("HLS playlist - WebView2 cannot play this natively".into())
+            return Err("HLS - this plays through hls.rs, not the relay".into())
         }
         Err(e) => e,
     };
@@ -537,6 +542,55 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
         }),
         Err(icy) if icy.proven => Err(icy.message),
         Err(_) => Err(http),
+    }
+}
+
+/// One file, fetched once: no playlist following, no ICY metadata, a hard
+/// size cap and a deadline. The HLS side wants exactly this - hls.js walks
+/// the playlists itself and only needs each individual file handed back.
+pub async fn fetch_once(
+    url: &str,
+    range: Option<(u64, u64)>,
+    cap: usize,
+) -> Result<crate::hls::Fetched, String> {
+    let work = async {
+        let mut request = relay_client()?.get(url);
+        if let Some((start, end)) = range {
+            request = request.header("Range", format!("bytes={start}-{end}"));
+        }
+        let resp = request.send().await.map_err(|e| describe(&e))?;
+        let status = resp.status().as_u16();
+        let content_type = content_type_of(&resp);
+        let final_url = resp.url().to_string();
+
+        if let Some(len) = resp.content_length() {
+            if len as usize > cap {
+                return Err(format!("that file claims to be {len} bytes; the limit is {cap}"));
+            }
+        }
+        let mut body: Vec<u8> = Vec::new();
+        let mut chunks = resp.bytes_stream();
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk.map_err(|e| describe(&e))?;
+            if body.len() + chunk.len() > cap {
+                return Err(format!("that file ran past the {cap}-byte limit"));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(crate::hls::Fetched {
+            status,
+            content_type: if content_type.is_empty() {
+                "application/octet-stream".to_string()
+            } else {
+                content_type
+            },
+            final_url,
+            body,
+        })
+    };
+    match tokio::time::timeout(Duration::from_secs(20), work).await {
+        Ok(result) => result,
+        Err(_) => Err(format!("timed out fetching {url}")),
     }
 }
 

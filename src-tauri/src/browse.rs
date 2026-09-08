@@ -201,8 +201,8 @@ pub struct BrowseStation {
     /// The station's own artwork, if it has any that could be played back.
     pub favicon: String,
     pub votes: i64,
-    /// WebView2 has no HLS decoder. These are flagged rather than hidden: the
-    /// station may still be worth keeping, but it will not make a sound here.
+    /// An HLS station. Flagged, not hidden, and no longer a warning: these
+    /// play, through hls.js rather than by the webview itself.
     pub hls: bool,
 }
 

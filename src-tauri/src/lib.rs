@@ -5,12 +5,14 @@
 //! webview owns playback and the face.
 
 mod browse;
+mod hls;
 mod library;
 mod relay;
 mod scheduler;
 mod store;
 mod stream;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -33,6 +35,9 @@ pub struct AppState {
     /// to handing <audio> the station URL directly, which is what it did
     /// before the relay existed - fewer stations, but not none.
     pub relay: Mutex<Option<Arc<relay::Relay>>>,
+    /// HLS sessions. Unlike the relay this needs no socket, so there is
+    /// nothing to fail at startup and no Option to unwrap.
+    pub hls: Arc<hls::Hls>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -281,6 +286,100 @@ fn backup_track(app: AppHandle, state: State<AppState>) -> Result<TrackPick, Str
         .ok_or_else(|| format!("nothing playable in the backup folder ({folder})"))
 }
 
+/// Open an HLS session for `url` and hand back the base the webview's loader
+/// should build its requests on. See `hls.rs` for why HLS does not go through
+/// the loopback relay the way ordinary audio does.
+#[tauri::command]
+fn hls_session(state: State<'_, AppState>, url: String) -> Option<String> {
+    state
+        .hls
+        .open(&url)
+        .map(|session| format!("http://awhls.localhost/{session}"))
+}
+
+#[tauri::command]
+fn hls_close(state: State<'_, AppState>, session: String) {
+    state.hls.close(&session);
+}
+
+/// Serve one playlist or segment to hls.js.
+///
+/// The path is the session, `u` is the absolute upstream URL base64url-encoded
+/// - encoded because 8 of 45 measured radio HLS streams sign their segment
+/// URLs with query strings that have to survive byte-exact, and because an
+/// opaque blob can never be confused with our own parameters.
+///
+/// CORS is named exactly rather than starred: this answers our own webview and
+/// nothing else should be asking.
+async fn hls_response(
+    hls: &Arc<hls::Hls>,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    use base64::Engine;
+
+    let reply = |status: u16, body: Vec<u8>, content_type: &str, final_url: &str| {
+        let mut builder = tauri::http::Response::builder()
+            .status(status)
+            .header("Content-Type", content_type)
+            .header("Cache-Control", "no-store")
+            .header("Access-Control-Allow-Origin", WEBVIEW_ORIGIN)
+            .header("Access-Control-Allow-Headers", "Range")
+            .header("Access-Control-Expose-Headers", "X-Aerowave-Final");
+        if !final_url.is_empty() {
+            builder = builder.header("X-Aerowave-Final", final_url);
+        }
+        builder.body(body).unwrap_or_else(|_| {
+            tauri::http::Response::builder()
+                .status(500)
+                .body(Vec::new())
+                .unwrap()
+        })
+    };
+
+    if request.method() == tauri::http::Method::OPTIONS {
+        return reply(204, Vec::new(), "text/plain", "");
+    }
+    if request.method() != tauri::http::Method::GET {
+        return reply(405, Vec::new(), "text/plain", "");
+    }
+
+    let uri = request.uri();
+    let session = uri.path().trim_start_matches('/').to_string();
+    let query: HashMap<String, String> = uri
+        .query()
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+
+    let Some(encoded) = query.get("u") else {
+        return reply(400, b"no url".to_vec(), "text/plain", "");
+    };
+    let Ok(raw) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded) else {
+        return reply(400, b"bad url encoding".to_vec(), "text/plain", "");
+    };
+    let Ok(url) = String::from_utf8(raw) else {
+        return reply(400, b"bad url encoding".to_vec(), "text/plain", "");
+    };
+    let range = query.get("r").and_then(|r| {
+        let (start, end) = r.split_once('-')?;
+        Some((start.parse().ok()?, end.parse().ok()?))
+    });
+
+    match hls.fetch(&session, &url, range).await {
+        Ok(got) => {
+            let content_type = got.content_type.clone();
+            let final_url = got.final_url.clone();
+            reply(got.status, got.body, &content_type, &final_url)
+        }
+        Err(e) => {
+            eprintln!("aerowave hls: {url}: {e}");
+            reply(502, e.into_bytes(), "text/plain", "")
+        }
+    }
+}
+
 /// Hand back a loopback URL that plays `url`, or None when the relay is not
 /// running. See `relay.rs` for why a station is worth relaying at all.
 #[tauri::command]
@@ -484,7 +583,14 @@ fn pending_alarm(app: AppHandle, state: State<AppState>) -> Option<FirePayload> 
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Where the webview itself is served from. Tauri v2 uses this on Windows;
+/// it is the only origin the HLS protocol answers.
+const WEBVIEW_ORIGIN: &str = "http://tauri.localhost";
+
+
 pub fn run() {
+    let hls_state: Arc<hls::Hls> = Arc::new(hls::Hls::default());
+    let hls_protocol = hls_state.clone();
     // A portable copy keeps the webview's cache in the app directory too,
     // rather than leaving it behind in the user profile. WebView2 reads this
     // before the environment is created, so it has to be set first thing.
@@ -505,7 +611,16 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
-        .setup(|app| {
+        .register_asynchronous_uri_scheme_protocol("awhls", {
+            let hls = hls_protocol.clone();
+            move |_ctx, request, responder| {
+                let hls = hls.clone();
+                tauri::async_runtime::spawn(async move {
+                    responder.respond(hls_response(&hls, request).await);
+                });
+            }
+        })
+        .setup(move |app| {
             let handle = app.handle().clone();
             let store = Store::load(&handle);
             app.manage(AppState {
@@ -513,6 +628,7 @@ pub fn run() {
                 sched: Mutex::new(scheduler::SchedState::default()),
                 recent: RecentTracks::default(),
                 relay: Mutex::new(None),
+                hls: hls_state,
             });
 
             // The relay binds a port, so it cannot be built before the async
@@ -588,6 +704,8 @@ pub fn run() {
             backup_track,
             probe_stream,
             relay_url,
+            hls_session,
+            hls_close,
             browse_stations,
             station_logo,
             station_art,

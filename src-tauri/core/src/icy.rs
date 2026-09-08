@@ -33,8 +33,9 @@ pub fn first_url_in_playlist(body: &str) -> Option<String> {
     None
 }
 
-/// Is this an HLS playlist? WebView2 has no native HLS decoder, so these are
-/// worth calling out rather than handing over a URL that plays silence.
+/// Is this an HLS playlist? WebView2 will not play one by itself, so these
+/// take the other path - hls.js, fed through `hls.rs` - rather than being
+/// handed to the media element as if they were a stream.
 pub fn is_hls(body: &str) -> bool {
     body.contains("#EXT-X-")
 }
