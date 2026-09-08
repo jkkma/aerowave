@@ -69,23 +69,112 @@ fn save_alarms(app: AppHandle, state: State<AppState>, alarms: Vec<Alarm>) -> Re
 fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> Result<(), String> {
     let want_autostart = settings.start_with_windows;
     state.store.update(|d| d.settings = settings)?;
+    // Never let this lose the rest of the settings - they are saved already.
+    sync_autostart(&app, &state, want_autostart)
+}
 
-    // Keep the registry entry in step with the toggle, but only when it is
-    // actually out of step: settings are saved on every volume nudge, and
-    // deleting a registry value that is not there is an error.
-    let manager = app.autolaunch();
-    if manager.is_enabled().unwrap_or(false) != want_autostart {
-        let result = if want_autostart {
-            manager.enable()
-        } else {
-            manager.disable()
-        };
-        // Never let this lose the rest of the settings - they are saved already.
-        if let Err(e) = result {
-            return Err(format!("settings saved, but start-with-Windows failed: {e}"));
+/// What Windows would actually run at logon, and whether the user has said no
+/// to it outside this app.
+#[cfg(windows)]
+mod logon {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+    use winreg::RegKey;
+
+    const RUN: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+    const APPROVED: &str =
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+    const VALUE: &str = "Aerowave";
+
+    /// The command line in the Run key, if there is one.
+    pub fn entry() -> Option<String> {
+        RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(RUN)
+            .ok()?
+            .get_value::<String, _>(VALUE)
+            .ok()
+    }
+
+    /// Task Manager and Settings > Startup record their override here; an odd
+    /// first byte means the user switched it off.
+    pub fn switched_off_by_user() -> bool {
+        RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(APPROVED)
+            .ok()
+            .and_then(|k| k.get_raw_value(VALUE).ok())
+            .and_then(|v| v.bytes.first().copied())
+            .map(|b| b % 2 == 1)
+            .unwrap_or(false)
+    }
+
+    /// Drop that override, so the app's own toggle is the only truth again.
+    pub fn clear_override() {
+        if let Ok(key) =
+            RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(APPROVED, KEY_SET_VALUE)
+        {
+            let _ = key.delete_value(VALUE);
         }
     }
-    Ok(())
+
+    /// Does the entry point at the copy that is running now? A portable copy
+    /// that has been moved leaves one pointing at nothing.
+    pub fn entry_is_this_exe() -> bool {
+        let (Some(entry), Ok(exe)) = (entry(), std::env::current_exe()) else {
+            return false;
+        };
+        entry
+            .to_lowercase()
+            .contains(&exe.to_string_lossy().to_lowercase())
+    }
+}
+
+/// Bring the logon entry in line with the toggle.
+///
+/// `auto-launch`'s `is_enabled()` is a single bit and cannot separate "no
+/// entry", "an entry pointing at a copy that has since moved" and "the user
+/// switched it off in Task Manager". That matters twice over: a moved
+/// portable copy would keep an entry that launches nothing while SETUP still
+/// reads ON, and settings are written on every volume nudge, so acting on a
+/// bare mismatch would quietly overturn the user's own choice every time.
+#[cfg(windows)]
+fn sync_autostart(app: &AppHandle, state: &AppState, want: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    let present = logon::entry().is_some();
+
+    let result = if want {
+        if !present || !logon::entry_is_this_exe() {
+            manager.enable()
+        } else if logon::switched_off_by_user() {
+            // Present, correct, and disabled outside the app. That is the
+            // user's decision; make our toggle agree rather than fight it.
+            let _ = state.store.update(|d| d.settings.start_with_windows = false);
+            let _ = app.emit("settings-updated", ());
+            return Ok(());
+        } else {
+            Ok(())
+        }
+    } else if present {
+        let disabled = manager.disable();
+        logon::clear_override();
+        disabled
+    } else {
+        Ok(())
+    };
+
+    result.map_err(|e| format!("settings saved, but start-with-Windows failed: {e}"))
+}
+
+#[cfg(not(windows))]
+fn sync_autostart(app: &AppHandle, _state: &AppState, want: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    if manager.is_enabled().unwrap_or(false) == want {
+        return Ok(());
+    }
+    let result = if want {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
+    result.map_err(|e| format!("settings saved, but start-with-Windows failed: {e}"))
 }
 
 /// Open the folder picker. Async so the dialog does not block the main
@@ -147,8 +236,14 @@ fn backup_track(app: AppHandle, state: State<AppState>) -> Result<TrackPick, Str
 }
 
 #[tauri::command]
-async fn probe_stream(url: String, want_title: bool) -> Result<stream::StreamInfo, String> {
-    stream::probe(&url, want_title).await
+async fn probe_stream(
+    url: String,
+    want_title: bool,
+    // Optional so the call sites that do not care keep deserializing. Set by
+    // the now-playing poll, which already holds a direct URL.
+    skip_resolve: Option<bool>,
+) -> Result<stream::StreamInfo, String> {
+    stream::probe(&url, want_title, skip_resolve.unwrap_or(false)).await
 }
 
 #[tauri::command]
@@ -157,19 +252,15 @@ fn next_alarm(app: AppHandle) -> Option<NextAlarm> {
 }
 
 /// Ring an alarm right now, to hear what it will sound like.
+///
+/// Takes the alarm by value rather than by id deliberately. Looking it up
+/// meant the UI had to save the edit first, which armed the edited time the
+/// moment TEST was pressed and left CANCEL with nothing to undo. Resolving
+/// the source from the passed alarm gives the same answer the real ring will
+/// get, without touching the stored copy.
 #[tauri::command]
-fn test_alarm(app: AppHandle, state: State<AppState>, alarm_id: String) -> Result<FirePayload, String> {
-    let alarm = state
-        .store
-        .data
-        .lock()
-        .unwrap()
-        .alarms
-        .iter()
-        .find(|a| a.id == alarm_id)
-        .cloned()
-        .ok_or_else(|| "no such alarm".to_string())?;
-    Ok(scheduler::resolve_source(&app, &alarm, "test"))
+fn test_alarm(app: AppHandle, alarm: Alarm) -> FirePayload {
+    scheduler::resolve_source(&app, &alarm, "test")
 }
 
 #[tauri::command]
@@ -321,6 +412,25 @@ pub fn run() {
             });
 
             build_tray(&handle)?;
+
+            // A portable copy that has been moved, or reinstalled to a new
+            // versioned directory, leaves a logon entry pointing at a path
+            // that no longer exists. One registry read puts it right.
+            #[cfg(windows)]
+            {
+                let want = handle
+                    .state::<AppState>()
+                    .store
+                    .data
+                    .lock()
+                    .unwrap()
+                    .settings
+                    .start_with_windows;
+                if want && !logon::entry_is_this_exe() {
+                    let _ = handle.autolaunch().enable();
+                }
+            }
+
             scheduler::spawn(handle.clone());
 
             // Launched by the autostart entry: go straight to the tray.

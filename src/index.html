@@ -92,13 +92,13 @@
     <div class="corner bl"></div><div class="corner br"></div>
 
     <nav class="tabs" role="tablist">
-      <button class="tab on" data-pane="radio" role="tab">RADIO</button>
-      <button class="tab" data-pane="alarms" role="tab">ALARMS</button>
-      <button class="tab" data-pane="settings" role="tab">SETUP</button>
+      <button class="tab on" id="tab-radio" data-pane="radio" role="tab" aria-selected="true" aria-controls="pane-radio">RADIO</button>
+      <button class="tab" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms">ALARMS</button>
+      <button class="tab" id="tab-settings" data-pane="settings" role="tab" aria-selected="false" aria-controls="pane-settings">SETUP</button>
     </nav>
 
     <!-- ---------------------------- radio ---------------------------- -->
-    <div class="pane on" id="pane-radio">
+    <div class="pane on" id="pane-radio" role="tabpanel" aria-labelledby="tab-radio">
       <div class="paneheader">
         <input type="search" id="station-filter" class="field" placeholder="Filter stations">
         <button class="gel wide" id="btn-add-station">+ STATION</button>
@@ -131,7 +131,7 @@
     </div>
 
     <!-- ---------------------------- alarms --------------------------- -->
-    <div class="pane" id="pane-alarms">
+    <div class="pane" id="pane-alarms" role="tabpanel" aria-labelledby="tab-alarms">
       <div class="paneheader">
         <div class="nextalarm" id="next-alarm">NO ALARM SET</div>
         <button class="gel wide" id="btn-add-alarm">+ ALARM</button>
@@ -230,7 +230,7 @@
     </div>
 
     <!-- --------------------------- settings -------------------------- -->
-    <div class="pane" id="pane-settings">
+    <div class="pane" id="pane-settings" role="tabpanel" aria-labelledby="tab-settings">
       <div class="folderbox backup">
         <div class="hud-mini">BACKUP FOLDER</div>
         <p class="editor-note">Played whenever an alarm's own source will not make a sound —
@@ -263,6 +263,10 @@
   </section>
 </main>
 
+<!-- Announced to a screen reader; #status-msg cannot carry aria-live because
+     its six-second reset would announce "READY" over everything. -->
+<div id="a11y-log" role="status" aria-live="polite" class="sr-only"></div>
+
 <footer class="statusbar">
   <span class="hud-mini" id="status-msg">READY</span>
   <span class="flex"></span>
@@ -270,7 +274,7 @@
 </footer>
 
 <!-- ============================ alarm overlay ========================= -->
-<div class="ringing" id="ringing" hidden>
+<div class="ringing" id="ringing" hidden role="alertdialog" aria-modal="true" aria-labelledby="ring-label" aria-describedby="ring-source">
   <div class="ringcard panel bevel" id="ringcard">
     <div class="corner tl"></div><div class="corner tr"></div>
     <div class="corner bl"></div><div class="corner br"></div>

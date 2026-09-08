@@ -69,6 +69,10 @@ function say(msg, mood, sticky) {
   const el = $("#status-msg");
   el.textContent = msg.toUpperCase();
   el.style.color = mood === "bad" ? "var(--alert)" : mood === "good" ? "var(--alien)" : "";
+  // Announce it too. This one is never cleared, so the reset to READY is not
+  // read out over whatever the user is doing.
+  const log = $("#a11y-log");
+  if (log) log.textContent = msg;
   clearTimeout(statusMsgTimer);
   // Most of these are passing notices. A few - settings that would not load -
   // must not scroll past while the user is looking at another tab.
@@ -250,6 +254,10 @@ async function play(source, opts = {}) {
     if (superseded(generation)) return;
   }
 
+  // Remember what was actually played. The metadata poll then has a direct
+  // URL and does not have to make the broadcaster serve the playlist again
+  // every time it asks for a title.
+  if (source.kind === "station") player.resolved = url;
   audio.src = url;
   audio.volume = opts.fadeSecs > 0 ? 0.02 : volume;
   player.target = volume;
@@ -271,12 +279,26 @@ async function play(source, opts = {}) {
 function startMetadata(source) {
   clearInterval(player.metaTimer);
   if (state.settings.showMetadata === false) return;
+  // Plenty of stations send no ICY titles at all. Polling one of those opens a
+  // connection a minute, for ever, to learn nothing - so give up after three.
+  let titleless = 0;
   const poll = async () => {
     if (player.source !== source) return;
     try {
-      const info = await invoke("probe_stream", { url: source.url, wantTitle: true });
+      const info = await invoke("probe_stream", {
+        url: player.resolved || source.url,
+        wantTitle: true,
+        skipResolve: !!player.resolved,
+      });
       if (player.source !== source) return;
-      if (info.title) $("#np-track").textContent = info.title;
+      if (info.title) {
+        titleless = 0;
+        $("#np-track").textContent = info.title;
+      } else if (++titleless >= 3) {
+        clearInterval(player.metaTimer);
+        player.metaTimer = null;
+        return;
+      }
       const bits = [];
       if (info.bitrate) bits.push(info.bitrate + " kbps");
       if (info.genre) bits.push(info.genre);
@@ -287,7 +309,9 @@ function startMetadata(source) {
     }
   };
   poll();
-  player.metaTimer = setInterval(poll, 25000);
+  // Once a minute is plenty for a track title, and it is a whole connection
+  // to the broadcaster each time.
+  player.metaTimer = setInterval(poll, 60000);
 }
 
 /**
@@ -340,15 +364,20 @@ function failure(detail, opts = {}) {
   setStatus("RECONNECTING " + player.retries + "/4", "busy");
   clearTimeout(player.retryTimer);
   player.retryTimer = setTimeout(async () => {
+    // Snapshot before the await, not after: taken afterwards this could only
+    // ever equal itself, so it guarded nothing.
+    const generation = playGeneration;
     if (player.source !== source) return;
     // Second attempt onwards, try the playlist-resolved URL.
     if (player.retries >= 2 && !player.resolved) {
       try {
         const info = await invoke("probe_stream", { url: source.url, wantTitle: false });
+        // A stop during the probe must not write a resolved URL back into a
+        // session that has already been torn down.
+        if (superseded(generation) || player.source !== source) return;
         player.resolved = info.url;
       } catch { /* stay with the original */ }
     }
-    const generation = playGeneration;
     audio.src = player.resolved || source.url;
     audio.play().catch((e) => {
       if (superseded(generation) || isAbort(e)) return;
@@ -533,7 +562,7 @@ function goSilent(why) {
  * timestamp catches that, and also a stream that starts and hangs mid-ring,
  * which fires neither `error` nor `ended`.
  */
-function armRingWatchdog(quietMs, note, reason, volume) {
+function armRingWatchdog(quietMs, note, reason) {
   clearInterval(ringWatchdog);
   ringWatchdog = setInterval(() => {
     if (!ringing) {
@@ -550,7 +579,9 @@ function armRingWatchdog(quietMs, note, reason, volume) {
       return;
     }
     $("#ring-note").textContent = note;
-    playBackupTrack(reason, { volume });
+    // Read the volume now rather than capturing it when the ring started, so
+    // turning it down mid-ring survives a fallback.
+    playBackupTrack(reason, { volume: ringing.volume });
   }, 1000);
 }
 
@@ -578,6 +609,9 @@ function onAlarmFire(payload) {
   $("#ring-note").textContent = payload.note || "";
   $("#ring-snooze-mins").textContent = payload.snoozeMins + " min";
   overlay.hidden = false;
+  // After unhiding, not before: focus() on a hidden subtree does nothing, and
+  // an alarm nobody can dismiss from the keyboard is not much of an alarm.
+  $("#ring-dismiss").focus();
 
   const opts = { volume: payload.volume, fadeSecs: payload.fadeSecs };
   if (payload.kind === "station") {
@@ -587,12 +621,16 @@ function onAlarmFire(payload) {
     armRingWatchdog(
       12000,
       "That stream did not start - playing the backup folder.",
-      "stream did not start",
-      payload.volume
+      "stream did not start"
     );
   } else if (payload.kind === "folder") {
+    // payload.folder is set when the track came from the alarm's own folder.
+    // Prefer it: a test ring is deliberately unsaved, so looking the alarm up
+    // in stored state would miss and drop the ring to the backup folder.
     const alarm = state.alarms.find((a) => a.id === payload.alarmId);
-    const own = alarm && alarm.source && alarm.source.kind === "folder" ? alarm.source.path : null;
+    const own =
+      payload.folder ||
+      (alarm && alarm.source && alarm.source.kind === "folder" ? alarm.source.path : null);
     // A note means Rust could not use the alarm's own source and reached for
     // the backup folder; keep pulling from there for the rest of the ring.
     const folder = payload.note || !own ? BACKUP : own;
@@ -600,8 +638,7 @@ function onAlarmFire(payload) {
     armRingWatchdog(
       8000,
       "That track would not play - playing the backup folder.",
-      "that track would not play",
-      payload.volume
+      "that track would not play"
     );
   } else {
     // Rust could not resolve any source at all.
@@ -727,7 +764,20 @@ function renderStations() {
     });
 
     li.append(star, edit);
+    // Reachable without a mouse: the row is the play control.
+    li.tabIndex = 0;
+    li.setAttribute("role", "button");
+    li.setAttribute("aria-label", `Play ${station.name}`);
+    if (player.source && player.source.stationId === station.id) {
+      li.setAttribute("aria-current", "true");
+    }
     li.addEventListener("click", () => playStation(station));
+    li.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.code === "Space") {
+        e.preventDefault();
+        playStation(station);
+      }
+    });
     list.append(li);
   });
 }
@@ -790,7 +840,7 @@ function renderAlarms() {
     const sw = document.createElement("button");
     sw.className = "sw";
     sw.setAttribute("aria-pressed", String(!!alarm.enabled));
-    sw.title = "Enable";
+    sw.setAttribute("aria-label", `Enable the ${alarm.label || "alarm"} alarm at ${fmtAlarmTime(alarm.hour, alarm.minute)}`);
     sw.addEventListener("click", (e) => {
       e.stopPropagation();
       alarm.enabled = !alarm.enabled;
@@ -859,7 +909,11 @@ async function refreshFolderLabels() {
 function renderSettings() {
   $$(".settings .row").forEach((row) => {
     const key = row.dataset.setting;
-    row.querySelector(".sw").setAttribute("aria-pressed", String(!!state.settings[key]));
+    const sw = row.querySelector(".sw");
+    sw.setAttribute("aria-pressed", String(!!state.settings[key]));
+    // The switches are empty buttons; without this they announce as "button".
+    const label = row.querySelector("span");
+    if (label) sw.setAttribute("aria-label", label.textContent.trim());
   });
   const vol = Math.round((state.settings.volume ?? 0.8) * 100);
   $("#volume").value = vol;
@@ -1121,11 +1175,14 @@ function wire() {
     e.target.style.setProperty("--fill", v + "%");
     $("#volval").textContent = v;
     state.settings.volume = v / 100;
-    if (!ringing) {
-      clearInterval(player.fadeTimer);
-      audio.volume = v / 100;
-      player.target = v / 100;
-    }
+    // Apply it always: the slider used to persist a value it refused to act
+    // on while an alarm rang, which is the one time you most want it. Cancels
+    // any fade-in, which is the point - the user is overriding it.
+    clearInterval(player.fadeTimer);
+    audio.volume = v / 100;
+    player.target = v / 100;
+    // Carry it into the ring so a later fallback does not snap back.
+    if (ringing) ringing.volume = v / 100;
     saveSettings();
   });
 
@@ -1136,7 +1193,10 @@ function wire() {
   // tabs
   $$(".tab").forEach((tab) =>
     tab.addEventListener("click", () => {
-      $$(".tab").forEach((t) => t.classList.toggle("on", t === tab));
+      $$(".tab").forEach((t) => {
+        t.classList.toggle("on", t === tab);
+        t.setAttribute("aria-selected", String(t === tab));
+      });
       $$(".pane").forEach((p) => p.classList.toggle("on", p.id === "pane-" + tab.dataset.pane));
       if (tab.dataset.pane === "alarms") refreshNextAlarm();
     })
@@ -1324,16 +1384,12 @@ function wire() {
       note.textContent = result.error;
       return;
     }
-    // Save first so the backend can resolve the source exactly as it will
-    // when the alarm really goes off.
-    const idx = state.alarms.findIndex((a) => a.id === result.alarm.id);
-    if (idx >= 0) state.alarms[idx] = result.alarm;
-    else state.alarms.push(result.alarm);
-    await saveAlarms();
-    renderAlarms();
-    if (!editingAlarm) editingAlarm = result.alarm;
+    // Deliberately not saved. TEST used to commit the edit so the backend
+    // could look the alarm up by id, which armed the edited time the moment
+    // the button was pressed and left CANCEL with nothing to undo. The alarm
+    // goes over the wire instead, and the stored copy is untouched.
     try {
-      const payload = await invoke("test_alarm", { alarmId: result.alarm.id });
+      const payload = await invoke("test_alarm", { alarm: result.alarm });
       onAlarmFire(payload);
     } catch (e) {
       say(String(e), "bad");
@@ -1363,7 +1419,10 @@ function wire() {
   // keyboard
   document.addEventListener("keydown", (e) => {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
-    if (e.code === "Space" && !typing) {
+    // Space belongs to whichever control has focus. The exception is a ringing
+    // alarm: a field left focused overnight must not swallow the dismiss.
+    const onControl = document.activeElement.closest("button, .row");
+    if (e.code === "Space" && (ringing || (!typing && !onControl))) {
       e.preventDefault();
       if (ringing) dismissRing();
       else togglePlay();
@@ -1421,6 +1480,8 @@ async function boot() {
   await loadState();
 
   await listen("alarm-fire", (event) => onAlarmFire(event.payload));
+  // Windows can turn autostart off behind our back; the backend says when.
+  await listen("settings-updated", () => loadState());
   await listen("alarms-updated", async () => {
     state.alarms = (await invoke("get_state")).alarms;
     renderAlarms();

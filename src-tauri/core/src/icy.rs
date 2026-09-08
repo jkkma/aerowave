@@ -45,10 +45,13 @@ pub fn is_hls(body: &str) -> bool {
 pub fn stream_title(block: &str) -> Option<String> {
     let start = block.find("StreamTitle=")? + "StreamTitle=".len();
     let rest = &block[start..];
+    // Most servers quote the title, but not all. An unquoted one ends at the
+    // first semicolon; looking for `';` in it runs past the end of the field
+    // and swallows StreamUrl with it.
+    let quoted = rest.starts_with('\'');
     let rest = rest.strip_prefix('\'').unwrap_or(rest);
-    let end = rest
-        .find("';")
-        .unwrap_or_else(|| rest.trim_end_matches('\0').trim_end().len());
+    let terminator = if quoted { rest.find("';") } else { rest.find(';') };
+    let end = terminator.unwrap_or_else(|| rest.trim_end_matches('\0').trim_end().len());
     let title = rest.get(..end)?.trim();
     if title.is_empty() {
         None
@@ -89,6 +92,22 @@ mod tests {
         assert_eq!(
             stream_title("StreamTitle='Don't Stop';StreamUrl='';"),
             Some("Don't Stop".to_string())
+        );
+    }
+
+    #[test]
+    fn reads_an_unquoted_stream_title() {
+        assert_eq!(
+            stream_title("StreamTitle=Artist - Track;StreamUrl='https://x/art.jpg';"),
+            Some("Artist - Track".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unquoted_title_padded_with_nuls_keeps_no_semicolon() {
+        assert_eq!(
+            stream_title("StreamTitle=Artist - Track;\0\0"),
+            Some("Artist - Track".to_string())
         );
     }
 
