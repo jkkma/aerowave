@@ -17,19 +17,20 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Directories and broadcasters both like to know who is calling, and
-/// radio-browser asks for it outright. Carry the real version.
+/// What to tell a directory or a broadcaster we are. Both like to know, and
+/// radio-browser asks outright. Carry the real version.
 pub const UA: &str = concat!("Aerowave/", env!("CARGO_PKG_VERSION"));
-/// What to tell a *broadcaster* we are.
+/// 0.5.0 told broadcasters we were Edge, on the strength of SomaFM answering
+/// `403` to one User-Agent and `200` to a browser's. That measurement was an
+/// artefact: the agent SomaFM refused belonged to the browser the test ran in,
+/// not to anything this app ever sends. SomaFM serves the name below quite
+/// happily, and pretending to be a browser cost real stations - Shoutcast v1
+/// sniffs the other way and hands a browser its admin page instead of the
+/// stream, which is a `text/html` body the player then reports as an
+/// undecodable one. Every Radio Caprice mount went silent that way.
 ///
-/// Not the same thing at all. A number of stations decide whether to answer on
-/// the strength of the User-Agent alone - SomaFM returns `403 text/html` to
-/// anything it does not recognise and `200 audio/mpeg` to an ordinary browser,
-/// which was measured by sending the two down the same proxy and changing
-/// nothing else. An <audio> element cannot choose its own, which is half the
-/// reason the relay exists; on this side we can, so say something every
-/// broadcaster already serves.
-pub const STREAM_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0";
+/// Measured over 60 stations, one per host: this name got audio from 40, the
+/// browser string from 38, and there was no station the browser string won.
 const MAX_META_BYTES: usize = 512 * 1024;
 /// A response head is a few hundred bytes. Anything still writing one after
 /// this much is not going to stop on its own.
@@ -44,7 +45,7 @@ static RELAY_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn build_client(read_timeout: Option<Duration>) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
-        .user_agent(STREAM_UA)
+        .user_agent(UA)
         .connect_timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::limited(6));
     if let Some(t) = read_timeout {
@@ -151,6 +152,25 @@ async fn read_capped(resp: reqwest::Response) -> Result<String, String> {
         body.extend_from_slice(&chunk);
     }
     Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// Is this a body worth handing to a player?
+///
+/// A station that is down, full, or pointed at the wrong path answers `200`
+/// with a web page - Shoutcast's admin console, an error page, a consent
+/// screen. Passing that to <audio> gets `MEDIA_ERR_SRC_NOT_SUPPORTED`, which
+/// says "this codec is unsupported" when the truth is "this is not audio at
+/// all". Better to notice here, where the content type is in hand.
+fn is_playable_type(content_type: &str) -> bool {
+    let t = content_type.trim().to_ascii_lowercase();
+    if t.is_empty() {
+        // Plenty of Shoutcast servers say nothing at all, and play fine.
+        return true;
+    }
+    !(t.starts_with("text/")
+        || t.starts_with("application/json")
+        || t.starts_with("application/xml")
+        || t.starts_with("application/xhtml"))
 }
 
 fn content_type_of(resp: &reqwest::Response) -> String {
@@ -300,7 +320,7 @@ async fn icy_connect(
     // it settles the question of keeping the connection open afterwards.
     let metadata = if want_metadata { "Icy-MetaData: 1\r\n" } else { "" };
     let request = format!(
-        "GET {target} HTTP/1.0\r\nHost: {host}:{port}\r\nUser-Agent: {STREAM_UA}\r\n\
+        "GET {target} HTTP/1.0\r\nHost: {host}:{port}\r\nUser-Agent: {UA}\r\n\
          {metadata}Connection: close\r\n\r\n"
     );
     socket
@@ -437,6 +457,13 @@ async fn http_probe(url: &str, want_title: bool, skip_resolve: bool) -> Result<S
         }
     };
 
+    if !is_playable_type(&content_type) {
+        return Err(format!(
+            "that address answers with {content_type}, not audio - the station \
+             is probably down, full, or has moved"
+        ));
+    }
+
     let mut info = StreamInfo {
         url: direct,
         name: header(&resp, "icy-name"),
@@ -515,6 +542,12 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
         Ok(Resolved::Stream {
             resp, content_type, ..
         }) => {
+            if !is_playable_type(&content_type) {
+                return Err(format!(
+                    "that address answers with {content_type}, not audio - \
+                     the station is probably down, full, or has moved"
+                ));
+            }
             let content_type = if content_type.is_empty() {
                 "audio/mpeg".to_string()
             } else {
