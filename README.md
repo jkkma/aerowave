@@ -12,17 +12,30 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 
 - Twelve stations seeded in (FIP and its sister channels, Radio Paradise, WFMU,
   1.FM); add, edit, tag, favourite and filter your own.
-- **Ordinary stations play through a local relay, not straight off the web.** A media
-  element cannot choose its own request headers, and enough broadcasters decide
-  whether to answer on the strength of them that going direct is the thing that
-  fails. SomaFM returns `403 text/html` to the webview's User-Agent and
-  `200 audio/mpeg` to an ordinary browser's — measured by sending both down the
-  same proxy and changing nothing else. So Rust binds a listener on
-  `127.0.0.1`, fetches the stream itself with headers a broadcaster will
-  actually serve, and `<audio>` plays from there. Loopback only, unguessable
-  per-station tokens, `GET` only, and a `Host` that must be loopback too.
-  `cargo run --example relaycheck` exercises the whole of it against real
-  stations without starting the app.
+- **Ordinary stations play through a local relay, not straight off the web.** A
+  media element cannot choose its own request headers, cannot see an ICY
+  response, and cannot follow a playlist. Rust binds a listener on `127.0.0.1`,
+  fetches the stream itself — following playlists and redirects, and speaking
+  Shoutcast v1 where that is what answers — and `<audio>` plays from there.
+  Loopback only, unguessable per-station tokens, `GET` only, and a `Host` that
+  must be loopback too. `cargo run --example relaycheck` exercises the whole of
+  it against real stations without starting the app.
+- **What the relay tells a broadcaster it is turns out to matter more than
+  expected, and not in the direction 0.5.0 guessed.** That release had it
+  present an Edge User-Agent, on the strength of SomaFM answering `403` to one
+  agent and `200` to a browser's. The measurement was an artefact — the agent
+  SomaFM refused belonged to the browser the test ran in, not to anything this
+  app sends — and the change quietly cost real stations, because Shoutcast v1
+  sniffs the other way: hand it a browser and it serves its admin console
+  instead of the stream. Every Radio Caprice mount went silent that way, and
+  the player could only report the resulting HTML as something it could not
+  decode. Measured over 60 stations, one per host: `Aerowave/<version>` gets
+  audio from 40, the browser string from 38, and there is no station the
+  browser string wins. So it says who it really is.
+- A `200` carrying `text/html` is refused with that as the reason. A station
+  that is down, full, or has moved answers with a page, not a stream, and
+  passing one to the player produces a complaint about codecs that sends you
+  looking in entirely the wrong place.
 - **`MEDIA_ERR_SRC_NOT_SUPPORTED` does not mean "bad codec".** The element
   reports the same code for an HTTP error page and for a refused connection, so
   a station that looks undecodable usually is not — of a 24-station sample

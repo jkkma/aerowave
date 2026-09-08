@@ -160,12 +160,13 @@ impl Default for AppData {
 /// than no station at all.
 ///
 /// SomaFM was named here as a station that answers perfectly well and is
-/// refused by the media element anyway. That was wrong about why - it answers
-/// `403 text/html` to the webview's User-Agent and `200 audio/mpeg` to an
-/// ordinary browser's, and `MEDIA_ERR_SRC_NOT_SUPPORTED` is all the element
-/// can say about an error page. Stations play through the relay now, which
-/// asks in terms a broadcaster will serve, so that whole class has stopped
-/// being a reason to leave one out.
+/// refused by the media element anyway. Two goes at explaining that have now
+/// been wrong: it is not a codec, and it is not the User-Agent either - SomaFM
+/// serves this app's own name quite happily. What is true is narrower.
+/// `MEDIA_ERR_SRC_NOT_SUPPORTED` is what the element reports for an error
+/// page and a refused connection as well as for a codec it lacks, so a station
+/// listed as unplayable deserves a second look rather than a note in a
+/// comment.
 fn default_stations() -> Vec<Station> {
     let seed: &[(&str, &str, &str)] = &[
         ("FIP", "https://icecast.radiofrance.fr/fip-midfi.mp3", "eclectic"),
