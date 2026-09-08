@@ -559,6 +559,16 @@ let browseOffset = 0;
 let browseMore = false;
 let browseBusy = false;
 let browseLooked = false;
+/**
+ * Which search the list belongs to. Changing a filter while one is in flight
+ * used to be dropped on the floor: the dropdowns showed the new filter, the
+ * list showed the old results, and MORE then paged the new query from the old
+ * query's offset. The newest request wins instead, and an older one that
+ * lands late is thrown away.
+ */
+let browseRequest = 0;
+/** The same, per dropdown, for the tallies that narrow one filter by the other. */
+const browseNarrows = new Map();
 
 /** Same stream by any reasonable reading, so a station is not kept twice. */
 const sameStream = (a, b) => {
@@ -582,7 +592,7 @@ function browseNote(text, mood) {
 
 /** Run a search. `more` adds the next page instead of starting over. */
 async function browseSearch(more) {
-  if (browseBusy) return;
+  const mine = ++browseRequest;
   browseBusy = true;
   const name = $("#browse-query").value.trim();
   if (!more) {
@@ -603,6 +613,9 @@ async function browseSearch(more) {
         offset: browseOffset,
       },
     });
+    // A newer search started while this one was out: that one owns the list,
+    // the offset and the note now.
+    if (mine !== browseRequest) return;
     // Step over what the directory offered, not over what survived the tidy:
     // an offset counted in survivors walks back over ground already covered.
     browseOffset += page.offered;
@@ -622,11 +635,14 @@ async function browseSearch(more) {
         : "Nothing in the directory matches that."
     );
   } catch (e) {
+    if (mine !== browseRequest) return;
     browseMore = false;
     browseNote(String(e), "bad");
   } finally {
-    browseBusy = false;
-    renderBrowse();
+    if (mine === browseRequest) {
+      browseBusy = false;
+      renderBrowse();
+    }
   }
 }
 
@@ -696,20 +712,34 @@ async function refreshBrowseFilters() {
   await Promise.all(jobs);
 }
 
+/** What that dropdown is filtering by right now, read fresh rather than kept. */
+const filterNow = (selector) =>
+  selector === "#browse-tag"
+    ? { value: browseTag, label: browseTagLabel }
+    : { value: browseCountry, label: browseCountryLabel };
+
 /** Rebuild one dropdown from a facet tally, saying so while it is fetched. */
 async function narrow(selector, query, pick, unpack, what) {
   const select = $(selector);
-  const value = selector === "#browse-tag" ? browseTag : browseCountry;
-  const label = selector === "#browse-tag" ? browseTagLabel : browseCountryLabel;
+  // A cached tally resolves a microtask later than an uncached one, so two of
+  // these can be in flight on one dropdown and finish out of order. Newest
+  // wins, and the selection is read when the answer lands rather than when it
+  // was asked for - otherwise a slow tally snaps the dropdown back to what was
+  // chosen minutes ago, without firing a change event to say so.
+  const mine = (browseNarrows.get(selector) || 0) + 1;
+  browseNarrows.set(selector, mine);
   select.disabled = true;
   try {
     const facets = await facetsFor(query);
-    setBrowseOptions(selector, pick(facets), unpack, value, label);
+    if (browseNarrows.get(selector) !== mine) return;
+    const chosen = filterNow(selector);
+    setBrowseOptions(selector, pick(facets), unpack, chosen.value, chosen.label, facets.sampled);
   } catch {
+    if (browseNarrows.get(selector) !== mine) return;
     // Keep whatever the list already had rather than emptying it.
     say(`could not work out which ${what}s are available`, "bad");
   } finally {
-    select.disabled = false;
+    if (browseNarrows.get(selector) === mine) select.disabled = false;
   }
 }
 
@@ -719,7 +749,7 @@ async function narrow(selector, query, pick, unpack, what) {
  * person reads, which are not always the same string - so the label rides
  * along on the option for anything that saves it.
  */
-function setBrowseOptions(selector, entries, unpack, value, label) {
+function setBrowseOptions(selector, entries, unpack, value, label, sampled) {
   const select = $(selector);
   while (select.options.length > 1) select.remove(1);
   entries.forEach((entry) => {
@@ -727,7 +757,9 @@ function setBrowseOptions(selector, entries, unpack, value, label) {
     const option = document.createElement("option");
     option.value = optionValue;
     option.dataset.label = optionLabel;
-    option.textContent = `${optionLabel} (${stations})`;
+    // A tally that hit its limit counted a slice of a big country, so what it
+    // found is a floor. Say "312+" rather than passing it off as the total.
+    option.textContent = `${optionLabel} (${stations}${sampled ? "+" : ""})`;
     select.append(option);
   });
   // A filter still filtering must still be shown, even when the other side
@@ -877,9 +909,13 @@ let ringWatchdog = null;
 let autoStopTimer = null;
 /** Set from the moment the give-up timeout fires until the ring is over. */
 let givingUp = false;
-/** Give-ups this ring has turned into a snooze, and the alarm they belong to. */
-let autoSnoozed = 0;
-let autoSnoozedFor = null;
+/**
+ * Give-ups each alarm's current ring has turned into a snooze, by alarm id.
+ * One tally per alarm rather than one for the app: a second alarm ringing in
+ * the gap between a snooze and its return used to wipe the first one's
+ * budget, and an alarm set to snooze once would do it again and again.
+ */
+const autoSnoozed = new Map();
 /** How long an alarm takes to recede once it has given up. */
 const GIVE_UP_FADE_SECS = 6;
 
@@ -892,8 +928,15 @@ async function playBackupTrack(reason, opts = {}) {
   // Give this attempt its own quiet window. The watchdog stays armed on
   // purpose, so it guards the backup track too.
   player.lastProgress = Date.now();
+  // Snapshotted before the await, not after: scanning the backup folder can
+  // take seconds on a network share, and the ring can end - or start receding
+  // - while it runs. Starting a track then would cancel the fade and bring the
+  // alarm back at full volume after it had already given up.
+  const generation = playGeneration;
+  const stale = () => superseded(generation) || givingUp;
   try {
     const pick = await invoke("backup_track");
+    if (stale()) return false;
     const title = pick.name.replace(/\.[^.]+$/, "");
     play(
       {
@@ -909,6 +952,8 @@ async function playBackupTrack(reason, opts = {}) {
     if (ringing) $("#ring-source").textContent = "BACKUP FOLDER · " + title.toUpperCase();
     return true;
   } catch (e) {
+    // Same again: a ring that has ended must not have its card rewritten.
+    if (stale()) return false;
     if (ringing) {
       goSilent(String(e));
     } else {
@@ -977,11 +1022,10 @@ function onAlarmFire(payload) {
   clearTimeout(autoStopTimer);
   givingUp = false;
   player.backupAttempts = 0;
-  // The auto-snooze budget belongs to the ring rather than to the alarm: a
-  // snooze carries the tally on, anything else starts it over.
-  if (payload.trigger !== "snooze" || payload.alarmId !== autoSnoozedFor) {
-    autoSnoozedFor = payload.alarmId;
-    autoSnoozed = 0;
+  // The budget belongs to the ring: a snooze carries its tally on, and any
+  // other way of arriving - scheduled, caught up, tested - starts it over.
+  if (payload.trigger !== "snooze") {
+    autoSnoozed.delete(payload.alarmId);
   }
   $("#ringcard").classList.remove("silent");
 
@@ -1067,7 +1111,8 @@ function giveUp() {
 
 /** Should this give-up come back later instead of being the end of it? */
 function autoSnoozeDue() {
-  if (!ringing || autoSnoozed >= (ringing.autoSnoozes || 0)) return false;
+  if (!ringing) return false;
+  if ((autoSnoozed.get(ringing.alarmId) || 0) >= (ringing.autoSnoozes || 0)) return false;
   // A test ring must not schedule a real one: nobody expects the alarm they
   // auditioned at teatime to go off again ten minutes later.
   return ringing.trigger !== "test";
@@ -1081,7 +1126,7 @@ function endGiveUp() {
   autoStopTimer = player.fadeTimer = null;
   const mins = ringing.autoStopMins;
   if (autoSnoozeDue()) {
-    autoSnoozed += 1;
+    autoSnoozed.set(ringing.alarmId, (autoSnoozed.get(ringing.alarmId) || 0) + 1);
     snoozeRing("gave up after " + mins + " min");
     return;
   }
