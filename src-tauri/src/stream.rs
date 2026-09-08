@@ -10,14 +10,20 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use aerowave_core::icy::{first_url_in_playlist, is_hls, looks_like_playlist, stream_title};
+use aerowave_core::icy::{
+    first_url_in_playlist, head_end, is_hls, looks_like_playlist, parse_head, scan_metadata,
+};
 use futures_util::StreamExt;
 use serde::Serialize;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Directories and broadcasters both like to know who is calling, and
 /// radio-browser asks for it outright. Carry the real version.
 const UA: &str = concat!("Aerowave/", env!("CARGO_PKG_VERSION"));
 const MAX_META_BYTES: usize = 512 * 1024;
+/// A response head is a few hundred bytes. Anything still writing one after
+/// this much is not going to stop on its own.
+const MAX_HEAD_BYTES: usize = 8 * 1024;
 /// A playlist is a few hundred bytes. Anything claiming to be one and running
 /// to megabytes is a broken or hostile server, and buffering it whole would
 /// let it decide how much memory this process uses.
@@ -176,12 +182,142 @@ fn header(resp: &reqwest::Response, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Ask the stream about itself, over HTTP if that works and by hand if it
+/// does not.
+///
+/// Shoutcast v1 answers `ICY 200 OK` instead of an HTTP status line. Hyper
+/// throws that response away before a single header is seen, so a station
+/// WebView2 plays quite happily would otherwise have no bitrate, no genre and
+/// no now-playing title, and would fail its TEST for a reason that has
+/// nothing to do with whether it plays.
+async fn probe_inner(url: &str, want_title: bool, skip_resolve: bool) -> Result<StreamInfo, String> {
+    match http_probe(url, want_title, skip_resolve).await {
+        Ok(info) => Ok(info),
+        // The HTTP error is the one worth reporting: the hand-rolled attempt
+        // below only claims a station it can prove is speaking ICY, so when it
+        // fails as well it has nothing more useful to say.
+        Err(http_error) => icy_probe(url, want_title).await.map_err(|_| http_error),
+    }
+}
+
+/// The Shoutcast v1 path: send the request down a plain socket and read the
+/// head ourselves, because no HTTP client will parse what comes back.
+///
+/// Plaintext only. ICY predates TLS by decades and the servers still speaking
+/// it are `http://` to a one, so an `https://` failure is a real failure and
+/// is left to stand.
+async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, String> {
+    let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("{url}: {e}"))?;
+    if parsed.scheme() != "http" {
+        return Err("only a plaintext URL can be read this way".into());
+    }
+    let host = parsed.host_str().ok_or("that URL has no host in it")?;
+    let port = parsed.port().unwrap_or(80);
+    let mut target = parsed.path().to_string();
+    if target.is_empty() {
+        target.push('/');
+    }
+    if let Some(query) = parsed.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+
+    let mut socket = tokio::time::timeout(
+        Duration::from_secs(6),
+        tokio::net::TcpStream::connect((host, port)),
+    )
+    .await
+    .map_err(|_| format!("timed out connecting to {host}"))?
+    .map_err(|e| format!("could not connect to {host}: {e}"))?;
+
+    // HTTP/1.0 is what the players these servers were written for send, and
+    // it settles the question of keeping the connection open afterwards.
+    let request = format!(
+        "GET {target} HTTP/1.0\r\nHost: {host}:{port}\r\nUser-Agent: {UA}\r\n\
+         Icy-MetaData: 1\r\nConnection: close\r\n\r\n"
+    );
+    socket
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("could not ask {host} for the stream: {e}"))?;
+
+    let mut buf: Vec<u8> = Vec::with_capacity(2048);
+    let (head_len, body_at) = loop {
+        if let Some(found) = head_end(&buf) {
+            break found;
+        }
+        if buf.len() > MAX_HEAD_BYTES {
+            return Err(format!("{host} never finished its response head"));
+        }
+        let mut chunk = [0u8; 2048];
+        let read = socket
+            .read(&mut chunk)
+            .await
+            .map_err(|e| format!("{host} stopped talking: {e}"))?;
+        if read == 0 {
+            return Err(format!("{host} closed before answering"));
+        }
+        buf.extend_from_slice(&chunk[..read]);
+    };
+
+    let head = String::from_utf8_lossy(&buf[..head_len]);
+    let head = parse_head(&head).ok_or_else(|| format!("{host} sent no status line"))?;
+    // Only a station that really is speaking ICY. Anything answering HTTP was
+    // reqwest's job, and it has already failed for a reason this cannot mend -
+    // claiming it here would bury the real error under a worse one.
+    if !head.icy {
+        return Err(format!("{host} answered HTTP after all"));
+    }
+    if head.code != 200 {
+        return Err(format!("ICY {} from {host}", head.code));
+    }
+
+    let mut info = StreamInfo {
+        url: url.trim().to_string(),
+        name: head.get("icy-name").map(str::to_string),
+        genre: head.get("icy-genre").map(str::to_string),
+        bitrate: head.get("icy-br").map(str::to_string),
+        content_type: head.get("content-type").map(|c| c.to_ascii_lowercase()),
+        title: None,
+        warning: None,
+    };
+
+    let metaint: usize = match head.get("icy-metaint").and_then(|v| v.parse().ok()) {
+        Some(n) if want_title && n > 0 && n < MAX_META_BYTES => n,
+        _ => return Ok(info),
+    };
+
+    // Whatever audio arrived alongside the head counts towards the first block.
+    let mut body = buf.split_off(body_at);
+    let mut cursor = 0usize;
+    let mut blocks_read = 0;
+    while body.len() < MAX_META_BYTES && blocks_read < 2 {
+        let scan = scan_metadata(&body, metaint, cursor);
+        cursor = scan.cursor;
+        blocks_read += scan.blocks;
+        if scan.title.is_some() {
+            info.title = scan.title;
+            return Ok(info);
+        }
+        let mut chunk = [0u8; 8192];
+        let read = socket
+            .read(&mut chunk)
+            .await
+            .map_err(|e| format!("{host} stopped sending: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    Ok(info)
+}
+
 /// Connect, read enough of the stream to catch one metadata block, disconnect.
 ///
 /// `skip_resolve` is for the now-playing poll, which already holds the direct
 /// URL from the first probe: following the playlist chain again every time
 /// would ask the broadcaster for the same file over and over for nothing.
-async fn probe_inner(url: &str, want_title: bool, skip_resolve: bool) -> Result<StreamInfo, String> {
+async fn http_probe(url: &str, want_title: bool, skip_resolve: bool) -> Result<StreamInfo, String> {
     let (resp, direct, content_type) = if skip_resolve {
         let resp = client()?
             .get(url.trim())
@@ -244,23 +380,12 @@ async fn probe_inner(url: &str, want_title: bool, skip_resolve: bool) -> Result<
             Some(Err(e)) => return Err(describe(&e)),
             None => break,
         }
-        // Consume whole metadata blocks out of whatever has arrived so far.
-        while buf.len() > cursor + metaint {
-            let len_at = cursor + metaint;
-            let block_len = buf[len_at] as usize * 16;
-            let block_start = len_at + 1;
-            if buf.len() < block_start + block_len {
-                break;
-            }
-            if block_len > 0 {
-                let text = String::from_utf8_lossy(&buf[block_start..block_start + block_len]);
-                if let Some(t) = stream_title(&text) {
-                    info.title = Some(t);
-                    return Ok(info);
-                }
-            }
-            cursor = block_start + block_len;
-            blocks_read += 1;
+        let scan = scan_metadata(&buf, metaint, cursor);
+        cursor = scan.cursor;
+        blocks_read += scan.blocks;
+        if scan.title.is_some() {
+            info.title = scan.title;
+            return Ok(info);
         }
     }
     Ok(info)
