@@ -10,7 +10,7 @@
 //! of candidates; saving one is a deliberate press of ADD, and what gets
 //! saved is an ordinary station like any other.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -483,7 +483,24 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
     let mut country_counts: HashMap<String, (String, u32)> = HashMap::new();
     let mut codec_counts = [0u32; CODECS.len()];
     let mut bitrate_counts = [0u32; BITRATES.len()];
+    // Count what the search would actually show, not what the directory holds.
+    // The same station is submitted more than once all the time - Albania's two
+    // AAC+ stations were "Radio One - Tirana 95.2 FM" and "RadioOne", the same
+    // stream twice - and a station with no name or an unplayable address never
+    // reaches a row either. A count that promises two and delivers one is the
+    // thing these counts exist to avoid.
+    let mut seen: HashSet<String> = HashSet::new();
     for entry in &raw {
+        let Some(url) = playable_url(text(&entry.url), text(&entry.url_resolved)) else {
+            continue;
+        };
+        if clean_name(text(&entry.name), 60).is_empty() {
+            continue;
+        }
+        if !seen.insert(url.to_ascii_lowercase()) {
+            continue;
+        }
+
         let codec = clean_name(text(&entry.codec), 16).to_ascii_uppercase();
         if let Some(slot) = CODECS.iter().position(|known| *known == codec) {
             codec_counts[slot] += 1;
