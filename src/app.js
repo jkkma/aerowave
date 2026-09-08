@@ -246,7 +246,9 @@ function showNowPlaying(title, sub, meta) {
 
 /**
  * Start a source. `opts.fadeSecs` ramps the volume in, `opts.volume`
- * overrides the master volume (alarms have their own).
+ * overrides the master volume (alarms have their own). `source.meta` is what
+ * to show on the third line until the stream itself says otherwise - some
+ * servers never will.
  */
 async function play(source, opts = {}) {
   stopPlayback(true);
@@ -256,7 +258,7 @@ async function play(source, opts = {}) {
   player.retries = 0;
   const volume = opts.volume !== undefined ? opts.volume : state.settings.volume ?? 0.8;
 
-  showNowPlaying(source.title, source.subtitle || "", "");
+  showNowPlaying(source.title, source.subtitle || "", source.meta || "");
   markPlaying(true);
 
   setStatus("CONNECTING", "busy");
@@ -325,7 +327,9 @@ function startMetadata(source) {
       if (info.bitrate) bits.push(info.bitrate + " kbps");
       if (info.genre) bits.push(info.genre);
       if (info.name && info.name !== source.title) bits.push(info.name);
-      $("#np-meta").textContent = bits.join("  ·  ");
+      // Only when the server actually said something. A probe that comes back
+      // empty must not rub out what the caller already knew.
+      if (bits.length) $("#np-meta").textContent = bits.join("  ·  ");
     } catch {
       /* metadata is a nicety; a failure here must not disturb playback */
     }
@@ -526,6 +530,344 @@ function step(delta) {
   const here = list.findIndex((s) => s.id === (player.source && player.source.stationId));
   const next = list[(here + delta + list.length * 2) % list.length] || list[0];
   playStation(next);
+}
+
+// --------------------------------------------------------------- browse ---
+
+/*
+ * The radio-browser.info directory: a public catalogue of internet radio,
+ * kept by the people who listen to it. The searching happens in Rust, which
+ * picks one of the volunteer mirrors, says which app is calling, and hands
+ * back a page already cleaned up. Nothing here is saved until ADD is
+ * pressed - a row is a candidate, not a station.
+ */
+
+/** Rows per request. Two screenfuls: enough to browse, small enough to be quick. */
+const BROWSE_PAGE = 40;
+/** What the directory calls each chosen filter, and what to call it in a list. */
+let browseTag = "";
+let browseTagLabel = "";
+let browseCountry = "";
+let browseCountryLabel = "";
+/** The directory's global lists, and the narrowed ones it works out for us. */
+let browseCountries = null;
+let browseTags = null;
+const browseFacets = new Map();
+let browseResults = [];
+/** Where the next page starts, counted in what the directory offered. */
+let browseOffset = 0;
+let browseMore = false;
+let browseBusy = false;
+let browseLooked = false;
+
+/** Same stream by any reasonable reading, so a station is not kept twice. */
+const sameStream = (a, b) => {
+  const tidy = (u) => (u || "").trim().replace(/\/+$/, "").toLowerCase();
+  return !!tidy(a) && tidy(a) === tidy(b);
+};
+
+const browseSaved = (url) => state.stations.some((s) => sameStream(s.url, url));
+
+/** What the chosen option calls itself, as opposed to what it is worth. */
+const labelOf = (select) => {
+  const picked = select.selectedOptions[0];
+  return (picked && picked.dataset.label) || "";
+};
+
+function browseNote(text, mood) {
+  const note = $("#browse-note");
+  note.className = "editor-note" + (mood ? " " + mood : "");
+  note.textContent = text;
+}
+
+/** Run a search. `more` adds the next page instead of starting over. */
+async function browseSearch(more) {
+  if (browseBusy) return;
+  browseBusy = true;
+  const name = $("#browse-query").value.trim();
+  if (!more) {
+    browseResults = [];
+    browseOffset = 0;
+    browseMore = false;
+    $("#browse-list").scrollTop = 0;
+  }
+  browseNote(more ? "Fetching more…" : "Searching the directory…");
+  renderBrowse();
+  try {
+    const page = await invoke("browse_stations", {
+      query: {
+        name,
+        tag: browseTag,
+        countryCode: browseCountry,
+        limit: BROWSE_PAGE,
+        offset: browseOffset,
+      },
+    });
+    // Step over what the directory offered, not over what survived the tidy:
+    // an offset counted in survivors walks back over ground already covered.
+    browseOffset += page.offered;
+    // Mirrors are edited while they are being paged through, so the page
+    // after this one can hand back something already on screen.
+    const fresh = page.stations.filter(
+      (st) => !browseResults.some((seen) => sameStream(seen.url, st.url))
+    );
+    browseResults = browseResults.concat(fresh);
+    // A short page is the end of the directory's answer. A full one that
+    // added nothing new means the paging has stopped moving - which is what
+    // the offset cap at the far end of the catalogue looks like from here.
+    browseMore = page.offered >= BROWSE_PAGE && fresh.length > 0;
+    browseNote(
+      browseResults.length
+        ? `${browseResults.length} from radio-browser.info — press a row to listen, + to keep it`
+        : "Nothing in the directory matches that."
+    );
+  } catch (e) {
+    browseMore = false;
+    browseNote(String(e), "bad");
+  } finally {
+    browseBusy = false;
+    renderBrowse();
+  }
+}
+
+const asCountry = (c) => [c.code, c.name, c.stations];
+const asTag = (t) => [t.value, t.name, t.stations];
+
+/**
+ * Fetch the whole-directory lists. Once a run: neither the countries of the
+ * world nor the directory's busiest genres change while the app is open, and
+ * both are a convenience - searching still works if they will not load.
+ */
+async function loadBrowseFilters() {
+  if (!browseCountries) {
+    try {
+      browseCountries = await invoke("browse_countries");
+    } catch {
+      say("could not load the country list", "bad");
+    }
+  }
+  if (!browseTags) {
+    try {
+      browseTags = await invoke("browse_tags");
+    } catch {
+      say("could not load the genre list", "bad");
+    }
+  }
+  refreshBrowseFilters();
+}
+
+/** What one filter leaves available to the other, worked out once and kept. */
+async function facetsFor(query) {
+  const key = JSON.stringify(query);
+  if (!browseFacets.has(key)) {
+    browseFacets.set(key, await invoke("browse_facets", { query }));
+  }
+  return browseFacets.get(key);
+}
+
+/**
+ * Point each dropdown at what the other one leaves: the genres that a chosen
+ * country actually has, and the countries that carry a chosen genre, both
+ * counted within that filter rather than across the whole directory. With
+ * nothing set on the other side, the directory's own list is the right list.
+ *
+ * The tally is megabytes, so it happens only when a filter changes - not on
+ * every search - and each answer is kept for the rest of the run.
+ */
+async function refreshBrowseFilters() {
+  const jobs = [];
+
+  if (browseCountry) {
+    jobs.push(
+      narrow("#browse-tag", { countryCode: browseCountry }, (f) => f.tags, asTag, "genre")
+    );
+  } else if (browseTags) {
+    setBrowseOptions("#browse-tag", browseTags, asTag, browseTag, browseTagLabel);
+  }
+
+  if (browseTag) {
+    jobs.push(
+      narrow("#browse-country", { tag: browseTag }, (f) => f.countries, asCountry, "country")
+    );
+  } else if (browseCountries) {
+    setBrowseOptions("#browse-country", browseCountries, asCountry, browseCountry, browseCountryLabel);
+  }
+
+  await Promise.all(jobs);
+}
+
+/** Rebuild one dropdown from a facet tally, saying so while it is fetched. */
+async function narrow(selector, query, pick, unpack, what) {
+  const select = $(selector);
+  const value = selector === "#browse-tag" ? browseTag : browseCountry;
+  const label = selector === "#browse-tag" ? browseTagLabel : browseCountryLabel;
+  select.disabled = true;
+  try {
+    const facets = await facetsFor(query);
+    setBrowseOptions(selector, pick(facets), unpack, value, label);
+  } catch {
+    // Keep whatever the list already had rather than emptying it.
+    say(`could not work out which ${what}s are available`, "bad");
+  } finally {
+    select.disabled = false;
+  }
+}
+
+/**
+ * Rebuild a filter's options, keeping its "Any …" row and its selection. The
+ * value is what the directory knows the thing as and the label is what a
+ * person reads, which are not always the same string - so the label rides
+ * along on the option for anything that saves it.
+ */
+function setBrowseOptions(selector, entries, unpack, value, label) {
+  const select = $(selector);
+  while (select.options.length > 1) select.remove(1);
+  entries.forEach((entry) => {
+    const [optionValue, optionLabel, stations] = unpack(entry);
+    const option = document.createElement("option");
+    option.value = optionValue;
+    option.dataset.label = optionLabel;
+    option.textContent = `${optionLabel} (${stations})`;
+    select.append(option);
+  });
+  // A filter still filtering must still be shown, even when the other side
+  // has narrowed it out of the list - otherwise the dropdown quietly claims
+  // to be set to something it is not.
+  const known = Array.prototype.some.call(select.options, (o) => o.value === value);
+  if (value && !known) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.dataset.label = label || value;
+    option.textContent = `${label || value} (0)`;
+    select.append(option);
+  }
+  select.value = value;
+}
+
+/** Listen to a directory station without keeping it. */
+function previewBrowse(st) {
+  play({
+    kind: "station",
+    url: st.url,
+    title: st.name,
+    subtitle: [st.country, st.tags].filter(Boolean).join("  ·  ") || "radio-browser.info",
+    // What the directory has on file, so the line says something from the
+    // start. Plenty of Shoutcast servers answer `ICY 200 OK` rather than an
+    // HTTP status line, and the metadata probe cannot read those at all.
+    meta: [st.codec, st.bitrate ? st.bitrate + " kbps" : ""].filter(Boolean).join("  ·  "),
+    stationId: null,
+  });
+  if (st.hls) say("that one is HLS — the player has no decoder for it", "bad");
+  // Nothing in the saved list is playing any more; both lists should say so.
+  renderStations();
+  renderBrowse();
+}
+
+function addBrowseStation(st) {
+  if (browseSaved(st.url)) return;
+  // The genre that was searched for beats the directory's own first tag: it
+  // is what this station is to the person keeping it.
+  const tag = browseTagLabel || st.tag;
+  state.stations.push({ id: newId(), name: st.name, url: st.url, tag, favorite: false });
+  saveStations();
+  renderStations();
+  renderBrowse();
+  say(st.name + " added to your stations", "good");
+}
+
+function renderBrowse() {
+  const list = $("#browse-list");
+  list.innerHTML = "";
+
+  if (!browseResults.length) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = browseBusy ? "Searching…" : "Search the directory, or pick a tag.";
+    list.append(li);
+    return;
+  }
+
+  browseResults.forEach((st, i) => {
+    const li = document.createElement("li");
+    li.className = "row";
+    if (player.source && sameStream(player.source.url, st.url)) li.classList.add("on");
+
+    const idx = document.createElement("span");
+    idx.className = "idx";
+    idx.textContent = pad2(i + 1);
+
+    const name = document.createElement("span");
+    name.className = "name";
+    const b = document.createElement("b");
+    b.textContent = st.name;
+    const small = document.createElement("small");
+    small.textContent = [
+      st.country,
+      [st.codec, st.bitrate ? st.bitrate + "k" : ""].filter(Boolean).join(" "),
+      st.tags,
+    ]
+      .filter(Boolean)
+      .join("  ·  ");
+    name.append(b, small);
+    li.append(idx, name);
+
+    // Worth saying out loud rather than quietly dropping: the station may be
+    // perfectly good, but WebView2 has no HLS decoder to play it with.
+    if (st.hls) {
+      const flag = document.createElement("span");
+      flag.className = "tag warn";
+      flag.textContent = "HLS";
+      flag.title = "The player has no HLS decoder - this one will stay quiet.";
+      li.append(flag);
+    }
+
+    const saved = browseSaved(st.url);
+    const add = document.createElement("button");
+    add.className = "icon" + (saved ? " done" : "");
+    add.textContent = saved ? "✓" : "+";
+    add.title = saved ? "Already in your stations" : "Add to your stations";
+    add.setAttribute("aria-label", add.title);
+    add.addEventListener("click", (e) => {
+      e.stopPropagation();
+      addBrowseStation(st);
+    });
+    li.append(add);
+
+    // Same bargain as the station list: the row itself is the play control.
+    li.tabIndex = 0;
+    li.setAttribute("role", "button");
+    li.setAttribute("aria-label", `Listen to ${st.name}`);
+    li.addEventListener("click", () => previewBrowse(st));
+    li.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.code === "Space") {
+        e.preventDefault();
+        previewBrowse(st);
+      }
+    });
+    list.append(li);
+  });
+
+  if (!browseMore) return;
+  const tail = document.createElement("li");
+  tail.className = "empty";
+  const more = document.createElement("button");
+  more.className = "gel";
+  more.textContent = browseBusy ? "LOADING…" : "MORE";
+  more.disabled = browseBusy;
+  more.addEventListener("click", () => browseSearch(true));
+  tail.append(more);
+  list.append(tail);
+}
+
+/**
+ * Fill the pane the first time it is opened, and not before: the directory is
+ * somebody else's server, and an app nobody browses should not be calling it.
+ */
+function browseFirstLook() {
+  if (browseLooked) return;
+  browseLooked = true;
+  loadBrowseFilters();
+  browseSearch(false);
 }
 
 // --------------------------------------------------------------- alarms ---
@@ -1314,6 +1656,7 @@ function wire() {
       });
       $$(".pane").forEach((p) => p.classList.toggle("on", p.id === "pane-" + tab.dataset.pane));
       if (tab.dataset.pane === "alarms") refreshNextAlarm();
+      if (tab.dataset.pane === "browse") browseFirstLook();
     })
   );
 
@@ -1390,6 +1733,26 @@ function wire() {
       note.className = "editor-note bad";
       note.textContent = "✕ " + e;
     }
+  });
+
+  // browse
+  $("#btn-browse").addEventListener("click", () => browseSearch(false));
+  $("#browse-query").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    browseSearch(false);
+  });
+  $("#browse-country").addEventListener("change", (e) => {
+    browseCountry = e.target.value;
+    browseCountryLabel = labelOf(e.target);
+    refreshBrowseFilters();
+    browseSearch(false);
+  });
+  $("#browse-tag").addEventListener("change", (e) => {
+    browseTag = e.target.value;
+    browseTagLabel = labelOf(e.target);
+    refreshBrowseFilters();
+    browseSearch(false);
   });
 
   // shuffle folder on the radio tab

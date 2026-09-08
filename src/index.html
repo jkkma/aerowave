@@ -93,6 +93,7 @@
 
     <nav class="tabs" role="tablist">
       <button class="tab on" id="tab-radio" data-pane="radio" role="tab" aria-selected="true" aria-controls="pane-radio">RADIO</button>
+      <button class="tab" id="tab-browse" data-pane="browse" role="tab" aria-selected="false" aria-controls="pane-browse">BROWSE</button>
       <button class="tab" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms">ALARMS</button>
       <button class="tab" id="tab-settings" data-pane="settings" role="tab" aria-selected="false" aria-controls="pane-settings">SETUP</button>
     </nav>
@@ -128,6 +129,24 @@
           <button class="gel" id="btn-play-folder">PLAY RANDOM</button>
         </div>
       </div>
+    </div>
+
+    <!-- ---------------------------- browse --------------------------- -->
+    <div class="pane" id="pane-browse" role="tabpanel" aria-labelledby="tab-browse">
+      <div class="paneheader">
+        <input type="search" id="browse-query" class="field" placeholder="Search the radio-browser directory">
+        <button class="gel wide" id="btn-browse">SEARCH</button>
+      </div>
+      <div class="browsefilters">
+        <select class="field" id="browse-country" aria-label="Country">
+          <option value="">Any country</option>
+        </select>
+        <select class="field" id="browse-tag" aria-label="Genre">
+          <option value="">Any genre</option>
+        </select>
+      </div>
+      <ul class="list" id="browse-list"></ul>
+      <p class="editor-note" id="browse-note"></p>
     </div>
 
     <!-- ---------------------------- alarms --------------------------- -->

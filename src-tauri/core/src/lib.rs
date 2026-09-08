@@ -6,5 +6,6 @@
 //! from it will not load. Nothing here depends on any of that, so
 //! `cargo test` can actually run these.
 
+pub mod directory;
 pub mod icy;
 pub mod schedule;
