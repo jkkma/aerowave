@@ -39,7 +39,9 @@ chrono = "0.4"
 walkdir = "2"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "charset", "http2"] }
-tokio = { version = "1", features = ["time", "sync"] }
+# net/io-util are for the Shoutcast fallback in stream.rs, which has to
+# talk to those servers over a socket rather than through an HTTP client.
+tokio = { version = "1", features = ["time", "sync", "net", "io-util"] }
 futures-util = "0.3"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

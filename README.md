@@ -26,6 +26,14 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - Now-playing titles are read out of the ICY metadata the server interleaves with
   the audio, polled every 25 s. The `<audio>` element cannot see that metadata, so
   the Rust side opens a second short-lived connection to read it.
+- **Shoutcast v1 servers are read too.** They answer `ICY 200 OK` rather than an
+  HTTP status line, which no HTTP client will parse — hyper throws the response
+  away before a single header is seen. WebView2 plays them regardless, so those
+  stations used to play perfectly while showing no bitrate, no genre and no title,
+  and failing their TEST for a reason that had nothing to do with whether they
+  worked. When the HTTP attempt fails, the request goes out again over a plain
+  socket and the head is parsed by hand. Plaintext only: ICY predates TLS and the
+  servers still speaking it are `http://` to a one.
 - A dropped stream reconnects four times with a lengthening backoff; from the
   second attempt it retries through the playlist-resolved URL.
 - Sleep timer: 15 / 30 / 60 / 90 minutes.
@@ -175,7 +183,7 @@ src-tauri/src/
   scheduler.rs       the clock: ticks every second, decides when to ring
   store.rs           stations/alarms/settings, one JSON file, atomic writes
   library.rs         folder scanning and the random pick
-  stream.rs          playlist resolution and ICY metadata
+  stream.rs          playlist resolution, ICY metadata, the Shoutcast fallback
   browse.rs          searching the radio-browser.info directory
 src-tauri/core/      pure logic, no GUI dependencies, where the tests are
 tools/make_icon.py   draws the app icon (Pillow)
