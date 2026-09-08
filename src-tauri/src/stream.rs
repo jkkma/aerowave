@@ -14,7 +14,9 @@ use aerowave_core::icy::{first_url_in_playlist, is_hls, looks_like_playlist, str
 use futures_util::StreamExt;
 use serde::Serialize;
 
-const UA: &str = "Aerowave/0.1";
+/// Directories and broadcasters both like to know who is calling, and
+/// radio-browser asks for it outright. Carry the real version.
+const UA: &str = concat!("Aerowave/", env!("CARGO_PKG_VERSION"));
 const MAX_META_BYTES: usize = 512 * 1024;
 /// A playlist is a few hundred bytes. Anything claiming to be one and running
 /// to megabytes is a broken or hostile server, and buffering it whole would
@@ -23,7 +25,7 @@ const MAX_PLAYLIST_BYTES: usize = 256 * 1024;
 
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
-fn client() -> Result<reqwest::Client, String> {
+pub fn client() -> Result<reqwest::Client, String> {
     if let Some(existing) = CLIENT.get() {
         return Ok(existing.clone());
     }
@@ -42,7 +44,7 @@ fn client() -> Result<reqwest::Client, String> {
 /// reqwest's own Display is the outer wrapper - "error sending request for
 /// url (...)" - and the cause underneath is the part that says what actually
 /// went wrong. Walk the chain so the UI can show it.
-fn describe(e: &reqwest::Error) -> String {
+pub fn describe(e: &reqwest::Error) -> String {
     let lead = if e.is_connect() {
         "could not connect"
     } else if e.is_timeout() {

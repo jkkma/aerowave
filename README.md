@@ -30,6 +30,35 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   second attempt it retries through the playlist-resolved URL.
 - Sleep timer: 15 / 30 / 60 / 90 minutes.
 
+**Browsing**
+
+- The BROWSE tab searches [radio-browser.info](https://www.radio-browser.info/), a
+  community-run directory of tens of thousands of public stations. Type a name, and
+  narrow it by country or genre — both dropdowns are the directory's own lists, with
+  station counts beside each entry. Press a row to listen without keeping it, `+` to
+  add it to your stations. Nothing is saved until you press `+`, and nothing is
+  fetched until you open the tab.
+- Results come back in name order, A to Z, and MORE pages further in. The genre
+  list is the busiest two hundred tags — the directory holds tens of thousands,
+  nearly all of them one station's private label.
+- The two filters narrow each other: choose a country and the genre list becomes
+  the genres that country actually has, counted within it; choose a genre and the
+  country list becomes the countries that carry it. radio-browser publishes no
+  crossed counts, so this is tallied from the stations themselves — a megabyte or
+  two — which is why it happens only when a filter changes, and is remembered for
+  the rest of the run. For the largest countries the tally reads the first five
+  thousand stations, so those counts are a floor rather than a total.
+- The searching happens in Rust: it asks the directory which mirrors are up, picks
+  one at random and stays on it for the session, and says which app is calling. A
+  page comes back already tidied — stations the directory's own checker cannot
+  reach are left out, duplicate submissions of one stream are collapsed, and
+  anything that is not an `http(s)` address is dropped rather than saved as a
+  station that could only ever fail.
+- HLS entries are flagged in the row rather than hidden: the station may well be
+  worth keeping, but WebView2 has no decoder for it.
+- An added station is an ordinary station — editable, taggable, and usable as an
+  alarm source like any other.
+
 **Folders**
 
 - Point it at a folder and it plays a random file from it, walking up to 8 levels
@@ -123,7 +152,8 @@ Three.js is vendored into `src/vendor/` rather than fetched from a CDN, because 
 app has to work offline and its content security policy only allows scripts from
 its own origin.
 
-Tests (ICY and playlist parsing, weekday matching, catch-up rules):
+Tests (ICY and playlist parsing, weekday matching, catch-up rules, directory
+tidying):
 
 ```
 cd src-tauri && cargo test --workspace
@@ -146,6 +176,7 @@ src-tauri/src/
   store.rs           stations/alarms/settings, one JSON file, atomic writes
   library.rs         folder scanning and the random pick
   stream.rs          playlist resolution and ICY metadata
+  browse.rs          searching the radio-browser.info directory
 src-tauri/core/      pure logic, no GUI dependencies, where the tests are
 tools/make_icon.py   draws the app icon (Pillow)
 tools/shot.ps1       screenshots the running window, for checking the look

@@ -597,6 +597,10 @@ body.playing .gel.big { box-shadow: 0 0 26px rgba(120, 236, 255, .7), 0 2px 0 rg
 .pane { display: none; min-height: 0; min-width: 0; grid-template-rows: auto 1fr auto; gap: 10px; }
 .pane.on { display: grid; }
 #pane-settings.on { grid-template-rows: auto 1fr; }
+#pane-browse.on { grid-template-rows: auto auto 1fr auto; }
+/* The two directory filters, sharing the row evenly. */
+.browsefilters { display: flex; gap: 8px; min-width: 0; }
+.browsefilters .field { flex: 1 1 0; min-width: 0; }
 
 .paneheader { display: flex; gap: 8px; align-items: center; min-width: 0; }
 .paneheader .field { min-width: 0; }
@@ -697,6 +701,11 @@ body.playing .gel.big { box-shadow: 0 0 26px rgba(120, 236, 255, .7), 0 2px 0 rg
 .row .icon.star.on { color: var(--amber); text-shadow: 0 0 10px rgba(255, 176, 46, .8); }
 
 .empty { padding: 26px 14px; text-align: center; color: #c2e2f2; font-size: 13px; }
+.empty .gel { margin-top: 4px; }
+/* A station already in the list: kept on the row, but plainly spent. */
+.row .icon.done { color: var(--alien); border-color: rgba(150, 255, 190, .45); cursor: default; }
+.row .icon.done:hover { background: linear-gradient(180deg, rgba(255, 255, 255, .18), rgba(0, 0, 0, .2)); }
+.row .tag.warn { color: #ffd9c6; background: rgba(120, 46, 20, .55); border-color: rgba(255, 150, 110, .45); }
 
 /* alarm rows */
 .alarms .when {

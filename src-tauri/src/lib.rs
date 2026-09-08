@@ -4,6 +4,7 @@
 //! and everything that has to keep working while the window is hidden. The
 //! webview owns playback and the face.
 
+mod browse;
 mod library;
 mod scheduler;
 mod store;
@@ -279,6 +280,35 @@ async fn probe_stream(
     stream::probe(&url, want_title, skip_resolve.unwrap_or(false)).await
 }
 
+/// Search the radio-browser.info directory of public stations.
+///
+/// Async, and off the store entirely: a mirror having a slow morning must
+/// not hold up the clock, and a search changes nothing that is saved.
+#[tauri::command]
+async fn browse_stations(query: browse::Query) -> Result<browse::Page, String> {
+    browse::search(query).await
+}
+
+/// The countries the directory has stations in, for the browse filter.
+#[tauri::command]
+async fn browse_countries() -> Result<Vec<browse::Country>, String> {
+    browse::countries().await
+}
+
+/// The genres worth filtering by, for the same pair of dropdowns.
+#[tauri::command]
+async fn browse_tags() -> Result<Vec<browse::Tag>, String> {
+    browse::tags().await
+}
+
+/// What one filter leaves available to the other: the genres in a country, or
+/// the countries carrying a genre. Costly enough that the webview asks only
+/// when a filter changes.
+#[tauri::command]
+async fn browse_facets(query: browse::Query) -> Result<browse::Facets, String> {
+    browse::facets(query).await
+}
+
 #[tauri::command]
 fn next_alarm(app: AppHandle) -> Option<NextAlarm> {
     scheduler::next_alarm(&app)
@@ -502,6 +532,10 @@ pub fn run() {
             random_track,
             backup_track,
             probe_stream,
+            browse_stations,
+            browse_countries,
+            browse_tags,
+            browse_facets,
             next_alarm,
             test_alarm,
             snooze_alarm,
