@@ -160,13 +160,23 @@ fn content_type_of(resp: &reqwest::Response) -> String {
 }
 
 /// Follow playlist files until a direct stream turns up (max 3 hops).
-async fn resolve(client: &reqwest::Client, url: &str) -> Result<Resolved, String> {
+///
+/// `want_metadata` asks the server to interleave ICY metadata blocks with the
+/// audio. Only a caller that will take them back out again may say yes - see
+/// `open_for_relay`.
+async fn resolve(
+    client: &reqwest::Client,
+    url: &str,
+    want_metadata: bool,
+) -> Result<Resolved, String> {
     let mut current = url.trim().to_string();
 
     for _ in 0..3 {
-        let resp = client
-            .get(&current)
-            .header("Icy-MetaData", "1")
+        let mut request = client.get(&current);
+        if want_metadata {
+            request = request.header("Icy-MetaData", "1");
+        }
+        let resp = request
             .send()
             .await
             .map_err(|e| format!("{current}: {}", describe(&e)))?;
@@ -255,7 +265,10 @@ fn unproven(message: impl Into<String>) -> IcyFailure {
 /// Plaintext only. ICY predates TLS by decades and the servers still speaking
 /// it are `http://` to a one, so an `https://` failure is a real failure and
 /// is left to stand.
-async fn icy_connect(url: &str) -> Result<(tokio::net::TcpStream, Head, Vec<u8>), IcyFailure> {
+async fn icy_connect(
+    url: &str,
+    want_metadata: bool,
+) -> Result<(tokio::net::TcpStream, Head, Vec<u8>), IcyFailure> {
     let parsed = reqwest::Url::parse(url.trim()).map_err(|e| unproven(format!("{url}: {e}")))?;
     if parsed.scheme() != "http" {
         return Err(unproven("only a plaintext URL can be read this way"));
@@ -283,9 +296,10 @@ async fn icy_connect(url: &str) -> Result<(tokio::net::TcpStream, Head, Vec<u8>)
 
     // HTTP/1.0 is what the players these servers were written for send, and
     // it settles the question of keeping the connection open afterwards.
+    let metadata = if want_metadata { "Icy-MetaData: 1\r\n" } else { "" };
     let request = format!(
         "GET {target} HTTP/1.0\r\nHost: {host}:{port}\r\nUser-Agent: {STREAM_UA}\r\n\
-         Icy-MetaData: 1\r\nConnection: close\r\n\r\n"
+         {metadata}Connection: close\r\n\r\n"
     );
     socket
         .write_all(request.as_bytes())
@@ -338,7 +352,7 @@ async fn icy_connect(url: &str) -> Result<(tokio::net::TcpStream, Head, Vec<u8>)
 /// The Shoutcast v1 probe: connect as above, then read far enough into the
 /// audio to catch a title.
 async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure> {
-    let (mut socket, head, mut body) = icy_connect(url).await?;
+    let (mut socket, head, mut body) = icy_connect(url, true).await?;
 
     let mut info = StreamInfo {
         url: url.trim().to_string(),
@@ -400,7 +414,7 @@ async fn http_probe(url: &str, want_title: bool, skip_resolve: bool) -> Result<S
         let final_url = resp.url().to_string();
         (resp, final_url, content_type)
     } else {
-        match resolve(&client()?, url).await? {
+        match resolve(&client()?, url, true).await? {
             Resolved::Hls {
                 final_url,
                 content_type,
@@ -484,7 +498,15 @@ pub struct RelaySource {
 /// did work: the media element can no longer resolve the segment URLs against
 /// the relay's own origin.
 pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
-    let http = match resolve(&relay_client()?, url).await {
+    // No `Icy-MetaData: 1`. Asking for it makes the server splice metadata
+    // blocks into the audio every `icy-metaint` bytes, and the relay copies
+    // bytes - so a `StreamTitle='...'` lands in the middle of the MP3 and the
+    // decoder gives up on it. That is `MEDIA_ERR_DECODE`, mid-song, on a full
+    // buffer: Radio Paradise (metaint 16000) died about sixteen seconds in,
+    // every time, while FIP - which interleaves nothing - played for as long
+    // as you left it. The now-playing poll asks the broadcaster directly and
+    // has its own connection for this.
+    let http = match resolve(&relay_client()?, url, false).await {
         Ok(Resolved::Stream {
             resp, content_type, ..
         }) => {
@@ -505,7 +527,7 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
     };
     // Same order as `probe_inner`: HTTP first, and the hand-rolled ICY path
     // only once the HTTP client has failed.
-    match icy_connect(url).await {
+    match icy_connect(url, false).await {
         Ok((socket, head, primed)) => Ok(RelaySource {
             content_type: head
                 .get("content-type")
