@@ -117,11 +117,11 @@ pub struct Query {
     /// different answers rather than one being a sort of the other.
     #[serde(default)]
     pub codec: String,
-    /// The floor a station's bitrate has to clear, in kbps. 0 for any, which
-    /// is also the only setting that keeps the many stations the directory
-    /// has no bitrate on file for.
+    /// The bitrate a station has to report, in kbps, matched exactly. 0 for
+    /// any, which is also the only setting that keeps the many stations the
+    /// directory has no bitrate on file for.
     #[serde(default)]
-    pub bitrate_min: u32,
+    pub bitrate: u32,
     #[serde(default)]
     pub limit: u32,
     #[serde(default)]
@@ -150,16 +150,17 @@ pub struct Facets {
     /// the directory carries WMA and a long tail of others, and a filter whose
     /// every result is a station the player cannot open is not worth offering.
     pub codecs: Vec<Bucket>,
-    /// One per bitrate floor the dropdown offers, counted as the filter reads
-    /// it - "192" is how many stations are at 192k *or better*, not at exactly
-    /// 192k, so the numbers climb as the floor drops.
+    /// One per bitrate the dropdown offers, counted as the filter reads it -
+    /// "192" is how many stations report exactly 192k. The counts do not nest
+    /// the way a floor's would, and they do not add up to the whole either:
+    /// the directory is full of bitrates that are nobody's round number.
     pub bitrates: Vec<Bucket>,
     /// Set when the directory had more stations than the tally was allowed to
     /// read, so every count below is a floor rather than the whole truth.
     pub sampled: bool,
 }
 
-/// A count against one fixed dropdown entry - a format, or a bitrate floor.
+/// A count against one fixed dropdown entry - a format, or a bitrate.
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Bucket {
@@ -171,7 +172,8 @@ pub struct Bucket {
 /// The formats the dropdown offers, matched whole against what the directory
 /// reports - "AAC" and "AAC+" are two different answers, not one with a suffix.
 const CODECS: [&str; 5] = ["MP3", "AAC", "AAC+", "OGG", "FLAC"];
-/// The floors the bitrate dropdown offers.
+/// The bitrates the dropdown offers, matched exactly against what a station
+/// reports - the round numbers nearly every encoder is set to.
 const BITRATES: [u32; 6] = [64, 96, 128, 192, 256, 320];
 
 /// One genre the directory has a useful number of stations under.
@@ -453,8 +455,13 @@ fn quality_params(query: &Query, params: &mut Vec<(&'static str, String)>) {
     if !codec.is_empty() {
         params.push(("codec", codec));
     }
-    if query.bitrate_min > 0 {
-        params.push(("bitrateMin", query.bitrate_min.min(10_000).to_string()));
+    // An exact bitrate is a floor and a ceiling at once: the directory has no
+    // "equals" filter, and a floor on its own hands back everything above the
+    // number that was asked for.
+    if query.bitrate > 0 {
+        let exact = query.bitrate.min(10_000).to_string();
+        params.push(("bitrateMin", exact.clone()));
+        params.push(("bitrateMax", exact));
     }
 }
 
@@ -506,10 +513,8 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
             codec_counts[slot] += 1;
         }
         let bitrate = number(&entry.bitrate) as u32;
-        for (slot, floor) in BITRATES.iter().enumerate() {
-            if bitrate >= *floor {
-                bitrate_counts[slot] += 1;
-            }
+        if let Some(slot) = BITRATES.iter().position(|known| *known == bitrate) {
+            bitrate_counts[slot] += 1;
         }
         for tag in text(&entry.tags).split(',') {
             let value = tag.trim();
@@ -560,8 +565,8 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
     let bitrates = BITRATES
         .iter()
         .zip(bitrate_counts)
-        .map(|(floor, stations)| Bucket {
-            key: floor.to_string(),
+        .map(|(rate, stations)| Bucket {
+            key: rate.to_string(),
             stations,
         })
         .collect();
