@@ -51,6 +51,8 @@ const FACETS = 2;
 
 const IDLE_SPIN = 0.26;   // radians per second
 const PLAYING_SPIN = 0.7;
+/** Which way it turns until something shoves it: -1 is to the left. */
+const IDLE_DIR = -1;
 
 /** The station picture is redrawn at this size before it goes on the ball. */
 const LOGO_SIZE = 128;
@@ -81,10 +83,12 @@ const state = {
   canvas: null,
   host: null,
   last: 0,
-  spin: IDLE_SPIN,
+  // Signed, and started already going the idle way: easing in from the other
+  // direction would spend the first second of every launch turning back.
+  spin: IDLE_DIR * IDLE_SPIN,
   kick: 0,
   /** Which way it settles back to turning: set by the side that was clicked. */
-  dir: 1,
+  dir: IDLE_DIR,
   /** The lit mesh, and the crystal texture to go back to when nothing plays. */
   core: null,
   crystal: null,
