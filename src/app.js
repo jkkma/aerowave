@@ -2269,6 +2269,74 @@ function newId() {
   return "a" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
+/**
+ * An alarm keeps a 24-hour time whatever the clock setting says. On a
+ * 12-hour clock the hour field holds 1-12 and the AM/PM pair carries the
+ * rest of it, so these two functions are the only places that cross that
+ * boundary - everything else works in the hour the alarm is stored with.
+ */
+const editorUses12h = () => state.settings.clock24h === false;
+let editorPm = false;
+let editorQuickMins = 0;
+
+function setEditorTime(hour, minute, quickMins = 0) {
+  // Only the RING IN chips pass a span, so every other way of moving the
+  // time - typing, the steppers, AM/PM - puts the row back to nothing lit.
+  editorQuickMins = quickMins;
+  editorPm = hour >= 12;
+  $("#al-hour").value = editorUses12h() ? String(hour % 12 || 12) : pad2(hour);
+  $("#al-minute").value = pad2(minute);
+  syncTimeUi();
+}
+
+function readEditorTime() {
+  const typed = parseInt($("#al-hour").value, 10) || 0;
+  const minute = Math.min(59, Math.max(0, parseInt($("#al-minute").value, 10) || 0));
+  // A typed 0 on a 12-hour clock means midnight, which that clock calls 12.
+  const hour = editorUses12h()
+    ? (Math.min(12, Math.max(1, typed || 12)) % 12) + (editorPm ? 12 : 0)
+    : Math.min(23, Math.max(0, typed));
+  return { hour, minute };
+}
+
+/** Everything downstream of those two fields: which of AM and PM is lit,
+ *  which quick-set chip matches, and the line saying when it next rings. */
+function syncTimeUi() {
+  const { hour, minute } = readEditorTime();
+  $$("#al-meridiem .chip").forEach((btn) => {
+    const lit = (btn.dataset.ampm === "pm") === (hour >= 12);
+    btn.classList.toggle("on", lit);
+    btn.setAttribute("aria-pressed", String(lit));
+  });
+  $$("#al-quick .chip").forEach((chip) =>
+    chip.classList.toggle("on", +chip.dataset.mins === editorQuickMins)
+  );
+  updateDayHint();
+}
+
+/**
+ * RING IN is a timer, not a clock: it moves the alarm to a span from now
+ * rather than to a time of day. The span is rounded up to the next whole
+ * minute because the scheduler fires on the minute, and a nap set for
+ * fifteen minutes should not go off in fourteen and a bit.
+ */
+function setEditorTimeIn(mins) {
+  const at = new Date(Date.now() + mins * 60000);
+  if (at.getSeconds() > 0) at.setMinutes(at.getMinutes() + 1);
+  // A span from now can only happen once. Leaving days selected would give
+  // an alarm that repeats at that time instead - not what the chip says.
+  editorDays = [];
+  $$("#al-days button").forEach((b) => b.classList.remove("on"));
+  setEditorTime(at.getHours(), at.getMinutes(), mins);
+}
+
+/** AM and PM mean nothing on a 24-hour clock, so the pair comes and goes
+ *  with that setting, and the time is rewritten in the reading it wants. */
+function applyClockMode(hour, minute) {
+  $("#al-meridiem").classList.toggle("hidden", !editorUses12h());
+  setEditorTime(hour, minute);
+}
+
 function updateDayHint() {
   const hint = $("#al-dayhint");
   if (editorDays.length) {
@@ -2278,7 +2346,8 @@ function updateDayHint() {
       .map((d) => DAY_NAMES[d])
       .join(" ");
   } else {
-    hint.textContent = `Once, at the next ${$("#al-hour").value}:${$("#al-minute").value}`;
+    const { hour, minute } = readEditorTime();
+    hint.textContent = `Once, at the next ${fmtAlarmTime(hour, minute)}`;
   }
 }
 
@@ -2371,12 +2440,10 @@ function openAlarmEditor(alarm) {
     autoSnoozes: last.autoSnoozes ?? 0,
   };
 
-  $("#al-hour").value = pad2(base.hour);
-  $("#al-minute").value = pad2(base.minute);
   $("#al-label").value = base.label || "";
   editorDays = [...(base.days || [])];
   $$("#al-days button").forEach((b) => b.classList.toggle("on", editorDays.includes(+b.dataset.day)));
-  updateDayHint();
+  applyClockMode(base.hour, base.minute);
 
   const src = base.source || { kind: "station" };
   editorFolder = src.kind === "folder" ? src.path : null;
@@ -2425,8 +2492,7 @@ function closeAlarmEditor() {
 }
 
 function readAlarmEditor() {
-  const hour = Math.min(23, Math.max(0, parseInt($("#al-hour").value, 10) || 0));
-  const minute = Math.min(59, Math.max(0, parseInt($("#al-minute").value, 10) || 0));
+  const { hour, minute } = readEditorTime();
   let source;
   if (editorKind === "station") {
     const id = $("#al-station").value;
@@ -2700,29 +2766,45 @@ function wire() {
       if (i >= 0) editorDays.splice(i, 1);
       else editorDays.push(day);
       btn.classList.toggle("on", i < 0);
-      updateDayHint();
+      editorQuickMins = 0; // a repeat is not a span from now either
+      syncTimeUi();
     })
   );
 
   $$(".stepper").forEach((btn) =>
     btn.addEventListener("click", () => {
-      const field = $("#al-" + btn.dataset.step);
-      const max = btn.dataset.step === "hour" ? 24 : 60;
-      const value = (parseInt(field.value, 10) || 0) + +btn.dataset.dir;
-      field.value = pad2(((value % max) + max) % max);
-      updateDayHint();
+      const { hour, minute } = readEditorTime();
+      const dir = +btn.dataset.dir;
+      // The hour steps through all twenty-four even when only twelve are on
+      // show, so 11 AM steps to 12 PM the way a clock does. The minute wraps
+      // inside its own hour rather than carrying, as the spinner always has.
+      if (btn.dataset.step === "hour") setEditorTime((hour + dir + 24) % 24, minute);
+      else setEditorTime(hour, (minute + dir + 60) % 60);
     })
   );
 
   ["al-hour", "al-minute"].forEach((id) => {
     const field = $("#" + id);
-    field.addEventListener("input", updateDayHint);
+    field.addEventListener("input", () => {
+      editorQuickMins = 0; // a typed time is no longer a span from now
+      syncTimeUi();
+    });
     field.addEventListener("blur", () => {
-      const max = id === "al-hour" ? 23 : 59;
-      field.value = pad2(Math.min(max, Math.max(0, parseInt(field.value, 10) || 0)));
-      updateDayHint();
+      const { hour, minute } = readEditorTime();
+      setEditorTime(hour, minute);
     });
   });
+
+  $$("#al-meridiem .chip").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      const { hour, minute } = readEditorTime();
+      setEditorTime((hour % 12) + (btn.dataset.ampm === "pm" ? 12 : 0), minute);
+    })
+  );
+
+  $$("#al-quick .chip").forEach((chip) =>
+    chip.addEventListener("click", () => setEditorTimeIn(+chip.dataset.mins))
+  );
 
   $$("#al-kind .chip").forEach((chip) => chip.addEventListener("click", () => setKind(chip.dataset.kind)));
 
@@ -2802,12 +2884,16 @@ function wire() {
     row.querySelector(".sw").addEventListener("click", (e) => {
       const sw = e.currentTarget;
       const next = sw.getAttribute("aria-pressed") !== "true";
+      // The hour field holds 12- or 24-hour digits according to this very
+      // setting, so take the time in the old reading before switching.
+      const was = row.dataset.setting === "clock24h" ? readEditorTime() : null;
       sw.setAttribute("aria-pressed", String(next));
       state.settings[row.dataset.setting] = next;
       if (row.dataset.setting === "clock24h") {
         tickClock();
         renderAlarms();
         refreshNextAlarm();
+        applyClockMode(was.hour, was.minute);
       }
       saveSettings();
     });

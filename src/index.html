@@ -190,7 +190,24 @@
             <input class="timefield" id="al-minute" inputmode="numeric" maxlength="2" value="00">
             <button type="button" class="stepper" data-step="minute" data-dir="-1">▼</button>
           </div>
+          <div class="meridiem hidden" id="al-meridiem" role="group" aria-label="Morning or afternoon">
+            <button type="button" class="chip" data-ampm="am" aria-pressed="false">AM</button>
+            <button type="button" class="chip" data-ampm="pm" aria-pressed="false">PM</button>
+          </div>
           <label class="lbl grow">Label<input class="field" id="al-label" maxlength="40" placeholder="Wake up"></label>
+        </div>
+
+        <div class="quickrow">
+          <span class="hud-mini">RING IN</span>
+          <div class="chips" id="al-quick">
+            <button type="button" class="chip" data-mins="15">15m</button>
+            <button type="button" class="chip" data-mins="30">30m</button>
+            <button type="button" class="chip" data-mins="60">1h</button>
+            <button type="button" class="chip" data-mins="120">2h</button>
+            <button type="button" class="chip" data-mins="240">4h</button>
+            <button type="button" class="chip" data-mins="360">6h</button>
+            <button type="button" class="chip" data-mins="480">8h</button>
+          </div>
         </div>
 
         <div class="days" id="al-days">
