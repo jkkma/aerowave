@@ -1206,9 +1206,10 @@ let browseTag = "";
 let browseTagLabel = "";
 let browseCountry = "";
 let browseCountryLabel = "";
-/** The directory's own name for a format, and the bitrate to match exactly. */
+/** The directory's own name for a format, and which band of the bitrate
+ *  dropdown to match - a round number, or "low" and "high" for the tails. */
 let browseCodec = "";
-let browseBitrate = 0;
+let browseBitrate = "";
 /** The directory's global lists, and the narrowed ones it works out for us. */
 let browseCountries = null;
 let browseTags = null;
@@ -1230,9 +1231,16 @@ let browseRequest = 0;
 /** The same, per dropdown, for the tallies that narrow one filter by the other. */
 const browseNarrows = new Map();
 
-/** Same stream by any reasonable reading, so a station is not kept twice. */
+/**
+ * Same stream by any reasonable reading, so a station is not kept twice.
+ * The scheme is dropped along with the case and a trailing slash: the
+ * directory carries the same stream under http and https all the time, and
+ * this has to read a URL the same way `stream_key` does in the backend, or
+ * a row the search collapsed comes straight back on the next page.
+ */
 const sameStream = (a, b) => {
-  const tidy = (u) => (u || "").trim().replace(/\/+$/, "").toLowerCase();
+  const tidy = (u) =>
+    (u || "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
   return !!tidy(a) && tidy(a) === tidy(b);
 };
 
@@ -1411,7 +1419,7 @@ async function refreshBrowseFilters() {
   const jobs = [];
   // Format and bitrate narrow both lists, so neither global list is right
   // any more once one of them is set.
-  const narrowed = !!browseCodec || browseBitrate > 0;
+  const narrowed = !!browseCodec || !!browseBitrate;
 
   if (browseCountry || narrowed) {
     jobs.push(
@@ -1434,7 +1442,7 @@ async function refreshBrowseFilters() {
   // tally is megabytes - the browse tab is meant to cost nothing until asked.
   const place = { countryCode: browseCountry, tag: browseTag };
   const anywhereElse = !!browseCountry || !!browseTag;
-  if (anywhereElse || browseBitrate > 0) {
+  if (anywhereElse || !!browseBitrate) {
     jobs.push(narrowFixed("#browse-codec", facetQuery(place, "codec"), (f) => f.codecs, "format"));
   } else {
     resetFixed("#browse-codec");
@@ -1456,8 +1464,8 @@ const filterNow = (selector) =>
 
 /** Rebuild one dropdown from a facet tally, saying so while it is fetched. */
 /**
- * Format and bitrate are fixed lists - five formats and six bitrates, chosen
- * because they are what the player can open - so they are annotated rather
+ * Format and bitrate are fixed lists - five formats the player can open, and
+ * nine bands of bitrate - so they are annotated rather
  * than rebuilt: each option keeps its place and gains a count, and one with
  * nothing behind it is disabled rather than removed. A short list that
  * reshuffles as you narrow is harder to use than one that greys out.
@@ -2732,7 +2740,7 @@ function wire() {
     browseSearch(false);
   });
   $("#browse-bitrate").addEventListener("change", (e) => {
-    browseBitrate = +e.target.value || 0;
+    browseBitrate = e.target.value;
     refreshBrowseFilters();
     browseSearch(false);
   });

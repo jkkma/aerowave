@@ -15,7 +15,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use aerowave_core::directory::{
-    clean_name, first_tag, image_kind, is_country_code, is_hostname, playable_url, sort_key,
+    bitrate_band_by_key, bitrate_band_index, clean_name, first_tag, image_kind, is_country_code,
+    is_hostname, playable_url, sort_key, stream_key, BITRATE_BANDS,
 };
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -117,11 +118,12 @@ pub struct Query {
     /// different answers rather than one being a sort of the other.
     #[serde(default)]
     pub codec: String,
-    /// The bitrate a station has to report, in kbps, matched exactly. 0 for
-    /// any, which is also the only setting that keeps the many stations the
-    /// directory has no bitrate on file for.
+    /// Which band of the bitrate dropdown a station has to fall in - a round
+    /// number like "192", or "low" and "high" for the tails either side of
+    /// them. Empty for any, which is also the only setting that keeps the many
+    /// stations the directory has no bitrate on file for.
     #[serde(default)]
-    pub bitrate: u32,
+    pub bitrate: String,
     #[serde(default)]
     pub limit: u32,
     #[serde(default)]
@@ -150,10 +152,12 @@ pub struct Facets {
     /// the directory carries WMA and a long tail of others, and a filter whose
     /// every result is a station the player cannot open is not worth offering.
     pub codecs: Vec<Bucket>,
-    /// One per bitrate the dropdown offers, counted as the filter reads it -
-    /// "192" is how many stations report exactly 192k. The counts do not nest
+    /// One per band the dropdown offers, counted as the filter reads it -
+    /// "192" is how many stations report exactly 192k, and "low" how many
+    /// report anything under the lowest round number. The counts do not nest
     /// the way a floor's would, and they do not add up to the whole either:
-    /// the directory is full of bitrates that are nobody's round number.
+    /// the directory is full of bitrates that are nobody's round number, and
+    /// fuller still of stations it has no bitrate for at all.
     pub bitrates: Vec<Bucket>,
     /// Set when the directory had more stations than the tally was allowed to
     /// read, so every count below is a floor rather than the whole truth.
@@ -172,9 +176,6 @@ pub struct Bucket {
 /// The formats the dropdown offers, matched whole against what the directory
 /// reports - "AAC" and "AAC+" are two different answers, not one with a suffix.
 const CODECS: [&str; 5] = ["MP3", "AAC", "AAC+", "OGG", "FLAC"];
-/// The bitrates the dropdown offers, matched exactly against what a station
-/// reports - the round numbers nearly every encoder is set to.
-const BITRATES: [u32; 6] = [64, 96, 128, 192, 256, 320];
 
 /// One genre the directory has a useful number of stations under.
 #[derive(Serialize, Clone, Debug)]
@@ -455,13 +456,13 @@ fn quality_params(query: &Query, params: &mut Vec<(&'static str, String)>) {
     if !codec.is_empty() {
         params.push(("codec", codec));
     }
-    // An exact bitrate is a floor and a ceiling at once: the directory has no
-    // "equals" filter, and a floor on its own hands back everything above the
-    // number that was asked for.
-    if query.bitrate > 0 {
-        let exact = query.bitrate.min(10_000).to_string();
-        params.push(("bitrateMin", exact.clone()));
-        params.push(("bitrateMax", exact));
+    // Always a floor and a ceiling together: the directory has no "equals"
+    // filter, and a floor on its own hands back everything above the number
+    // asked for. A round number sets both to itself; "low" and "high" are the
+    // same pair of parameters with the two ends further apart.
+    if let Some(band) = bitrate_band_by_key(query.bitrate.trim()) {
+        params.push(("bitrateMin", band.min.to_string()));
+        params.push(("bitrateMax", band.max.to_string()));
     }
 }
 
@@ -489,7 +490,7 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
     let mut tag_counts: HashMap<String, u32> = HashMap::new();
     let mut country_counts: HashMap<String, (String, u32)> = HashMap::new();
     let mut codec_counts = [0u32; CODECS.len()];
-    let mut bitrate_counts = [0u32; BITRATES.len()];
+    let mut bitrate_counts = [0u32; BITRATE_BANDS.len()];
     // Count what the search would actually show, not what the directory holds.
     // The same station is submitted more than once all the time - Albania's two
     // AAC+ stations were "Radio One - Tirana 95.2 FM" and "RadioOne", the same
@@ -504,7 +505,7 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
         if clean_name(text(&entry.name), 60).is_empty() {
             continue;
         }
-        if !seen.insert(url.to_ascii_lowercase()) {
+        if !seen.insert(stream_key(&url)) {
             continue;
         }
 
@@ -512,8 +513,7 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
         if let Some(slot) = CODECS.iter().position(|known| *known == codec) {
             codec_counts[slot] += 1;
         }
-        let bitrate = number(&entry.bitrate) as u32;
-        if let Some(slot) = BITRATES.iter().position(|known| *known == bitrate) {
+        if let Some(slot) = bitrate_band_index(number(&entry.bitrate) as u32) {
             bitrate_counts[slot] += 1;
         }
         for tag in text(&entry.tags).split(',') {
@@ -562,11 +562,11 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
             stations,
         })
         .collect();
-    let bitrates = BITRATES
+    let bitrates = BITRATE_BANDS
         .iter()
         .zip(bitrate_counts)
-        .map(|(rate, stations)| Bucket {
-            key: rate.to_string(),
+        .map(|(band, stations)| Bucket {
+            key: band.key.to_string(),
             stations,
         })
         .collect();
@@ -709,8 +709,15 @@ pub async fn search(query: Query) -> Result<Page, String> {
         .map_err(|e| format!("radio-browser sent something unreadable: {e}"))?;
     let offered = raw.len() as u32;
 
-    let mut seen: Vec<String> = Vec::new();
-    let mut out: Vec<BrowseStation> = Vec::new();
+    // One row per stream. Which submission gets to be that row is decided by
+    // votes rather than by whichever the directory sorted first: ordered by
+    // name, radio.plaza.one came back as "Nightwave Plaza" with 171 votes and
+    // its other submission, "Vaporwave" with 379, was the one thrown away -
+    // so the station could not be found under the name most people file it
+    // under. The row keeps the place the stream first appeared, so the page
+    // stays in the order the directory paged it.
+    let mut order: Vec<String> = Vec::new();
+    let mut best: HashMap<String, BrowseStation> = HashMap::new();
     for entry in raw {
         let Some(url) = playable_url(text(&entry.url), text(&entry.url_resolved)) else {
             continue;
@@ -719,15 +726,9 @@ pub async fn search(query: Query) -> Result<Page, String> {
         if name.is_empty() {
             continue;
         }
-        // The same station is often submitted more than once. One row each.
-        let key = url.to_ascii_lowercase();
-        if seen.contains(&key) {
-            continue;
-        }
-        seen.push(key);
 
         let tags = clean_name(text(&entry.tags), 120);
-        out.push(BrowseStation {
+        let station = BrowseStation {
             uuid: entry.stationuuid.unwrap_or_default(),
             name,
             url,
@@ -742,10 +743,18 @@ pub async fn search(query: Query) -> Result<Page, String> {
             bitrate: number(&entry.bitrate).clamp(0, 100_000) as u32,
             votes: number(&entry.votes),
             hls: number(&entry.hls) != 0,
-        });
+        };
+
+        let key = stream_key(&station.url);
+        match best.get_mut(&key) {
+            Some(kept) if kept.votes >= station.votes => {}
+            Some(kept) => *kept = station,
+            None => {
+                order.push(key.clone());
+                best.insert(key, station);
+            }
+        }
     }
-    Ok(Page {
-        offered,
-        stations: out,
-    })
+    let stations = order.iter().filter_map(|key| best.remove(key)).collect();
+    Ok(Page { offered, stations })
 }

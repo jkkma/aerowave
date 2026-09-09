@@ -160,14 +160,20 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   bitrate are also set, because "Paraguay (68)" beside a 320k filter promises
   stations the next search cannot find.
 - Format and bitrate are annotated rather than rebuilt. They are short fixed
-  lists — five formats the player can open, six bitrates — so an option
-  with nothing behind it is greyed out where it stands rather than removed: a
-  list of five that reshuffles as you narrow is harder to use than one that
-  keeps its shape. Pick Iceland and you get `MP3 (10)`, `AAC+ (15)`,
-  `FLAC (0)` greyed. A bitrate matches exactly: `192k (3)` is three stations
-  at 192k, not three at 192k or better, so the counts do not nest and they do
-  not add up to the country either — plenty of stations are encoded at
-  something that is nobody's round number.
+  lists — five formats the player can open, nine bands of bitrate — so an
+  option with nothing behind it is greyed out where it stands rather than
+  removed: a list of five that reshuffles as you narrow is harder to use than
+  one that keeps its shape. Pick Iceland and you get `MP3 (10)`, `AAC+ (15)`,
+  `FLAC (0)` greyed. A round bitrate matches exactly: `192k (3)` is three
+  stations at 192k, not three at 192k or better, so the counts do not nest and
+  they do not add up to the country either — plenty of stations are encoded at
+  something that is nobody's round number. `low` and `high` are the two
+  exceptions, and they are ranges rather than numbers: everything under 48k and
+  everything over 320k, which without a band of their own could only be reached
+  by asking for any bitrate at all. They still leave gaps — 56k and 112k are in
+  no band — and none of them counts the stations the directory holds no bitrate
+  for, which report 0. Unreported is not the same as low, and only `Any
+  bitrate` keeps those.
 - A filter you have already set stays selectable even when it falls to zero,
   or the dropdown would refuse to offer what it is currently set to. The
   results simply come back empty, which is honest; silently un-setting a filter
@@ -175,8 +181,21 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - Duplicate submissions are collapsed twice over: within a page as it arrives,
   and again against everything already on screen, so pressing MORE cannot bring
   back a stream you are already looking at. Matching is on the stream URL,
-  normalised for case and a trailing slash, since the same stream is often
-  submitted under two names.
+  normalised for case, a trailing slash and the scheme, since the same stream
+  is often submitted under two names — and more often under one name with
+  `http` and `https`. Of 5000 entries sampled, dropping the scheme merged 61
+  pairs the whole URL kept apart and the trailing slash one more; a default
+  port and a leading `www.` merged nothing, so neither is stripped. The three
+  places that compare streams — the search, the tally, and the webview's own
+  pass over what is already on screen — have to read a URL the same way, or a
+  row one of them collapsed reappears from another.
+- **Which duplicate survives is decided by votes**, not by whichever the
+  directory sorted first. `radio.plaza.one/ogg` is filed both as "Nightwave
+  Plaza" (171 votes) and as "Vaporwave" (379); ordered by name the first won,
+  so filtering to OGG at 64k showed the station under a name its listeners do
+  not use and the one they do use looked missing. The surviving row keeps the
+  place the stream first appeared, so a page stays in the order it was paged
+  in.
 - Every count is of what the list will actually show, not of what the directory
   holds. The same station is submitted more than once all the time — Albania's
   two AAC+ stations were "Radio One - Tirana 95.2 FM" and "RadioOne", the same

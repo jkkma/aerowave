@@ -145,6 +145,85 @@ pub fn is_hostname(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
+/// The key two directory entries share when they are the same stream.
+///
+/// Submissions are public and the same stream arrives more than once: under
+/// two different names, and more often under one name with two schemes. Of
+/// 5000 entries sampled in September 2026, ignoring the scheme merged 61
+/// pairs that the whole URL kept apart and ignoring a trailing slash merged
+/// one more. Stripping a default port or a leading `www.` merged nothing at
+/// all, so neither is done - a normalisation that never fires is only a way
+/// to collapse two stations that were never the same.
+///
+/// The path is lower-cased along with the host, which is not strictly correct
+/// for a URL path but is correct for this directory: the same stream is filed
+/// as `LOS40.mp3` and `Los40.mp3`.
+pub fn stream_key(url: &str) -> String {
+    let lower = url.trim().to_ascii_lowercase();
+    let bare = match lower.strip_prefix("https://") {
+        Some(rest) => rest,
+        None => lower.strip_prefix("http://").unwrap_or(lower.as_str()),
+    };
+    bare.trim_end_matches('/').to_string()
+}
+
+/// One entry in the bitrate dropdown, and the reported rates it stands for.
+///
+/// Most bands are a single round number, because that is what encoders are set
+/// to and what the directory stores. The two on the ends are ranges: the
+/// directory carries a long tail below the lowest round number and a handful
+/// above the highest, and without a band of their own those stations can only
+/// be reached by asking for any bitrate at all.
+pub struct BitrateBand {
+    /// The `value` of the dropdown option this belongs to, and the key its
+    /// count comes back under.
+    pub key: &'static str,
+    /// The inclusive range a reported rate has to fall in.
+    pub min: u32,
+    pub max: u32,
+}
+
+/// The bands the dropdown offers, in the order it offers them. They do not
+/// meet: 56k and 112k are in none of them, because the round numbers are what
+/// encoders are actually set to and a band wide enough to catch everything
+/// would stop meaning anything. Nor do they cover 0, which is what the
+/// directory stores for a station it has no bitrate for at all - unreported is
+/// not the same as low, and only "any bitrate" keeps those.
+pub const BITRATE_BANDS: [BitrateBand; 9] = [
+    BitrateBand { key: "low", min: 1, max: 47 },
+    BitrateBand { key: "48", min: 48, max: 48 },
+    BitrateBand { key: "64", min: 64, max: 64 },
+    BitrateBand { key: "96", min: 96, max: 96 },
+    BitrateBand { key: "128", min: 128, max: 128 },
+    BitrateBand { key: "192", min: 192, max: 192 },
+    BitrateBand { key: "256", min: 256, max: 256 },
+    BitrateBand { key: "320", min: 320, max: 320 },
+    // No encoder goes near the top of this, but the directory is public and
+    // the number it holds is whatever was typed in.
+    BitrateBand { key: "high", min: 321, max: 10_000_000 },
+];
+
+/// Where in `BITRATE_BANDS` a reported rate falls, or `None` when it falls
+/// between them - including the 0 that means the directory has no bitrate for
+/// the station. The index is what a tally counting into a fixed row of slots
+/// wants; `bitrate_band` is the same answer for anyone who wants the band.
+pub fn bitrate_band_index(kbps: u32) -> Option<usize> {
+    BITRATE_BANDS
+        .iter()
+        .position(|band| kbps >= band.min && kbps <= band.max)
+}
+
+/// The band a reported rate falls in, on the same terms.
+pub fn bitrate_band(kbps: u32) -> Option<&'static BitrateBand> {
+    bitrate_band_index(kbps).map(|slot| &BITRATE_BANDS[slot])
+}
+
+/// The band a dropdown value names, or `None` for "any bitrate" - and for
+/// anything else the webview might send, which is the same answer.
+pub fn bitrate_band_by_key(key: &str) -> Option<&'static BitrateBand> {
+    BITRATE_BANDS.iter().find(|band| band.key == key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +317,94 @@ mod tests {
         assert!(!is_hostname("de1.api.radio-browser.info/../evil"));
         assert!(!is_hostname("https://elsewhere.example"));
         assert!(!is_hostname(""));
+    }
+
+    #[test]
+    fn the_same_stream_under_two_schemes_is_one_stream() {
+        assert_eq!(
+            stream_key("https://radio.plaza.one/ogg"),
+            stream_key("http://radio.plaza.one/ogg")
+        );
+        assert_eq!(
+            stream_key("http://stream.live.vc.bbcmedia.co.uk/bbc_world_service"),
+            stream_key("https://stream.live.vc.bbcmedia.co.uk/bbc_world_service")
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_and_a_capital_do_not_make_a_second_station() {
+        assert_eq!(stream_key("http://a.example/live/"), stream_key("http://a.example/live"));
+        assert_eq!(stream_key("http://a.example/LOS40.mp3"), stream_key("http://a.example/los40.mp3"));
+        assert_eq!(stream_key("  http://a.example/live  "), stream_key("http://a.example/live"));
+    }
+
+    #[test]
+    fn two_streams_on_one_host_stay_two_streams() {
+        // The case that started this: plaza.one serves /ogg and /opus, and
+        // they are different streams at different bitrates.
+        assert_ne!(stream_key("http://radio.plaza.one/ogg"), stream_key("http://radio.plaza.one/opus"));
+        assert_ne!(stream_key("http://a.example/one"), stream_key("http://a.example/two"));
+        // Not normalised, because the sample said neither ever fires.
+        assert_ne!(stream_key("http://a.example:8000/x"), stream_key("http://a.example/x"));
+        assert_ne!(stream_key("http://www.a.example/x"), stream_key("http://a.example/x"));
+    }
+
+    fn band_of(kbps: u32) -> Option<&'static str> {
+        bitrate_band(kbps).map(|band| band.key)
+    }
+
+    #[test]
+    fn a_round_bitrate_lands_on_its_own_band() {
+        assert_eq!(band_of(48), Some("48"));
+        assert_eq!(band_of(128), Some("128"));
+        assert_eq!(band_of(320), Some("320"));
+    }
+
+    #[test]
+    fn the_end_bands_take_what_falls_outside_the_round_numbers() {
+        assert_eq!(band_of(1), Some("low"));
+        assert_eq!(band_of(32), Some("low"));
+        assert_eq!(band_of(47), Some("low"));
+        assert_eq!(band_of(321), Some("high"));
+        assert_eq!(band_of(1411), Some("high"));
+    }
+
+    #[test]
+    fn an_unreported_bitrate_is_not_a_low_one() {
+        // The directory stores 0 for a station it has no bitrate for. Counting
+        // those as low would promise quiet stations that are only unmeasured.
+        assert_eq!(band_of(0), None);
+    }
+
+    #[test]
+    fn a_bitrate_between_the_round_numbers_is_in_no_band() {
+        assert_eq!(band_of(56), None);
+        assert_eq!(band_of(112), None);
+        assert_eq!(band_of(319), None);
+    }
+
+    #[test]
+    fn the_index_and_the_band_are_the_same_answer() {
+        for kbps in [0u32, 1, 47, 48, 56, 192, 320, 321, 9999] {
+            let by_index = bitrate_band_index(kbps).map(|slot| BITRATE_BANDS[slot].key);
+            assert_eq!(by_index, band_of(kbps), "disagreed about {kbps}");
+        }
+    }
+
+    #[test]
+    fn the_bands_do_not_overlap_and_stay_in_order() {
+        for pair in BITRATE_BANDS.windows(2) {
+            assert!(pair[0].max < pair[1].min, "{} runs into {}", pair[0].key, pair[1].key);
+        }
+    }
+
+    #[test]
+    fn a_dropdown_value_finds_its_band_and_anything_else_finds_none() {
+        assert_eq!(bitrate_band_by_key("192").map(|b| b.min), Some(192));
+        assert_eq!(bitrate_band_by_key("high").map(|b| b.min), Some(321));
+        // "Any bitrate" sends an empty value, and means no filter at all.
+        assert!(bitrate_band_by_key("").is_none());
+        assert!(bitrate_band_by_key("0").is_none());
+        assert!(bitrate_band_by_key("nonsense").is_none());
     }
 }
