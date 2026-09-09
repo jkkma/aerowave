@@ -332,6 +332,13 @@ lives in `core/` instead.
 
 ## How it is put together
 
+For development with Codex, start with [AGENTS.md](AGENTS.md). Project skills,
+reviewer agents and automated checks are included; see
+[checks and hook trust](docs/checks.md) for activation and standalone commands.
+The [Windows testing guide](docs/windows-testing.md) preserves native input and
+accessibility lessons, and the [development handoff](docs/development-handoff.md)
+records the older local work that still needs reconciliation with this version.
+
 ```
 src/                 index.html, styles.css, app.js  — the face and playback
   orb3d.js           the low-poly WebGL orb

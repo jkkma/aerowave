@@ -9,10 +9,13 @@ Runs as a Stop hook, not on each edit: mid-bump the files legitimately
 disagree, and only a bump left unfinished at the end of a turn is a mistake.
 """
 
+import argparse
 import json
 import pathlib
 import re
 import sys
+
+from hook_input import read_event
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 TAURI = ROOT / "src-tauri"
@@ -57,14 +60,20 @@ def cargo_lock_versions(path):
     return found
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--hook", action="store_true", help="Read a Codex Stop event from stdin")
+    parser.add_argument("--strict", action="store_true", help="Also fail on stale or missing workspace lock entries")
+    args = parser.parse_args(argv)
     try:
-        payload = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        payload = {}
+        payload = read_event() if args.hook else {}
+    except (ValueError, OSError) as error:
+        print(f"Cannot read hook input: {error}", file=sys.stderr)
+        return 2
     # A second pass would block on the same thing forever if the first could
     # not fix it.
     if payload.get("stop_hook_active"):
+        print("{}")
         return 0
 
     want = json_version(TAURI / "tauri.conf.json", "version")
@@ -97,15 +106,21 @@ def main():
     # Cargo.lock is only rewritten by a build, so a lag here is a reminder
     # rather than a mistake - but it has to be gone before the commit.
     lock = cargo_lock_versions(TAURI / "Cargo.lock")
-    stale = {name: got for name, got in lock.items() if got != want}
+    stale = {name: lock.get(name) for name in ("aerowave", "aerowave-core")
+             if lock.get(name) != want}
     if stale:
         listed = ", ".join(f"{name} {got}" for name, got in stale.items())
-        print(json.dumps({
-            "systemMessage": (
-                f"Cargo.lock still at {listed} while the source says {want}. "
-                "Run a build before committing - cargo rewrites those two fields."
-            )
-        }))
+        message = (f"Cargo.lock has {listed} while the source says {want}. "
+                   "Run cargo check before committing to refresh the workspace entries.")
+        if args.strict:
+            print(message, file=sys.stderr)
+            return 2
+        if args.hook:
+            print(json.dumps({"systemMessage": message}))
+        else:
+            print(message, file=sys.stderr)
+    elif args.hook:
+        print("{}")
     return 0
 
 

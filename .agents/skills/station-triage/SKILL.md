@@ -1,30 +1,32 @@
 ---
 name: station-triage
-description: Diagnose why a radio station will not play in Aerowave, using the real relay outside the app rather than guessing from code.
-disable-model-invocation: true
+description: Diagnose Aerowave radio playback failures with the real relay, media events, and native WebView2 validation.
 ---
 
 # Why this station will not play
 
-Most of the wrong answers here are plausible ones. Work the sequence rather
-than reasoning from the symptom — the symptom is usually misleading.
+Use observed responses and media events to distinguish server failures from
+decoding failures. Run commands from the repository root in PowerShell 7.
 
 ## 0. Read this before diagnosing
 
-`README.md` records measurements taken against 24 radio-browser stations plus
-SomaFM. The headline results:
+`README.md` records historical measurements against 24 radio-browser stations
+plus SomaFM. Treat those as debugging context and reproduce the current station
+before concluding that its server or media behavior is unchanged:
 
 - **`MEDIA_ERR_SRC_NOT_SUPPORTED` (code 4) is not a codec verdict.** Chromium
   reports it for a refused connection and for an HTTP error page too. Two
   stations that looked undecodable were simply refusing connections.
 - **HE-AAC / AAC+ is not broadly unsupported** — five of six AAC+ stations
   played directly. That guess has already cost time once.
-- **The cause is usually server-side gating, not the format.**
+- **Server-side gating explained most fixable failures in that sample.**
 
 ## 1. Reproduce outside the app
 
-```bash
-cd src-tauri && cargo run --example relaycheck -- <url>
+Set `$stationUrl` to the URL being diagnosed, preserving its query string.
+
+```powershell
+cargo run --manifest-path src-tauri/Cargo.toml --example relaycheck -- $stationUrl
 ```
 
 This runs the real `relay.rs` and `stream.rs` against the real broadcaster,
@@ -59,15 +61,17 @@ hls.js. Two traps:
   means hls.js and MSE; the `.m3u8` itself means the browser decoded it
   natively.
 
-## 4. Do not trust the Claude Browser pane as a stand-in
+## 4. Validate in the native app
 
-It is not WebView2. Its User-Agent contains `Claude/... MSIX`, which some
-stations block and which the app never sends — so a station can fail there for
-a reason that does not exist in the real app. It also plays HLS natively,
-which WebView2 does not, so an HLS test can pass there for entirely the wrong
-reason. Autoplay is gated in the pane as well, so `play()` rejects with
-AbortError and `currentTime` stays 0 even when decoding is fine. Judge on
-readyState.
+A Codex browser preview or external browser may use a different engine,
+User-Agent, HLS implementation, or autoplay policy from the packaged WebView2
+app. Record which environment ran the test. A blocked browser request does not
+prove that the app's relay request will be blocked; native browser HLS playback
+does not prove the app's hls.js path works. A rejected `play()` call can reflect
+autoplay policy, so inspect the rejection, readyState, and media events.
+
+Use `docs/windows-testing.md` for the final native-window check. Preview harness
+results establish only what that environment exercised.
 
 ## 5. When you need the real front end against the real backend
 
@@ -84,8 +88,10 @@ configured — stub all five and the boot path is covered either way.
 
 Pair it with the relay actually running:
 
-```bash
-cd src-tauri && cargo run --example relaycheck -- --serve <urls>
+Set `$stationUrls` to the array of URLs being tested.
+
+```powershell
+cargo run --manifest-path src-tauri/Cargo.toml --example relaycheck -- --serve @stationUrls
 ```
 
 which prints a url to relay-url table that the stub answers `relay_url` from.
@@ -97,10 +103,10 @@ Two things that make it work:
   the stub to capture the instance and log every media event. The event trace
   — `error` and its `code`, readyState, buffered, currentTime — is what turns
   "it drops sometimes" into a diagnosis.
-- Python's `HTTPServer` sets `allow_reuse_address`, so two harnesses can bind
-  the same port on Windows and requests go to whichever one wins. A stale
-  harness serving an old port table looks exactly like a backend bug. Kill by
-  command line, not by port.
+- Python's `HTTPServer` allows address reuse; a stale harness serving an old
+  port table can look like a backend bug on Windows. Track the PIDs of harnesses
+  started for this task and verify their command lines before stopping them.
+  Do not terminate an unrelated process just because it owns the expected port.
 
 ## 6. Report
 

@@ -9,10 +9,13 @@ Runs as a Stop hook for the same reason as check_version.py - one side is
 legitimately ahead of the other while the work is in progress.
 """
 
+import argparse
 import json
 import pathlib
 import re
 import sys
+
+from hook_input import read_event
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 APP_JS = ROOT / "src" / "app.js"
@@ -49,12 +52,17 @@ def emitted():
     return names
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--hook", action="store_true", help="Read a Codex Stop event from stdin")
+    args = parser.parse_args(argv)
     try:
-        payload = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        payload = {}
+        payload = read_event() if args.hook else {}
+    except (ValueError, OSError) as error:
+        print(f"Cannot read hook input: {error}", file=sys.stderr)
+        return 2
     if payload.get("stop_hook_active"):
+        print("{}")
         return 0
 
     handlers = registered()
@@ -83,7 +91,13 @@ def main():
             "listened for in app.js but never emitted from Rust: " + ", ".join(unheard)
         )
     if notes:
-        print(json.dumps({"systemMessage": "IPC seam: " + "; ".join(notes)}))
+        message = "IPC seam: " + "; ".join(notes)
+        if args.hook:
+            print(json.dumps({"systemMessage": message}))
+        else:
+            print(message, file=sys.stderr)
+    elif args.hook:
+        print("{}")
     return 0
 
 
