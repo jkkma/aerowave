@@ -126,6 +126,7 @@ const player = {
   streamTitle: false, // has the stream itself named the track? then stop asking
   triedDirect: false, // ...and have we already fallen back off it?
   hls: false,         // is hls.js driving the element instead?
+  paused: false,      // held, with the source still on the element, so it can resume
   get playing() {
     return !!this.source;
   },
@@ -157,6 +158,7 @@ function stopPlayback(quiet) {
   audio.removeAttribute("src");
   audio.load();
   player.retries = 0;
+  player.paused = false;
   switchingSource = false;
   player.resolved = null;
   player.probed = false;
@@ -915,7 +917,7 @@ audio.addEventListener("timeupdate", () => {
 // does means the sound has gone: stop properly rather than leave the face
 // saying ON AIR with the orb still spinning over silence.
 audio.addEventListener("pause", () => {
-  if (switchingSource || !player.source) return;
+  if (switchingSource || player.paused || !player.source) return;
   stopPlayback();
 });
 audio.addEventListener("waiting", () => player.source && setStatus("BUFFERING", "busy"));
@@ -1032,7 +1034,58 @@ async function playRandomFromFolder(folder, opts = {}) {
   }
 }
 
+/**
+ * Pause, as opposed to stop.
+ *
+ * The difference is not cosmetic: stopping takes the source off the element,
+ * which ends the media session Chromium keeps, and a session that has ended
+ * cannot be reached by the play key. Pausing leaves the source where it is,
+ * so the session stays alive in a paused state and the next press of the key
+ * comes back here. A pause key that could only ever stop is just a second
+ * stop key.
+ */
+function pausePlayback() {
+  if (!player.source || player.paused) return;
+  // Not a ringing alarm. Its watchdog reads the same progress timestamp a
+  // pause freezes, so a paused ring would be read as a stream that had died
+  // and answered with the backup folder - and an alarm you can silence with a
+  // stray keypress is not an alarm. Dismissing one stays a deliberate press.
+  if (ringing) return;
+  // Set before the element is touched: the `pause` listener below reads it to
+  // tell this apart from the audio being taken away by something else.
+  player.paused = true;
+  audio.pause();
+  markPlaying(false);
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+  setStatus("PAUSED", "");
+}
+
+/**
+ * A file carries on from where it stopped. A station does not: the seconds
+ * spent paused are broadcast that has gone, and the buffer behind the pause
+ * is that much further from live every second it sits there, so a station
+ * rejoins the broadcast rather than resuming an old one.
+ */
+function resumePlayback() {
+  const source = player.source;
+  if (!source) return;
+  player.paused = false;
+  if (source.kind === "folder") {
+    markPlaying(true);
+    setStatus("PLAYING FILE", "on");
+    audio.play().catch((e) => {
+      if (!isAbort(e)) failure(String(e && e.message ? e.message : e));
+    });
+    return;
+  }
+  play(source, { volume: player.target });
+}
+
 function togglePlay() {
+  if (player.paused) {
+    resumePlayback();
+    return;
+  }
   if (player.playing) {
     stopPlayback();
     return;
@@ -1067,12 +1120,10 @@ function wireMediaKeys() {
     }
   };
   on("play", () => {
-    if (!player.playing) togglePlay();
+    if (player.paused) resumePlayback();
+    else if (!player.playing) togglePlay();
   });
-  // Live radio has no pause worth the name - the seconds spent paused are
-  // broadcast that has gone - so the key that looks like pause does what the
-  // big button does, and stops.
-  on("pause", () => stopPlayback());
+  on("pause", () => pausePlayback());
   on("stop", () => stopPlayback());
   on("nexttrack", () => step(1));
   on("previoustrack", () => step(-1));
