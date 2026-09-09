@@ -918,6 +918,13 @@ audio.addEventListener("timeupdate", () => {
 // saying ON AIR with the orb still spinning over silence.
 audio.addEventListener("pause", () => {
   if (switchingSource || player.paused || !player.source) return;
+  // A track reaching its end is not the sound going away. Ending pauses the
+  // element on the way past - the spec sets `paused`, fires `pause`, and only
+  // then fires `ended` - so tearing playback down here would drop the source
+  // before the `ended` handler ran, and a shuffle folder would play exactly
+  // one file. That the element already reports `ended` is what tells the two
+  // apart; a genuine interruption arrives mid-track, with `ended` false.
+  if (audio.ended) return;
   stopPlayback();
 });
 audio.addEventListener("waiting", () => player.source && setStatus("BUFFERING", "busy"));
