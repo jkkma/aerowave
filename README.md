@@ -110,13 +110,23 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   the relay: it wants a title, not audio, and pointing it at the relay would
   only hand it back the app's own stream.
 - **The keyboard's media keys work while something is playing**, through the
-  media session Chromium keeps for whatever is making sound. Play/pause and
-  stop both stop — live radio has no pause worth the name, since the seconds
-  spent paused are broadcast that has gone — and next and previous step the
-  same list the buttons do. The keys are not claimed globally: from standby
-  there is no session for them to arrive through, so starting from cold is the
-  play button's job. Claiming them globally would mean taking them off every
-  other player on the machine.
+  media session Chromium keeps for whatever is making sound. Next and previous
+  step the same list the buttons do; play/pause holds and resumes; stop stops
+  outright. The keys are not claimed globally: from standby there is no session
+  for them to arrive through, so starting from cold is the play button's job.
+  Claiming them globally would mean taking them off every other player on the
+  machine.
+- **Pause and stop are different operations, and the difference is what makes
+  the play key work.** Stopping takes the source off the element, which ends
+  the media session — and a session that has ended cannot be reached by the
+  play key, so a pause that stopped could only ever be a second stop key.
+  Pausing leaves the source where it is and the session alive, holding it in a
+  paused state the next press comes back to. Resuming a file carries on from
+  where it stopped; resuming a station rejoins the broadcast rather than
+  playing out a buffer that is now minutes behind live. A ringing alarm will
+  not pause at all: its watchdog reads the same progress timestamp a pause
+  freezes, so it would answer a held ring with the backup folder, and an alarm
+  that a stray keypress can silence is not an alarm.
 - Because the session is Chromium's, anything that pauses the element from
   outside the app — the system taking the audio, a key nothing here claimed —
   is treated as a stop rather than ignored. Ignoring it is how the face came to
