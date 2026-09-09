@@ -26,13 +26,14 @@ mod hls;
 #[path = "../src/browse.rs"]
 mod browse;
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Read the head and a little body straight off the socket, so the check does
 /// not depend on the same HTTP client the relay itself uses.
-async fn fetch(url: &str, want: usize) -> Result<(String, usize), String> {
+async fn fetch(url: &str, want: usize) -> Result<(String, Vec<u8>), String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
     let addr = format!(
         "{}:{}",
@@ -71,7 +72,61 @@ async fn fetch(url: &str, want: usize) -> Result<(String, usize), String> {
         .map(|i| i + 4)
         .unwrap_or(buf.len());
     let head = String::from_utf8_lossy(&buf[..split]).to_string();
-    Ok((head, buf.len().saturating_sub(split)))
+    Ok((head, buf[split..].to_vec()))
+}
+
+/// Does this look like a stream of whole MPEG audio frames?
+///
+/// Byte count alone cannot answer the question the relay's stripping raises.
+/// A metadata block left in the audio does not shorten it - it lengthens it,
+/// with `StreamTitle='...'` sitting where a frame header should be - and the
+/// player reports that as `MEDIA_ERR_DECODE` a long way from the cause. So
+/// walk the frames: read a header, work out that frame's length, and expect a
+/// header at the end of it. A block spliced in breaks the chain within one
+/// `icy-metaint` of the start.
+///
+/// Returns how many frames chained and where it lost sync, if it did. AAC and
+/// anything else that is not MPEG audio is not walked - `None` means "not
+/// something this check understands", not "bad".
+fn mpeg_frames(audio: &[u8]) -> Option<(usize, Option<usize>)> {
+    const RATES: [u32; 15] = [
+        0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+    ];
+    const FREQS: [u32; 3] = [44100, 48000, 32000];
+
+    // Frames need not start at byte zero: a stream is joined mid-song.
+    let start = (0..audio.len().saturating_sub(4))
+        .find(|&i| audio[i] == 0xff && audio[i + 1] & 0xe0 == 0xe0)?;
+
+    let mut at = start;
+    let mut frames = 0;
+    while at + 4 <= audio.len() {
+        let h = &audio[at..at + 4];
+        if h[0] != 0xff || h[1] & 0xe0 != 0xe0 {
+            return Some((frames, Some(at)));
+        }
+        // Layer III, MPEG 1 or 2, and a bitrate and sample rate that exist.
+        let version = (h[1] >> 3) & 0x03;
+        let bitrate = RATES[((h[2] >> 4) & 0x0f) as usize];
+        let freq = FREQS.get(((h[2] >> 2) & 0x03) as usize).copied();
+        let (Some(freq), true) = (freq, bitrate > 0) else {
+            return Some((frames, Some(at)));
+        };
+        // MPEG 2 and 2.5 halve both.
+        let (bitrate, freq) = if version == 3 {
+            (bitrate, freq)
+        } else {
+            (bitrate / 2, freq / 2)
+        };
+        let padding = ((h[2] >> 1) & 1) as u32;
+        let len = (144 * bitrate * 1000 / freq + padding) as usize;
+        if len < 4 {
+            return Some((frames, Some(at)));
+        }
+        at += len;
+        frames += 1;
+    }
+    Some((frames, None))
 }
 
 /// Send a raw request the relay is meant to turn away.
@@ -96,7 +151,19 @@ async fn raw(port: u16, request: &str) -> String {
 
 #[tokio::main]
 async fn main() {
-    let relay = match relay::Relay::start().await {
+    // Titles the relay pulled out of the streams, in the order they arrived.
+    // In the app these become `icy-title` events; here they are the evidence
+    // that stripping found the blocks rather than leaving them in the audio.
+    let heard: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = heard.clone();
+    let on_title: relay::TitleSink = Arc::new(move |url: &str, title: &str| {
+        recorder
+            .lock()
+            .unwrap()
+            .push((url.to_string(), title.to_string()));
+    });
+
+    let relay = match relay::Relay::start(on_title).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("relay would not start: {e}");
@@ -148,7 +215,8 @@ async fn main() {
         let local = relay.route(url);
         let label = url.split('/').next_back().unwrap_or(url);
         match fetch(&local, 64 * 1024).await {
-            Ok((head, bytes)) => {
+            Ok((head, audio)) => {
+                let bytes = audio.len();
                 let status = head.lines().next().unwrap_or("(no status)").trim();
                 let ctype = head
                     .lines()
@@ -159,9 +227,38 @@ async fn main() {
                 if bytes > 16 * 1024 {
                     played += 1;
                 }
+                // What the strip has to guarantee: no metadata left in the
+                // audio, and frames that still chain end to end.
+                let intact = match mpeg_frames(&audio) {
+                    _ if audio.windows(12).any(|w| w == b"StreamTitle=") => {
+                        "METADATA IN THE AUDIO".to_string()
+                    }
+                    Some((frames, None)) => format!("{frames} frames chain"),
+                    Some((frames, Some(at))) => {
+                        format!("LOST SYNC after {frames} frames, at byte {at}")
+                    }
+                    None => "not MPEG - frames not walked".to_string(),
+                };
                 println!("{verdict:9} {bytes:>7} B  {status}  {ctype}  <- {label}");
+                println!("{:9} {intact}", "");
             }
             Err(e) => println!("{:9} {label}: {e}", "FAILED"),
+        }
+    }
+
+    // A title needs a metadata block to have gone past, which is one
+    // `icy-metaint` in - 16 KB on most stations, so the 64 KB read above is
+    // usually enough. A station between tracks may not have said anything
+    // yet, so this reports what it heard rather than judging it.
+    println!("\ntitles read out of the audio:");
+    {
+        let titles = heard.lock().unwrap();
+        if titles.is_empty() {
+            println!("  (none - no station announced one in the bytes read)");
+        }
+        for (url, title) in titles.iter() {
+            let label = url.split('/').next_back().unwrap_or(url);
+            println!("  {label}: {title}");
         }
     }
 

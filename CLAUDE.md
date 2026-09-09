@@ -98,7 +98,8 @@ the sake of saving one copy.
 
 - A new command must be registered in the `invoke_handler` list in `lib.rs`;
   the front end reaches it as `invoke("name")`. The events crossing the seam
-  are `alarm-fire`, `alarms-updated`, `settings-updated`, `tray-stop`.
+  are `alarm-fire`, `alarms-updated`, `settings-updated`, `tray-stop`,
+  `icy-title`.
   `check_seam.py` will not let a turn end with one side of that missing.
 - The CSP in `tauri.conf.json` allows scripts from the app's own origin only.
   Libraries are vendored into `src/vendor/` with their licence beside them,
