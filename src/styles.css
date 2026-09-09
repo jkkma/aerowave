@@ -396,6 +396,17 @@ body.playing .orb.gl.kick { animation: orbhop .5s cubic-bezier(.3, .8, .35, 1); 
 .lamp.error { background: radial-gradient(circle at 35% 30%, #fff, var(--alert) 45%, #7d1f10); box-shadow: 0 0 12px rgba(255, 106, 77, .9); }
 @keyframes blink { 50% { opacity: .35; } }
 
+/* The three now-playing lines are the one place in the app worth copying out
+   of - a track you want to go and find, a stream URL you want to paste
+   somewhere. `user-select: none` on the body is right for a set of HUD
+   panels and wrong for these, so they opt back in. Copying picks up the
+   station name in its real case; the uppercase is a rendering effect and
+   does not reach the clipboard. */
+.station, .track, .meta {
+  user-select: text;
+  cursor: text;
+}
+
 .station {
   margin: 8px 0 4px;
   font-family: var(--hud);

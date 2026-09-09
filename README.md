@@ -74,9 +74,27 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   whose reader decodes every text frame as UTF-8 whatever the encoding byte
   says and misreads ID3v2.3 frame sizes as synchsafe — either of which turns an
   accented title into rubbish.
-- Now-playing titles are read out of the ICY metadata the server interleaves with
-  the audio, polled every 25 s. The `<audio>` element cannot see that metadata, so
-  the Rust side opens a second short-lived connection to read it.
+- Now-playing titles are read out of the ICY metadata the server interleaves
+  with the audio, **by the relay, off the connection that is playing** — so a
+  title changes when the song does. The relay asks for `Icy-MetaData: 1` and
+  takes the blocks back out as it copies. Asking for them and *not* stripping
+  them is what a relay must never do: the blocks land every `icy-metaint`
+  bytes, so a `StreamTitle='...'` ends up mid-MP3 and the decoder gives up —
+  `MEDIA_ERR_DECODE`, mid-song, on a full buffer. Radio Paradise (metaint
+  16000) died about sixteen seconds in, every time, while FIP, which
+  interleaves nothing, played for as long as you left it. The stripper is in
+  `core/`, and its test feeds the same stream in at every chunk size from one
+  byte up to check the audio out is unchanged.
+- A short-lived second connection is still opened once when a station starts,
+  for the bitrate, genre and station name — none of which change. It repeats
+  once a minute only for a station the relay is not carrying, and gives up
+  after three turns that find no title.
+- **ICY text has no charset**, so it is decoded as UTF-8 where that parses and
+  Windows-1252 where it does not. `from_utf8_lossy` was doing both jobs and
+  turning every byte it could not read into U+FFFD — a station sending the
+  curly apostrophe at 0x92 showed `It?s not you`. Response headers get the
+  same treatment: `to_str` only admits visible ASCII, so a station with a
+  Cyrillic `icy-name` used to show no name at all.
 - **Shoutcast v1 servers are read too.** They answer `ICY 200 OK` rather than an
   HTTP status line, which no HTTP client will parse — hyper throws the response
   away before a single header is seen. WebView2 plays them regardless, so those

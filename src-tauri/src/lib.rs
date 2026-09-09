@@ -380,6 +380,17 @@ async fn hls_response(
     }
 }
 
+/// A now-playing title, and the station it belongs to.
+///
+/// The URL is carried because a relay connection outlives by a moment the
+/// station that opened it, and the front end has to be able to tell a late
+/// title from a current one.
+#[derive(Clone, Serialize)]
+struct IcyTitle {
+    url: String,
+    title: String,
+}
+
 /// Hand back a loopback URL that plays `url`, or None when the relay is not
 /// running. See `relay.rs` for why a station is worth relaying at all.
 #[tauri::command]
@@ -637,7 +648,20 @@ pub fn run() {
             // works the old way.
             let relay_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
-                match relay::Relay::start().await {
+                // The relay reads now-playing titles off the connection that
+                // is already playing, and knows nothing about Tauri; this is
+                // how they reach the window.
+                let emitter = relay_handle.clone();
+                let on_title: relay::TitleSink = Arc::new(move |url: &str, title: &str| {
+                    let _ = emitter.emit(
+                        "icy-title",
+                        IcyTitle {
+                            url: url.to_string(),
+                            title: title.to_string(),
+                        },
+                    );
+                });
+                match relay::Relay::start(on_title).await {
                     Ok(relay) => {
                         *relay_handle.state::<AppState>().relay.lock().unwrap() = Some(relay);
                     }

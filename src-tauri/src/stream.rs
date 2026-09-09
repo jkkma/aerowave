@@ -11,7 +11,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use aerowave_core::icy::{
-    first_url_in_playlist, head_end, is_hls, looks_like_playlist, parse_head, scan_metadata, Head,
+    decode_text, first_url_in_playlist, head_end, is_hls, looks_like_playlist, parse_head,
+    scan_metadata, Head,
 };
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -233,11 +234,16 @@ async fn resolve(
     Err("playlist links went round in circles".into())
 }
 
+/// One response header, decoded the way ICY text has to be.
+///
+/// Not `to_str`, which only succeeds for visible ASCII: `icy-name` and
+/// `icy-genre` are free text, and plenty of stations put their own alphabet in
+/// them. Refusing those left a station with a Cyrillic name showing no name at
+/// all, which read as a server that had not sent one.
 fn header(resp: &reqwest::Response, key: &str) -> Option<String> {
     resp.headers()
         .get(key)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
+        .map(|v| decode_text(v.as_bytes()).trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
@@ -348,7 +354,7 @@ async fn icy_connect(
     };
 
     let head = {
-        let text = String::from_utf8_lossy(&buf[..head_len]);
+        let text = decode_text(&buf[..head_len]);
         parse_head(&text).ok_or_else(|| unproven(format!("{host} sent no status line")))?
     };
     // Only a station that really is speaking ICY. Anything answering HTTP was
@@ -517,6 +523,18 @@ pub enum RelayBody {
 pub struct RelaySource {
     pub content_type: String,
     pub body: RelayBody,
+    /// What `icy-metaint` said, or 0 for a server interleaving nothing. The
+    /// relay strips the blocks this far apart back out; see `MetaStrip`.
+    pub metaint: usize,
+}
+
+/// `icy-metaint` as a length to strip at, or 0 for anything absent, zero or
+/// implausible. A server claiming a gap larger than the probe's whole budget
+/// is not one to take at its word.
+fn metaint_of(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0 && *n < MAX_META_BYTES)
+        .unwrap_or(0)
 }
 
 /// Open a station on behalf of the relay: playlists followed, redirects
@@ -530,15 +548,18 @@ pub struct RelaySource {
 /// breaks hls.js's own URI resolution. HLS goes through `hls.rs` instead,
 /// which hands back one file at a time.
 pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
-    // No `Icy-MetaData: 1`. Asking for it makes the server splice metadata
-    // blocks into the audio every `icy-metaint` bytes, and the relay copies
-    // bytes - so a `StreamTitle='...'` lands in the middle of the MP3 and the
-    // decoder gives up on it. That is `MEDIA_ERR_DECODE`, mid-song, on a full
-    // buffer: Radio Paradise (metaint 16000) died about sixteen seconds in,
-    // every time, while FIP - which interleaves nothing - played for as long
-    // as you left it. The now-playing poll asks the broadcaster directly and
-    // has its own connection for this.
-    let http = match resolve(&relay_client()?, url, false).await {
+    // `Icy-MetaData: 1`, and the relay takes the blocks out again on the way
+    // past. Asking for metadata and *copying* it was what broke: the blocks
+    // land every `icy-metaint` bytes, so a `StreamTitle='...'` ends up in the
+    // middle of the MP3 and the decoder gives up - `MEDIA_ERR_DECODE`,
+    // mid-song, on a full buffer. Radio Paradise (metaint 16000) died about
+    // sixteen seconds in, every time, while FIP, which interleaves nothing,
+    // played for as long as you left it.
+    //
+    // Stripping is what a player is supposed to do with them, and it is worth
+    // the care: it is the connection the audio is already on, so a title
+    // changes when the song does rather than whenever a poll next came round.
+    let http = match resolve(&relay_client()?, url, true).await {
         Ok(Resolved::Stream {
             resp, content_type, ..
         }) => {
@@ -555,6 +576,7 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
             };
             return Ok(RelaySource {
                 content_type,
+                metaint: metaint_of(header(&resp, "icy-metaint").as_deref()),
                 body: RelayBody::Http(resp),
             });
         }
@@ -565,12 +587,13 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
     };
     // Same order as `probe_inner`: HTTP first, and the hand-rolled ICY path
     // only once the HTTP client has failed.
-    match icy_connect(url, false).await {
+    match icy_connect(url, true).await {
         Ok((socket, head, primed)) => Ok(RelaySource {
             content_type: head
                 .get("content-type")
                 .map(|c| c.to_ascii_lowercase())
                 .unwrap_or_else(|| "audio/mpeg".to_string()),
+            metaint: metaint_of(head.get("icy-metaint")),
             body: RelayBody::Icy { socket, primed },
         }),
         Err(icy) if icy.proven => Err(icy.message),

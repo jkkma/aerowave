@@ -123,6 +123,7 @@ const player = {
   resolved: null,     // the station's own stream URL, after any playlist hop
   probed: false,      // ...and whether a probe, rather than the station, chose it
   relayed: false,     // is <audio> playing through the local relay?
+  streamTitle: false, // has the stream itself named the track? then stop asking
   triedDirect: false, // ...and have we already fallen back off it?
   hls: false,         // is hls.js driving the element instead?
   get playing() {
@@ -525,6 +526,7 @@ async function play(source, opts = {}) {
   player.source = source;
   player.lastProgress = Date.now();
   player.retries = 0;
+  player.streamTitle = false;
   const volume = opts.volume !== undefined ? opts.volume : state.settings.volume ?? 0.8;
 
   showNowPlaying(source.title, source.subtitle || "", source.meta || "");
@@ -554,7 +556,8 @@ async function play(source, opts = {}) {
 
   // Remember the station's own URL. The metadata poll talks to the
   // broadcaster directly - it wants a title, not audio - so it must not be
-  // pointed at the relay, which would only hand it back its own stream.
+  // pointed at the relay, which would only hand it back its own stream. It
+  // is also what an `icy-title` event is matched against.
   if (source.kind === "station") player.resolved = url;
   if (useHls) {
     // hls.js sets the element's source itself, to a MediaSource blob.
@@ -685,7 +688,9 @@ function startMetadata(source) {
       if (player.source !== source) return;
       if (info.title) {
         titleless = 0;
-        $("#np-track").textContent = info.title;
+        // Unless the stream has already said, on the connection that is
+        // actually playing. This poll was in flight before that arrived.
+        if (!player.streamTitle) $("#np-track").textContent = info.title;
       } else if (++titleless >= 3) {
         clearInterval(player.metaTimer);
         player.metaTimer = null;
@@ -703,9 +708,42 @@ function startMetadata(source) {
     }
   };
   poll();
-  // Once a minute is plenty for a track title, and it is a whole connection
-  // to the broadcaster each time.
+  // The first poll is the one that matters: it fills in bitrate, genre and
+  // the station's own name, none of which change. Titles come from the relay
+  // now - off the connection that is playing, so they arrive with the song -
+  // and the first one cancels this. The interval is what is left for a
+  // station the relay is not carrying, and it is a whole connection to the
+  // broadcaster each time, so once a minute.
   player.metaTimer = setInterval(poll, 60000);
+}
+
+/**
+ * A title the relay read out of the stream that is playing.
+ *
+ * This comes off the same connection as the audio, so it arrives when the
+ * song changes rather than whenever the poll next came round - which was up
+ * to a minute later, and showed the previous track until it did.
+ */
+function onStreamTitle(payload) {
+  if (!payload || !payload.title) return;
+  if (state.settings.showMetadata === false) return;
+  const source = player.source;
+  if (!source || source.kind !== "station") return;
+  // A relay connection outlives by a moment the station that opened it, so a
+  // title from the one we are no longer listening to is not ours.
+  const mine = String(player.resolved || source.url || "").trim();
+  const from = String(payload.url || "").trim();
+  if (mine && from && mine !== from) return;
+
+  player.streamTitle = true;
+  $("#np-track").textContent = payload.title;
+  // The stream is saying this for itself now. The poll opened a whole
+  // connection a minute to ask the same question, and has nothing left to
+  // add: the third line it fills is bitrate and genre, which do not change.
+  if (player.metaTimer) {
+    clearInterval(player.metaTimer);
+    player.metaTimer = null;
+  }
 }
 
 /**
@@ -2609,6 +2647,7 @@ async function boot() {
     renderAlarms();
     refreshNextAlarm();
   });
+  await listen("icy-title", (event) => onStreamTitle(event.payload));
   await listen("tray-stop", () => {
     if (ringing) dismissRing();
     else stopPlayback();

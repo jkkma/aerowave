@@ -19,6 +19,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use aerowave_core::icy::MetaStrip;
 use futures_util::StreamExt;
 use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -36,7 +37,18 @@ const MAX_ROUTES: usize = 128;
 pub struct Relay {
     pub port: u16,
     routes: Mutex<Routes>,
+    on_title: TitleSink,
 }
+
+/// What to do with a title the stream has just announced, given the station
+/// URL it came from and the title itself.
+///
+/// A callback rather than an `AppHandle` on purpose: it is what keeps this
+/// file free of Tauri, and that is the only reason `examples/relaycheck.rs`
+/// can link the relay without WebView2 and the Win32 GUI stack behind it.
+/// `lib.rs` passes one that emits `icy-title`; the example passes one that
+/// prints.
+pub type TitleSink = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 #[derive(Default)]
 struct Routes {
@@ -53,7 +65,7 @@ fn token() -> String {
 impl Relay {
     /// Bind the loopback listener and start accepting. Port 0: the OS picks
     /// one, so nothing is assumed about what happens to be free.
-    pub async fn start() -> Result<Arc<Self>, String> {
+    pub async fn start(on_title: TitleSink) -> Result<Arc<Self>, String> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .map_err(|e| format!("could not open the local relay: {e}"))?;
@@ -64,6 +76,7 @@ impl Relay {
         let relay = Arc::new(Relay {
             port,
             routes: Mutex::new(Routes::default()),
+            on_title,
         });
         let accepting = relay.clone();
         tokio::spawn(async move {
@@ -138,6 +151,7 @@ impl Relay {
             source.content_type
         );
         socket.write_all(head.as_bytes()).await?;
+        let mut pipe = Pipe::new(&self.on_title, &url, source.metaint);
         match source.body {
             RelayBody::Http(resp) => {
                 // reqwest has already undone the chunked framing. Forwarding
@@ -146,15 +160,18 @@ impl Relay {
                 let mut body = resp.bytes_stream();
                 while let Some(chunk) = body.next().await {
                     let Ok(chunk) = chunk else { break };
-                    socket.write_all(&chunk).await?;
+                    pipe.write(&mut socket, &chunk).await?;
                 }
             }
             RelayBody::Icy {
                 socket: mut upstream,
                 primed,
             } => {
+                // `primed` is stream, not preamble: the metadata blocks are
+                // counted from the first body byte, so it goes through the
+                // same strip as everything after it.
                 if !primed.is_empty() {
-                    socket.write_all(&primed).await?;
+                    pipe.write(&mut socket, &primed).await?;
                 }
                 let mut chunk = [0u8; 16384];
                 loop {
@@ -164,11 +181,53 @@ impl Relay {
                     if read == 0 {
                         break;
                     }
-                    socket.write_all(&chunk[..read]).await?;
+                    pipe.write(&mut socket, &chunk[..read]).await?;
                 }
             }
         }
         Ok(())
+    }
+}
+
+/// Copies audio down to the player and titles out to the front end.
+///
+/// A station that interleaves nothing gets no stripper and its bytes go
+/// straight through, which is what every relayed station did before titles
+/// were read here.
+struct Pipe<'a> {
+    on_title: &'a TitleSink,
+    url: &'a str,
+    strip: Option<MetaStrip>,
+    audio: Vec<u8>,
+    last: Option<String>,
+}
+
+impl<'a> Pipe<'a> {
+    fn new(on_title: &'a TitleSink, url: &'a str, metaint: usize) -> Self {
+        Self {
+            on_title,
+            url,
+            strip: (metaint > 0).then(|| MetaStrip::new(metaint)),
+            audio: Vec::new(),
+            last: None,
+        }
+    }
+
+    async fn write(&mut self, socket: &mut TcpStream, chunk: &[u8]) -> std::io::Result<()> {
+        let Some(strip) = self.strip.as_mut() else {
+            return socket.write_all(chunk).await;
+        };
+        self.audio.clear();
+        for title in strip.push(chunk, &mut self.audio) {
+            // Not every server saves its breath between tracks; some repeat
+            // the current title in every block. Only the changes are news.
+            if self.last.as_deref() == Some(title.as_str()) {
+                continue;
+            }
+            (self.on_title)(self.url, &title);
+            self.last = Some(title);
+        }
+        socket.write_all(&self.audio).await
     }
 }
 
