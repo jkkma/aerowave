@@ -24,6 +24,10 @@ cd src-tauri && cargo run --example relaycheck  # real relay, real stations, no 
 
 `python tools/package.py --build` builds the portable zip and prints its SHA-256.
 
+`/release` cuts a release end to end, including the Scoop manifest in the
+separate `jkkma/scoop-ayylmao` repo. `/station-triage` works through why a
+station will not play, starting from `relaycheck` rather than from the code.
+
 ## Layout
 
 | Path | What |
@@ -36,6 +40,8 @@ cd src-tauri && cargo run --example relaycheck  # real relay, real stations, no 
 | `src-tauri/src/relay.rs` | The loopback relay ordinary stations play through |
 | `src-tauri/src/hls.rs` | HLS over a Tauri custom protocol — deliberately not the relay |
 | `src-tauri/core/` | Pure logic, no GUI deps — **the only place tests can run** |
+| `tools/hooks/` | The four hook scripts below. Plain Python, run by the harness, not by the app. |
+| `.claude/` | Two reviewer agents, the two skills above, and the example hook wiring |
 
 ## Gotchas
 
@@ -71,11 +77,29 @@ fields), `src-tauri/Cargo.toml`, `src-tauri/core/Cargo.toml`,
 `src-tauri/tauri.conf.json` — plus two in `Cargo.lock` that only a build
 rewrites, so build between the bump and the commit.
 
+**Two hooks can refuse to end a turn.** `tools/hooks/check_version.py` blocks
+while those five files disagree, and `check_seam.py` blocks when `app.js`
+invokes a command that is not in the `invoke_handler` list. Both stay silent
+when things are clean, and both exist because the failure they catch produces
+no compile error and no failing test — it surfaces as a button that does
+nothing, or an installer whose version contradicts its own Scoop manifest.
+Editing anything under `core/` also runs `cargo test -p aerowave-core`, and
+edits to `src/vendor/` are refused outright: those are upstream builds to be
+replaced wholesale, licence and all.
+
+The scripts are tracked but the wiring is not. Copy
+`.claude/settings.example.json` to `.claude/settings.local.json` to switch them
+on, and restart before expecting them to fire. Keeping the live file untracked
+is deliberate: a committed `settings.json` runs these scripts on anyone who
+clones the repo and opens Claude Code, which is a lot to hand a stranger for
+the sake of saving one copy.
+
 ## Conventions
 
 - A new command must be registered in the `invoke_handler` list in `lib.rs`;
   the front end reaches it as `invoke("name")`. The events crossing the seam
   are `alarm-fire`, `alarms-updated`, `settings-updated`, `tray-stop`.
+  `check_seam.py` will not let a turn end with one side of that missing.
 - The CSP in `tauri.conf.json` allows scripts from the app's own origin only.
   Libraries are vendored into `src/vendor/` with their licence beside them,
   never fetched from a CDN. New window permissions go in
