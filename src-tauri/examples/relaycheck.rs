@@ -287,21 +287,21 @@ async fn main() {
 async fn agreement_checks() {
     println!("\ncounts vs. what the search returns:");
     for (label, country, codec, bitrate) in [
-        ("AL / AAC+ / 128k", "AL", "AAC+", 128u32),
-        ("AL / any / any", "AL", "", 0),
-        ("IS / MP3 / any", "IS", "MP3", 0),
-        ("IS / any / 128k", "IS", "", 128),
+        ("AL / AAC+ / 128k", "AL", "AAC+", "128"),
+        ("AL / any / any", "AL", "", ""),
+        ("IS / MP3 / any", "IS", "MP3", ""),
+        ("IS / any / 128k", "IS", "", "128"),
     ] {
         let mut fq = browse::Query::default();
         fq.country_code = country.into();
-        fq.bitrate = bitrate;
+        fq.bitrate = bitrate.into();
         // The country facet is counted without its own filter, so ask the way
         // the format dropdown does: country applied, format left out.
         fq.codec = codec.into();
 
         let counted = match browse::facets(browse::Query {
             country_code: country.into(),
-            bitrate: bitrate,
+            bitrate: bitrate.into(),
             codec: codec.into(),
             ..Default::default()
         })
@@ -321,7 +321,7 @@ async fn agreement_checks() {
 
         let mut sq = browse::Query {
             country_code: country.into(),
-            bitrate: bitrate,
+            bitrate: bitrate.into(),
             codec: codec.into(),
             ..Default::default()
         };
@@ -368,17 +368,17 @@ async fn facet_checks() {
 
     // Iceland: small enough that the whole country fits inside the tally limit,
     // so the counts are exact and the arithmetic below is checkable by eye.
-    let build = |bitrate: u32, codec: &str| {
+    let build = |bitrate: &str, codec: &str| {
         let mut q = browse::Query::default();
         q.country_code = "IS".into();
-        q.bitrate = bitrate;
+        q.bitrate = bitrate.into();
         q.codec = codec.into();
         q
     };
     for (label, query) in [
-        ("country=IS, nothing else", build(0, "")),
-        ("country=IS, bitrate=128 (formats must shrink)", build(128, "")),
-        ("country=IS, format=MP3 (bitrates must shrink)", build(0, "MP3")),
+        ("country=IS, nothing else", build("", "")),
+        ("country=IS, bitrate=128 (formats must shrink)", build("128", "")),
+        ("country=IS, format=MP3 (bitrates must shrink)", build("", "MP3")),
     ] {
         match browse::facets(query).await {
             Ok(f) => show(label, &f),
