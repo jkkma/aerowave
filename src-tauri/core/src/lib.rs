@@ -1,5 +1,6 @@
 //! The parts of Aerowave that are pure logic: parsing what radio servers
-//! send back, and deciding when an alarm is due.
+//! send back, deciding when an alarm is due, and what a ringing one holds
+//! on to between its snoozes.
 //!
 //! They live in their own crate for one practical reason - the app crate
 //! links Tauri, WebView2 and the Win32 GUI stack, and a test binary built
@@ -8,4 +9,5 @@
 
 pub mod directory;
 pub mod icy;
+pub mod ring;
 pub mod schedule;

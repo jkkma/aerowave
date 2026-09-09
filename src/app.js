@@ -2375,7 +2375,7 @@ function setKind(kind) {
   note.className = "editor-note";
   note.textContent =
     kind === "folder"
-      ? "One file is picked at random from the folder each time it rings, and repeats until the alarm is answered."
+      ? "One file is picked at random from the folder and repeats until the alarm is answered — snoozes included, so it comes back with the same track."
       : "If the stream will not start within twelve seconds, the backup folder plays instead.";
   // Both kinds fall back to the backup folder, so both are silent without one.
   if (!state.settings.backupFolder) {

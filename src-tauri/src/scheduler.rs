@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use aerowave_core::ring::RingHolds;
 use aerowave_core::schedule;
 use chrono::Local;
 use serde::Serialize;
@@ -27,6 +28,9 @@ pub struct SchedState {
     snoozed: HashMap<String, i64>,
     /// Whatever is ringing right now.
     pub ringing: Option<String>,
+    /// The track each folder alarm's current occurrence is playing, held so
+    /// that the snoozes after it come back with the same one.
+    holds: RingHolds,
     last_tick: i64,
 }
 
@@ -76,11 +80,39 @@ fn track_from_folder(app: &AppHandle, dir: &std::path::Path) -> Option<(String, 
     let state = app.state::<AppState>();
     let (track, total) = library::pick_random(dir, &state.recent)?;
     let _ = app.asset_protocol_scope().allow_file(&track);
-    let name = track
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "track".into());
+    let name = track_name(&track);
     Some((track.to_string_lossy().to_string(), name, total))
+}
+
+/// What a track shows under: its file name, with the extension trimmed off
+/// later by the webview.
+fn track_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "track".into())
+}
+
+/// The track a snooze should come back with, if this alarm is holding one and
+/// it is still on disk. A held track that has been moved or deleted between
+/// snoozes is no reason to wake nobody up: dropping it here sends the ring
+/// back through an ordinary draw.
+fn held_track(app: &AppHandle, alarm_id: &str, trigger: &str, folder: &str) -> Option<String> {
+    let state = app.state::<AppState>();
+    let held = state
+        .sched
+        .lock()
+        .unwrap()
+        .holds
+        .held_for(alarm_id, trigger, folder)?
+        .to_string();
+    let path = std::path::Path::new(&held);
+    if !path.is_file() {
+        return None;
+    }
+    // Granted on the first draw and good for the life of the process, but
+    // asking again costs nothing and does not rely on that being true.
+    let _ = app.asset_protocol_scope().allow_file(path);
+    Some(held)
 }
 
 /// The backup folder from settings, if it has anything playable in it.
@@ -147,8 +179,29 @@ pub fn resolve_source(app: &AppHandle, alarm: &Alarm, trigger: &str) -> FirePayl
         }
         AlarmSource::Folder { path } => {
             let dir = std::path::Path::new(path);
+            // A snooze is the same alarm coming back, not a new one, so it
+            // comes back with the track it was already playing. Waking to a
+            // different song every nine minutes reads as a different alarm
+            // each time. See `aerowave_core::ring` for when a hold applies.
+            if let Some(track) = held_track(app, &alarm.id, trigger, path) {
+                payload.kind = "folder".into();
+                payload.title = Some(track_name(std::path::Path::new(&track)));
+                payload.path = Some(track);
+                payload.folder = Some(path.clone());
+                return payload;
+            }
             match track_from_folder(app, dir) {
                 Some((track, name, _)) => {
+                    // Held for the snoozes this ring turns into. Only the
+                    // alarm's own folder: the backup folder below is the
+                    // sound of something having gone wrong, and is meant to
+                    // be played through rather than held.
+                    state
+                        .sched
+                        .lock()
+                        .unwrap()
+                        .holds
+                        .remember(&alarm.id, path, &track);
                     payload.kind = "folder".into();
                     payload.path = Some(track);
                     payload.folder = Some(path.clone());
@@ -224,6 +277,9 @@ pub fn dismiss(app: &AppHandle, alarm_id: &str) {
     let state = app.state::<AppState>();
     let mut sched = state.sched.lock().unwrap();
     sched.snoozed.remove(alarm_id);
+    // The occurrence is over, so the track it was holding is too - otherwise
+    // tomorrow's ring would come back with the song answered today.
+    sched.holds.release(alarm_id);
     if sched.ringing.as_deref() == Some(alarm_id) {
         sched.ringing = None;
     }

@@ -243,6 +243,12 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   or as many rounds as you set. The tally belongs to the ring — dismissing it, or
   the next day's alarm, starts the budget over. A test ring fades out too but
   never schedules a real snooze.
+- So does the track a folder alarm rings on: it is drawn once, when the alarm
+  first goes off, and every snooze after it comes back to that same file. A
+  snooze is the same alarm returning, and waking to a different song each time
+  it does reads as a different alarm rather than the one you set. Dismissing it
+  ends the hold, so the next day draws again — as does pointing the alarm at
+  another folder, or the held file going missing between snoozes.
 - No repeat days set means "once, at the next occurrence", and the alarm disables
   itself afterwards.
 - Fade-in ramps the volume over up to 90 s.
