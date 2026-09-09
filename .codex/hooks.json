@@ -1,0 +1,52 @@
+{
+  "description": "AeroWave vendor, core-test, version and IPC checks. Review with /hooks before use.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^apply_patch$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"$(git rev-parse --show-toplevel)/tools/hooks/guard_vendor.py\" --hook",
+            "commandWindows": "python -B -c \"import subprocess,sys; root=subprocess.check_output(['git','rev-parse','--show-toplevel'],text=True).strip(); sys.exit(subprocess.call([sys.executable,'-B',root+'/tools/hooks/guard_vendor.py','--hook']))\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^apply_patch$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"$(git rev-parse --show-toplevel)/tools/hooks/core_tests.py\" --hook",
+            "commandWindows": "python -B -c \"import subprocess,sys; root=subprocess.check_output(['git','rev-parse','--show-toplevel'],text=True).strip(); sys.exit(subprocess.call([sys.executable,'-B',root+'/tools/hooks/core_tests.py','--hook']))\"",
+            "timeout": 180,
+            "statusMessage": "Running the aerowave-core tests"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"$(git rev-parse --show-toplevel)/tools/hooks/check_version.py\" --hook",
+            "commandWindows": "python -B -c \"import subprocess,sys; root=subprocess.check_output(['git','rev-parse','--show-toplevel'],text=True).strip(); sys.exit(subprocess.call([sys.executable,'-B',root+'/tools/hooks/check_version.py','--hook']))\"",
+            "timeout": 30,
+            "statusMessage": "Checking the version files agree"
+          },
+          {
+            "type": "command",
+            "command": "python3 -B \"$(git rev-parse --show-toplevel)/tools/hooks/check_seam.py\" --hook",
+            "commandWindows": "python -B -c \"import subprocess,sys; root=subprocess.check_output(['git','rev-parse','--show-toplevel'],text=True).strip(); sys.exit(subprocess.call([sys.executable,'-B',root+'/tools/hooks/check_seam.py','--hook']))\"",
+            "timeout": 30,
+            "statusMessage": "Checking the IPC seam"
+          }
+        ]
+      }
+    ]
+  }
+}

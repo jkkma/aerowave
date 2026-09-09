@@ -3,5 +3,4 @@ src-tauri/target/
 src-tauri/gen/schemas/
 *.log
 dist/
-.claude/settings.local.json
 __pycache__/

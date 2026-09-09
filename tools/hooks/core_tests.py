@@ -5,12 +5,14 @@ run at all, so there is no reason to defer them to a build. Nothing happens
 for edits anywhere else.
 """
 
-import json
+import argparse
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
+
+from hook_input import edited_paths, read_event
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 CORE = ROOT / "src-tauri" / "core"
@@ -36,28 +38,30 @@ def find_cargo():
     return None, None
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        return 0
+def touches_core(paths):
+    return any(path.is_relative_to(CORE) and
+               (path.suffix == ".rs" or path.name == "Cargo.toml") for path in paths)
 
-    tool_input = payload.get("tool_input") or {}
-    raw = (payload.get("tool_response") or {}).get("filePath") or tool_input.get("file_path")
-    if not raw:
-        return 0
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--hook", action="store_true", help="Read a Codex event from stdin")
+    parser.add_argument("paths", nargs="*", help="Only run if these edits affect the core crate")
+    args = parser.parse_args(argv)
     try:
-        edited = pathlib.Path(raw).resolve()
-        edited.relative_to(CORE)
-    except (ValueError, OSError):
-        return 0
-    if edited.suffix != ".rs":
+        paths = edited_paths(read_event()) if args.hook else {
+            pathlib.Path(raw).resolve() for raw in args.paths
+        }
+    except (ValueError, OSError) as error:
+        print(f"Cannot inspect core edits: {error}", file=sys.stderr)
+        return 2
+    if (args.hook or args.paths) and not touches_core(paths):
         return 0
 
     cargo, extra_path = find_cargo()
     if cargo is None:
-        print("cargo not found, skipping aerowave-core tests", file=sys.stderr)
-        return 0
+        print("cargo not found; install Rust before validating aerowave-core", file=sys.stderr)
+        return 2
 
     env = dict(os.environ)
     if extra_path:
@@ -70,13 +74,18 @@ def main():
     if mingw.is_dir():
         env["PATH"] = str(mingw) + os.pathsep + env.get("PATH", "")
 
-    result = subprocess.run(
-        [cargo, "test", "-p", "aerowave-core"],
-        cwd=ROOT / "src-tauri",
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [cargo, "test", "-p", "aerowave-core"],
+            cwd=ROOT / "src-tauri",
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=170,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"Could not complete aerowave-core tests: {error}", file=sys.stderr)
+        return 2
     if result.returncode != 0:
         tail = (result.stdout + result.stderr).strip().splitlines()
         print(
@@ -85,6 +94,8 @@ def main():
             file=sys.stderr,
         )
         return 2
+    if not args.hook:
+        print(result.stdout.strip())
     return 0
 
 

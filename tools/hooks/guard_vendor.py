@@ -6,40 +6,51 @@ fetched. A local edit to one is invisible in review and lost at the next
 upgrade: replace the file wholesale instead.
 """
 
+import argparse
 import json
 import pathlib
 import sys
+
+from hook_input import edited_paths, read_event
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 VENDOR = ROOT / "src" / "vendor"
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        return 0
+def protected_paths(paths):
+    return sorted(path for path in paths if path.is_relative_to(VENDOR))
 
-    raw = (payload.get("tool_input") or {}).get("file_path")
-    if not raw:
-        return 0
-    try:
-        target = pathlib.Path(raw).resolve()
-        target.relative_to(VENDOR)
-    except (ValueError, OSError):
-        return 0
 
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": (
-                f"{target.name} is a vendored upstream build in src/vendor/. Replace "
-                "the whole file with a new upstream release and update the licence "
-                "beside it, rather than editing it in place."
-            ),
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--hook", action="store_true", help="Read a Codex event from stdin")
+    parser.add_argument("paths", nargs="*", help="Paths to check before editing")
+    args = parser.parse_args(argv)
+    if not args.hook and not args.paths:
+        parser.error("provide paths to check, or --hook")
+    try:
+        paths = edited_paths(read_event()) if args.hook else {
+            pathlib.Path(raw).resolve() for raw in args.paths
         }
-    }))
+    except (ValueError, OSError) as error:
+        print(f"Cannot check vendor paths: {error}", file=sys.stderr)
+        return 2
+    targets = protected_paths(paths)
+    if targets:
+        reason = (
+            "Vendored upstream files in src/vendor/ must not be hand-edited: "
+            + ", ".join(str(path.relative_to(ROOT)) for path in targets)
+            + ". Replace the complete upstream build and update its licence for an upgrade."
+        )
+        if args.hook:
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }}))
+            return 0
+        print(reason, file=sys.stderr)
+        return 2
     return 0
 
 
