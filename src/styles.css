@@ -267,12 +267,12 @@ main {
   display: grid;
   place-items: center;
   width: 100%;
-  min-height: 210px;
+  min-height: 268px;
 }
 
 .orb {
   position: relative;
-  width: 178px; height: 178px;
+  width: 230px; height: 230px;
   border-radius: 50%;
   background: radial-gradient(circle at 34% 26%,
       #cdfaff 0%, #79e6fb 14%, #34bcdd 34%, #10789e 58%, #06405c 78%, #03212f 100%);
@@ -516,9 +516,8 @@ body.playing .gel.big .ic-play { display: none; }
 body.playing .gel.big .ic-stop { display: block; }
 body.playing .gel.big { box-shadow: 0 0 26px rgba(120, 236, 255, .7), 0 2px 0 rgba(0, 0, 0, .3), 0 8px 16px rgba(0, 0, 0, .42), inset 0 1px 0 rgba(255, 255, 255, .9), inset 0 -7px 12px rgba(0, 20, 30, .28); }
 
-#btn-prev, #btn-next, #btn-shuffle { width: 40px; height: 40px; padding: 0; }
-#btn-prev svg, #btn-next svg, #btn-shuffle svg { width: 17px; height: 17px; margin: 0; }
-#btn-shuffle svg { fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+#btn-prev, #btn-next { width: 40px; height: 40px; padding: 0; }
+#btn-prev svg, #btn-next svg { width: 17px; height: 17px; margin: 0; }
 
 .volwrap { display: flex; align-items: center; gap: 8px; margin-left: 6px; }
 .volic { width: 17px; height: 17px; fill: rgba(214, 246, 255, .85); stroke: rgba(214, 246, 255, .85); stroke-width: 1.6; fill-rule: evenodd; }
@@ -1023,8 +1022,8 @@ select.field option { background: #062434; color: var(--foam); }
 
 @media (max-width: 1000px) {
   main { grid-template-columns: 1fr; grid-template-rows: auto 1fr; gap: 18px; }
-  .orbwrap { min-height: 150px; }
-  .orb { width: 128px; height: 128px; }
+  .orbwrap { min-height: 176px; }
+  .orb { width: 150px; height: 150px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

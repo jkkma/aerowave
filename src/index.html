@@ -64,7 +64,6 @@
       </button>
       <button class="gel" id="btn-prev" title="Previous station"><svg viewBox="0 0 24 24"><path d="M6 6h2.5v12H6zM18.5 6l-8.5 6 8.5 6z"/></svg></button>
       <button class="gel" id="btn-next" title="Next station"><svg viewBox="0 0 24 24"><path d="M15.5 6h2.5v12h-2.5zM5.5 6l8.5 6-8.5 6z"/></svg></button>
-      <button class="gel" id="btn-shuffle" title="Random track from the shuffle folder"><svg viewBox="0 0 24 24"><path d="M4 7h4l8 10h4M4 17h4l2-2.5M20 7h-4l-1.6 2.1"/><path d="M17.5 4.5L20 7l-2.5 2.5M17.5 14.5L20 17l-2.5 2.5"/></svg></button>
 
       <div class="volwrap">
         <svg class="volic" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 010 7"/></svg>
@@ -82,6 +81,7 @@
         <button class="chip" data-mins="45">45</button>
         <button class="chip" data-mins="60">60</button>
         <button class="chip" data-mins="90">90</button>
+        <button class="chip" data-mins="120">120</button>
       </div>
       <span class="hud-mini right" id="sleep-left"></span>
     </div>
@@ -153,14 +153,14 @@
           <option value="OGG">OGG</option>
           <option value="FLAC">FLAC</option>
         </select>
-        <select class="field" id="browse-bitrate" aria-label="Minimum bitrate">
+        <select class="field" id="browse-bitrate" aria-label="Bitrate">
           <option value="0">Any bitrate</option>
-          <option value="64">64k and up</option>
-          <option value="96">96k and up</option>
-          <option value="128">128k and up</option>
-          <option value="192">192k and up</option>
-          <option value="256">256k and up</option>
-          <option value="320">320k and up</option>
+          <option value="64">64k</option>
+          <option value="96">96k</option>
+          <option value="128">128k</option>
+          <option value="192">192k</option>
+          <option value="256">256k</option>
+          <option value="320">320k</option>
         </select>
       </div>
       <ul class="list" id="browse-list"></ul>

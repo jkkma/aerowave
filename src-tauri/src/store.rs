@@ -79,6 +79,29 @@ pub struct Alarm {
     pub auto_snoozes: u32,
 }
 
+/// How the alarm editor was left the last time an alarm was saved, so the
+/// next new one starts from the last one set up rather than from the factory
+/// defaults. Everything an alarm has except the two nobody wants filled in
+/// for them: the time it goes off, and what it is called.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AlarmDefaults {
+    #[serde(default)]
+    pub days: Vec<u32>,
+    #[serde(default)]
+    pub source: AlarmSource,
+    #[serde(default = "default_volume")]
+    pub volume: f64,
+    #[serde(default = "default_fade")]
+    pub fade_secs: u32,
+    #[serde(default = "default_snooze")]
+    pub snooze_mins: u32,
+    #[serde(default = "default_auto_stop")]
+    pub auto_stop_mins: u32,
+    #[serde(default)]
+    pub auto_snoozes: u32,
+}
+
 fn yes() -> bool {
     true
 }
@@ -116,6 +139,10 @@ pub struct Settings {
     pub clock_24h: bool,
     #[serde(default = "yes")]
     pub show_metadata: bool,
+    /// The last alarm setup, kept so the editor can offer it again. None
+    /// until an alarm has been saved at least once.
+    #[serde(default)]
+    pub alarm_defaults: Option<AlarmDefaults>,
 }
 
 impl Default for Settings {
@@ -129,6 +156,7 @@ impl Default for Settings {
             start_with_windows: false,
             clock_24h: true,
             show_metadata: true,
+            alarm_defaults: None,
         }
     }
 }

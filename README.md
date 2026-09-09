@@ -123,8 +123,12 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   station counts beside each entry. Press a row to listen without keeping it, `+` to
   add it to your stations. Nothing is saved until you press `+`, and nothing is
   fetched until you open the tab.
-- Results come back in name order, A to Z, and MORE pages further in. The genre
-  list is the busiest two hundred tags — the directory holds tens of thousands,
+- Results are listed by country, and alphabetically inside each one, with MORE
+  pages further in. The directory itself pages in name order, so the whole
+  list is sorted again as each page lands: that keeps one alphabet running
+  through a country rather than starting a fresh one at every page boundary.
+  A station the directory has no country for sorts last. The genre list is
+  the busiest two hundred tags — the directory holds tens of thousands,
   nearly all of them one station's private label.
 - **All four filters narrow each other**, and none of them counts under itself —
   counting formats under the chosen format would only ever report the format
@@ -134,12 +138,14 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   bitrate are also set, because "Paraguay (68)" beside a 320k filter promises
   stations the next search cannot find.
 - Format and bitrate are annotated rather than rebuilt. They are short fixed
-  lists — five formats the player can open, six bitrate floors — so an option
+  lists — five formats the player can open, six bitrates — so an option
   with nothing behind it is greyed out where it stands rather than removed: a
   list of five that reshuffles as you narrow is harder to use than one that
   keeps its shape. Pick Iceland and you get `MP3 (10)`, `AAC+ (15)`,
-  `FLAC (0)` greyed. A bitrate count reads as the filter does — `192k and up
-  (3)` is three stations at 192k *or better*.
+  `FLAC (0)` greyed. A bitrate matches exactly: `192k (3)` is three stations
+  at 192k, not three at 192k or better, so the counts do not nest and they do
+  not add up to the country either — plenty of stations are encoded at
+  something that is nobody's round number.
 - A filter you have already set stays selectable even when it falls to zero,
   or the dropdown would refuse to offer what it is currently set to. The
   results simply come back empty, which is honest; silently un-setting a filter

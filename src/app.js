@@ -956,6 +956,12 @@ function playStation(station, opts) {
   renderStations();
 }
 
+/**
+ * Folder tracks already played, newest last, so prev can walk back through a
+ * shuffle instead of rolling the dice again.
+ */
+let folderHistory = [];
+
 async function playRandomFromFolder(folder, opts = {}) {
   if (!folder) {
     say("choose a folder first", "bad");
@@ -963,6 +969,17 @@ async function playRandomFromFolder(folder, opts = {}) {
   }
   try {
     const pick = await invoke("random_track", { path: folder });
+    // Remember what is being left so prev has somewhere to go back to. A
+    // different folder is a different shuffle: what came before it is not
+    // part of this one.
+    const leaving = player.source;
+    if (leaving && leaving.kind === "folder" && leaving.folder === folder) {
+      folderHistory.push(leaving);
+      // A shuffle can run all night; only the recent past is worth keeping.
+      if (folderHistory.length > 50) folderHistory.shift();
+    } else {
+      folderHistory = [];
+    }
     play(
       {
         kind: "folder",
@@ -989,12 +1006,64 @@ function togglePlay() {
   else say("no stations yet — add one", "bad");
 }
 
+/** Which tab is in front. */
+const currentPane = () => {
+  const tab = $(".tab.on");
+  return tab ? tab.dataset.pane : "";
+};
+
+/**
+ * Prev and next step through the list in front of you rather than always
+ * through the saved stations: the browse results while that tab is open, the
+ * shuffle folder while one of its tracks is playing, and the saved stations
+ * otherwise. Stepping the saved list regardless would leave the browse
+ * results with no way through them but the mouse, and would end a folder
+ * shuffle the moment either button was pressed.
+ */
 function step(delta) {
+  if (currentPane() === "browse" && browseResults.length) {
+    stepBrowse(delta);
+    return;
+  }
+  if (player.source && player.source.kind === "folder") {
+    stepFolder(delta);
+    return;
+  }
   const list = visibleStations.length ? visibleStations : state.stations;
   if (!list.length) return;
   const here = list.findIndex((s) => s.id === (player.source && player.source.stationId));
   const next = list[(here + delta + list.length * 2) % list.length] || list[0];
   playStation(next);
+}
+
+/** Through the browse results, in the order they are shown. */
+function stepBrowse(delta) {
+  const here = browseResults.findIndex(
+    (st) => player.source && sameStream(player.source.url, st.url)
+  );
+  // Nothing from this list is playing yet, so start at the end the button
+  // points at rather than somewhere in the middle.
+  const next =
+    here < 0
+      ? browseResults[delta > 0 ? 0 : browseResults.length - 1]
+      : browseResults[(here + delta + browseResults.length * 2) % browseResults.length];
+  previewBrowse(next);
+}
+
+/**
+ * Through the shuffle folder. Next draws again, which is what the end of a
+ * track already does; prev returns to the track actually played before this
+ * one, since a "previous" that draws at random is not a previous at all.
+ */
+function stepFolder(delta) {
+  if (delta < 0) {
+    const back = folderHistory.pop();
+    if (back) {
+      play(back);
+      return;
+    }
+  }
+  playRandomFromFolder(player.source.folder);
 }
 
 // --------------------------------------------------------------- browse ---
@@ -1014,7 +1083,7 @@ let browseTag = "";
 let browseTagLabel = "";
 let browseCountry = "";
 let browseCountryLabel = "";
-/** The directory's own name for a format, and the floor a bitrate must clear. */
+/** The directory's own name for a format, and the bitrate to match exactly. */
 let browseCodec = "";
 let browseBitrate = 0;
 /** The directory's global lists, and the narrowed ones it works out for us. */
@@ -1045,6 +1114,28 @@ const sameStream = (a, b) => {
 };
 
 const browseSaved = (url) => state.stations.some((s) => sameStream(s.url, url));
+
+/**
+ * How the result list reads: country first, then the station name.
+ *
+ * The directory pages in name order, so every page is a slice of one
+ * alphabet. Sorting the whole list each time a page lands therefore keeps the
+ * names in order inside each country instead of restarting the alphabet at
+ * every MORE. Countries drop a leading "The" the way the country dropdown
+ * does, so a fifth of the world does not file under T, and a station the
+ * directory has no country for sorts last - a blank heading the list reads as
+ * a bug rather than as a station nobody labelled.
+ */
+function byCountryThenName(a, b) {
+  const country = (c) => {
+    const lower = (c || "").trim().toLowerCase();
+    return lower.startsWith("the ") ? lower.slice(4) : lower;
+  };
+  const one = country(a.country);
+  const two = country(b.country);
+  if (!one !== !two) return one ? -1 : 1;
+  return one.localeCompare(two) || (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" });
+}
 
 /** What the chosen option calls itself, as opposed to what it is worth. */
 const labelOf = (select) => {
@@ -1078,7 +1169,7 @@ async function browseSearch(more) {
         tag: browseTag,
         countryCode: browseCountry,
         codec: browseCodec,
-        bitrateMin: browseBitrate,
+        bitrate: browseBitrate,
         limit: BROWSE_PAGE,
         offset: browseOffset,
       },
@@ -1094,7 +1185,7 @@ async function browseSearch(more) {
     const fresh = page.stations.filter(
       (st) => !browseResults.some((seen) => sameStream(seen.url, st.url))
     );
-    browseResults = browseResults.concat(fresh);
+    browseResults = browseResults.concat(fresh).sort(byCountryThenName);
     // A short page is the end of the directory's answer. A full one that
     // added nothing new means the paging has stopped moving - which is what
     // the offset cap at the far end of the catalogue looks like from here.
@@ -1175,7 +1266,7 @@ function facetQuery(base, omit) {
   // `omit` leaves out the filter the answer is for. Counting formats under the
   // chosen format would only ever report the format already chosen.
   if (browseCodec && omit !== "codec") query.codec = browseCodec;
-  if (browseBitrate && omit !== "bitrate") query.bitrateMin = browseBitrate;
+  if (browseBitrate && omit !== "bitrate") query.bitrate = browseBitrate;
   return query;
 }
 
@@ -1242,7 +1333,7 @@ const filterNow = (selector) =>
 
 /** Rebuild one dropdown from a facet tally, saying so while it is fetched. */
 /**
- * Format and bitrate are fixed lists - five formats and six floors, chosen
+ * Format and bitrate are fixed lists - five formats and six bitrates, chosen
  * because they are what the player can open - so they are annotated rather
  * than rebuilt: each option keeps its place and gains a count, and one with
  * nothing behind it is disabled rather than removed. A short list that
@@ -2139,17 +2230,22 @@ function syncAutoSnooze() {
 function openAlarmEditor(alarm) {
   editingAlarm = alarm || null;
   const now = new Date();
+  // A new alarm opens on the last one that was saved. Somebody who wakes to
+  // the same station, fading in over the same twenty seconds, should not have
+  // to say so again - but the time and the label are theirs to fill in, so
+  // those two start empty however the last one was set.
+  const last = state.settings.alarmDefaults || {};
   const base = alarm || {
     hour: (now.getHours() + 1) % 24,
     minute: 0,
-    days: [],
+    days: last.days || [],
     label: "",
-    source: { kind: "station", stationId: (state.stations[0] || {}).id },
-    volume: 0.8,
-    fadeSecs: 20,
-    snoozeMins: 10,
-    autoStopMins: 30,
-    autoSnoozes: 0,
+    source: last.source || { kind: "station", stationId: (state.stations[0] || {}).id },
+    volume: last.volume ?? 0.8,
+    fadeSecs: last.fadeSecs ?? 20,
+    snoozeMins: last.snoozeMins ?? 10,
+    autoStopMins: last.autoStopMins ?? 30,
+    autoSnoozes: last.autoSnoozes ?? 0,
   };
 
   $("#al-hour").value = pad2(base.hour);
@@ -2180,6 +2276,24 @@ function openAlarmEditor(alarm) {
 
   $("#al-delete").classList.toggle("hidden", !alarm);
   $("#alarm-editor").classList.remove("hidden");
+}
+
+/**
+ * Keep how this alarm was set up, for the next one to start from. Editing an
+ * older alarm counts as well: the last setup touched is the one still in
+ * mind, whether or not it was the newest.
+ */
+function rememberAlarmSetup(alarm) {
+  state.settings.alarmDefaults = {
+    days: [...alarm.days],
+    source: alarm.source,
+    volume: alarm.volume,
+    fadeSecs: alarm.fadeSecs,
+    snoozeMins: alarm.snoozeMins,
+    autoStopMins: alarm.autoStopMins,
+    autoSnoozes: alarm.autoSnoozes,
+  };
+  saveSettings();
 }
 
 function closeAlarmEditor() {
@@ -2286,7 +2400,6 @@ function wire() {
   $("#btn-play").addEventListener("click", togglePlay);
   $("#btn-prev").addEventListener("click", () => step(-1));
   $("#btn-next").addEventListener("click", () => step(1));
-  $("#btn-shuffle").addEventListener("click", () => playRandomFromFolder(shuffleFolder()));
 
   $("#volume").addEventListener("input", (e) => {
     const v = +e.target.value;
@@ -2522,6 +2635,7 @@ function wire() {
     if (idx >= 0) state.alarms[idx] = result.alarm;
     else state.alarms.push(result.alarm);
     saveAlarms();
+    rememberAlarmSetup(result.alarm);
     renderAlarms();
     closeAlarmEditor();
     say("alarm saved", "good");
