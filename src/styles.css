@@ -891,11 +891,16 @@ select.field option { background: #062434; color: var(--foam); }
 .timefield:focus { outline: none; border-color: var(--amber); }
 .timecolon { font-family: var(--hud); font-size: 26px; color: var(--amber); padding-bottom: 12px; }
 
-/* AM and PM stack to about the height of the two number fields, and sit on
-   the same baseline as them, so the three read as one clock rather than as a
-   pair of fields with a control parked beside them. */
-.meridiem { display: grid; gap: 2px; padding-bottom: 17px; }
+/* AM and PM stack to about the height of the two number fields and centre on
+   them, so the three read as one clock rather than as a pair of fields with a
+   control parked beside them. Centring on the row rather than padding down to
+   a baseline keeps it right whatever the steppers measure. */
+.meridiem { display: grid; gap: 2px; align-self: center; }
 .meridiem .chip { width: 44px; padding: 4px 0; text-align: center; }
+
+/* The clock is the tallest thing in the row, so the label centres on it too
+   rather than sinking to the bottom of the steppers. */
+.timerow .lbl { align-self: center; }
 
 .quickrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .quickrow .chips { flex-wrap: wrap; }
