@@ -175,55 +175,15 @@ pub struct AppData {
 impl Default for AppData {
     fn default() -> Self {
         AppData {
-            stations: default_stations(),
+            // No stations to begin with. A shipped list is a list of other
+            // people's taste that has to be cleared out before the app is
+            // yours, and it rots besides - a seeded stream that goes off the
+            // air looks like the app is broken on first run.
+            stations: Vec::new(),
             alarms: Vec::new(),
             settings: Settings::default(),
         }
     }
-}
-
-/// Stations the app ships with, each checked by loading it in a Chromium media
-/// element rather than merely by fetching it: a server answering and a player
-/// playing are different questions, and a station that cannot play is worse
-/// than no station at all.
-///
-/// SomaFM was named here as a station that answers perfectly well and is
-/// refused by the media element anyway. Two goes at explaining that have now
-/// been wrong: it is not a codec, and it is not the User-Agent either - SomaFM
-/// serves this app's own name quite happily. What is true is narrower.
-/// `MEDIA_ERR_SRC_NOT_SUPPORTED` is what the element reports for an error
-/// page and a refused connection as well as for a codec it lacks, so a station
-/// listed as unplayable deserves a second look rather than a note in a
-/// comment.
-fn default_stations() -> Vec<Station> {
-    let seed: &[(&str, &str, &str)] = &[
-        ("FIP", "https://icecast.radiofrance.fr/fip-midfi.mp3", "eclectic"),
-        ("FIP Rock", "https://icecast.radiofrance.fr/fiprock-midfi.mp3", "rock"),
-        ("FIP Jazz", "https://icecast.radiofrance.fr/fipjazz-midfi.mp3", "jazz"),
-        ("FIP Groove", "https://icecast.radiofrance.fr/fipgroove-midfi.mp3", "groove"),
-        ("FIP Electro", "https://icecast.radiofrance.fr/fipelectro-midfi.mp3", "electro"),
-        ("Radio Paradise", "https://stream.radioparadise.com/mp3-192", "eclectic"),
-        ("Radio Paradise Mellow", "https://stream.radioparadise.com/mellow-192", "mellow"),
-        ("Radio Paradise Rock", "https://stream.radioparadise.com/rock-192", "rock"),
-        ("Radio Paradise Global", "https://stream.radioparadise.com/global-192", "global"),
-        ("WFMU Freeform", "https://stream0.wfmu.org/freeform-128k", "freeform"),
-        ("1.FM Chillout Lounge", "https://strm112.1.fm/chilloutlounge_mobile_mp3", "chillout"),
-        ("France Musique", "https://icecast.radiofrance.fr/francemusique-midfi.mp3", "classical"),
-    ];
-    seed.iter()
-        .enumerate()
-        .map(|(i, (name, url, tag))| Station {
-            id: format!("seed-{i}"),
-            name: name.to_string(),
-            url: url.to_string(),
-            tag: tag.to_string(),
-            // No artwork: these are hand-written, not directory entries, and
-            // pinning third-party image hosts into the seed list would only
-            // rot. Anything added from BROWSE brings its own.
-            logo: String::new(),
-            favorite: i < 3,
-        })
-        .collect()
 }
 
 /// A `data` folder beside the executable makes this a portable install:
