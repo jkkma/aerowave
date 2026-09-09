@@ -133,6 +133,7 @@ const player = {
 
 function markPlaying(on) {
   document.body.classList.toggle("playing", on);
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = on ? "playing" : "none";
 }
 
 function clearTimers() {
@@ -156,6 +157,7 @@ function stopPlayback(quiet) {
   audio.removeAttribute("src");
   audio.load();
   player.retries = 0;
+  switchingSource = false;
   player.resolved = null;
   player.probed = false;
   player.relayed = false;
@@ -253,6 +255,17 @@ function showNowPlaying(title, sub, meta) {
   $("#np-station").textContent = title || "";
   $("#np-track").textContent = sub || "";
   if (meta !== undefined) $("#np-meta").textContent = meta || "";
+  // The same two lines the system's media overlay puts on screen when a media
+  // key is pressed. Without them it names the app and nothing else, which
+  // looks like the key missed. The track line holds an ellipsis until the
+  // stream names something, and an overlay reading "..." looks worse than one
+  // reading the station, so a placeholder counts as no track at all.
+  if ("mediaSession" in navigator && window.MediaMetadata) {
+    const track = /^[\s.…]*$/.test(sub || "") ? "" : sub;
+    navigator.mediaSession.metadata = title
+      ? new MediaMetadata({ title: track || title, artist: track ? title : "" })
+      : null;
+  }
 }
 
 /*
@@ -567,7 +580,7 @@ async function play(source, opts = {}) {
     const playUrl = await playable(source, url);
     if (superseded(generation)) return;
     player.relayed = playUrl !== url;
-    audio.src = playUrl;
+    setAudioSource(playUrl);
   }
   // A ringing alarm plays its one file over and over rather than moving on to
   // another; anything else is heard once and then the `ended` handler decides.
@@ -829,7 +842,7 @@ function failure(detail, opts = {}) {
       const playUrl = player.triedDirect ? upstream : await playable(source, upstream);
       if (superseded(generation) || player.source !== source) return;
       player.relayed = playUrl !== upstream;
-      audio.src = playUrl;
+      setAudioSource(playUrl);
     }
     audio.play().catch((e) => {
       if (superseded(generation) || isAbort(e)) return;
@@ -852,14 +865,28 @@ function fallBackToDirect(source, generation) {
   player.relayed = false;
   const upstream = player.resolved || source.url;
   setStatus("RETRYING DIRECT", "busy");
-  audio.src = upstream;
+  setAudioSource(upstream);
   audio.play().catch((e) => {
     if (superseded(generation) || isAbort(e)) return;
     failure(String(e && e.message ? e.message : e));
   });
 }
 
+/**
+ * Set while the app is pointing the element at a new URL. Assigning `src` to
+ * an element that was not paused makes it fire `pause` on the way past - the
+ * reconnect path does exactly that - and that pause is the app's own doing,
+ * not the audio being taken away. Cleared once sound is actually coming out
+ * again, so a genuine outside pause after that is still caught.
+ */
+let switchingSource = false;
+function setAudioSource(url) {
+  switchingSource = true;
+  audio.src = url;
+}
+
 audio.addEventListener("playing", () => {
+  switchingSource = false;
   if (!player.source) return;
   player.retries = 0;
   setStatus(player.source.kind === "folder" ? "PLAYING FILE" : "ON AIR", "on");
@@ -881,6 +908,15 @@ audio.addEventListener("timeupdate", () => {
   let due = null;
   while (hlsTitles.length && hlsTitles[0].at <= now + 0.25) due = hlsTitles.shift().title;
   if (due) $("#np-track").textContent = due;
+});
+// Something outside the app paused the element - a media key this build did
+// not claim, or the system taking the audio away. `stopPlayback` drops the
+// source before it pauses, so it never lands here itself, and anything that
+// does means the sound has gone: stop properly rather than leave the face
+// saying ON AIR with the orb still spinning over silence.
+audio.addEventListener("pause", () => {
+  if (switchingSource || !player.source) return;
+  stopPlayback();
 });
 audio.addEventListener("waiting", () => player.source && setStatus("BUFFERING", "busy"));
 audio.addEventListener("stalled", () => player.source && setStatus("STALLED", "busy"));
@@ -1004,6 +1040,42 @@ function togglePlay() {
   const last = stationById(state.settings.lastStation) || state.stations[0];
   if (last) playStation(last);
   else say("no stations yet — add one", "bad");
+}
+
+/**
+ * The keyboard's media keys.
+ *
+ * Chromium gives them to whichever media session is active, which is this app
+ * while the element is playing - but only to handlers that have been
+ * registered. With none set, next and previous did nothing at all, and
+ * play/pause and stop reached the <audio> element directly, behind the app's
+ * back: the sound went and the app never learned, so the face kept saying ON
+ * AIR over silence. These put the keys on the same functions the buttons use.
+ *
+ * The session only exists while something is playing, so a key pressed from
+ * standby does not reach us - starting from cold is still the play button's
+ * job, or a global shortcut, which would have to take the keys off every other
+ * player on the machine to do it.
+ */
+function wireMediaKeys() {
+  if (!("mediaSession" in navigator)) return;
+  const on = (action, handler) => {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler);
+    } catch {
+      // An action this build does not know is not worth failing the rest over.
+    }
+  };
+  on("play", () => {
+    if (!player.playing) togglePlay();
+  });
+  // Live radio has no pause worth the name - the seconds spent paused are
+  // broadcast that has gone - so the key that looks like pause does what the
+  // big button does, and stops.
+  on("pause", () => stopPlayback());
+  on("stop", () => stopPlayback());
+  on("nexttrack", () => step(1));
+  on("previoustrack", () => step(-1));
 }
 
 /** Which tab is in front. */
@@ -2691,6 +2763,8 @@ function wire() {
   });
 
   // keyboard
+  wireMediaKeys();
+
   document.addEventListener("keydown", (e) => {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
     // Space belongs to whichever control has focus. The exception is a ringing

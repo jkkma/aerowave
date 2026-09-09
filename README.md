@@ -109,9 +109,21 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - The now-playing poll still talks to the broadcaster directly rather than to
   the relay: it wants a title, not audio, and pointing it at the relay would
   only hand it back the app's own stream.
-- Sleep timer: 15 / 30 / 60 / 90 minutes, fading out over the last twenty seconds
-  so it arrives at silence as the countdown reaches zero rather than starting to
-  go quiet there. Turning it off mid-fade puts the volume back. It never touches
+- **The keyboard's media keys work while something is playing**, through the
+  media session Chromium keeps for whatever is making sound. Play/pause and
+  stop both stop — live radio has no pause worth the name, since the seconds
+  spent paused are broadcast that has gone — and next and previous step the
+  same list the buttons do. The keys are not claimed globally: from standby
+  there is no session for them to arrive through, so starting from cold is the
+  play button's job. Claiming them globally would mean taking them off every
+  other player on the machine.
+- Because the session is Chromium's, anything that pauses the element from
+  outside the app — the system taking the audio, a key nothing here claimed —
+  is treated as a stop rather than ignored. Ignoring it is how the face came to
+  say ON AIR, orb still turning, over silence.
+- Sleep timer: 15 / 30 / 45 / 60 / 90 / 120 minutes, fading out over the last
+  twenty seconds so it arrives at silence as the countdown reaches zero rather
+  than starting to go quiet there. Turning it off mid-fade puts the volume back. It never touches
   a ringing alarm: an alarm cancels the timer when it fires, and a timer that
   lapses mid-ring lapses quietly.
 
