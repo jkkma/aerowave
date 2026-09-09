@@ -131,6 +131,12 @@ lives in `core/` instead.
 
 ## How it is put together
 
+For development with Codex, start with [AGENTS.md](AGENTS.md). It contains the
+project's architecture rules and verification commands. See
+[Windows testing](docs/windows-testing.md) for native input and accessibility
+checks, and the [development handoff](docs/development-handoff.md) for unfinished
+work carried into the project.
+
 ```
 src/                 index.html, styles.css, app.js  — the face and playback
   orb3d.js           the low-poly WebGL orb
