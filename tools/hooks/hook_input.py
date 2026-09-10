@@ -7,7 +7,8 @@ import sys
 
 
 def read_event():
-    payload = json.load(sys.stdin)
+    # Native events are UTF-8 even when Windows' default text code page is not.
+    payload = json.load(getattr(sys.stdin, "buffer", sys.stdin))
     if not isinstance(payload, dict):
         raise ValueError("Hook input must be a JSON object")
     return payload

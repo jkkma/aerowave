@@ -22,10 +22,10 @@
 //! the playlist bodies it returned, never from what the caller asserts.
 
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use aerowave_core::network::{hls_destination_allowed, public_addresses};
 use rand::Rng;
 
 use crate::stream;
@@ -38,6 +38,7 @@ const MAX_SESSION_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_SESSIONS: usize = 8;
 /// A session nobody has fetched from in this long is finished with.
 const SESSION_IDLE: Duration = Duration::from_secs(600);
+static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 struct Session {
     /// Origins this session may fetch from. Seeded with the station's own,
@@ -79,60 +80,54 @@ fn origin_of(url: &reqwest::Url) -> Option<String> {
     })
 }
 
-/// Is this address one the webview has no business reaching through us?
-///
-/// Defence in depth rather than a guarantee: reqwest resolves the name again
-/// when it connects, so a name that answers differently the second time is
-/// not caught here. It stops the obvious thing - a playlist pointing at
-/// 127.0.0.1 or 192.168.x - which is what makes an SSRF worth having.
-fn is_private(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                || v4.is_unspecified()
-                // 100.64.0.0/10, carrier NAT, and 169.254 is covered above.
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                // fc00::/7 unique-local, fe80::/10 link-local.
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                || v6.to_ipv4_mapped().map(|v4| is_private(&IpAddr::V4(v4))).unwrap_or(false)
-        }
+/// The connector receives exactly the addresses checked here. Checking with
+/// a separate lookup before reqwest connects would permit DNS rebinding.
+pub(crate) struct PublicDns;
+
+impl reqwest::dns::Resolve for PublicDns {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let addrs: Vec<_> = tokio::time::timeout(
+                Duration::from_secs(8),
+                tokio::net::lookup_host((name.as_str(), 0)),
+            )
+            .await??
+            .collect();
+            if !public_addresses(&addrs) {
+                return Err("that hostname resolves to a non-public address".into());
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
     }
 }
 
-async fn destination_is_private(url: &reqwest::Url) -> bool {
-    let Some(host) = url.host_str() else {
-        return true;
-    };
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return is_private(&ip);
-    }
-    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
-        return true;
-    }
-    let port = url.port_or_known_default().unwrap_or(443);
-    match tokio::net::lookup_host((host, port)).await {
-        Ok(addrs) => {
-            let mut any = false;
-            for addr in addrs {
-                any = true;
-                if is_private(&addr.ip()) {
-                    return true;
-                }
+pub(crate) fn client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent(stream::UA)
+        .connect_timeout(Duration::from_secs(8))
+        .read_timeout(stream::RELAY_READ_TIMEOUT)
+        // A proxy would resolve and connect on our behalf, bypassing the
+        // checked DNS answers and potentially reaching its own local network.
+        .no_proxy()
+        .dns_resolver(Arc::new(PublicDns))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let url = attempt.url();
+            if !hls_destination_allowed(url.scheme(), url.host_str().unwrap_or("")) {
+                attempt.error("that redirect does not lead to a public HTTP address")
+            } else if attempt.previous().len() >= 6 {
+                attempt.error("too many HLS redirects")
+            } else {
+                attempt.follow()
             }
-            // A name that resolves to nothing is not worth connecting to.
-            !any
-        }
-        Err(_) => true,
+        }))
+}
+
+fn client() -> Result<reqwest::Client, String> {
+    if let Some(existing) = CLIENT.get() {
+        return Ok(existing.clone());
     }
+    let built = client_builder().build().map_err(|e| e.to_string())?;
+    Ok(CLIENT.get_or_init(|| built).clone())
 }
 
 /// Every URI a playlist mentions: the segment lines, and the `URI="..."` of
@@ -259,10 +254,10 @@ impl Hls {
             return Err("only http and https can be fetched".into());
         }
         self.admit(session, &parsed)?;
-        if destination_is_private(&parsed).await {
+        if !hls_destination_allowed(parsed.scheme(), parsed.host_str().unwrap_or("")) {
             return Err("that address is not one to fetch on a page's say-so".into());
         }
-        let fetched = stream::fetch_once(parsed.as_str(), range, MAX_BODY).await?;
+        let fetched = stream::fetch_once(&client()?, parsed.as_str(), range, MAX_BODY).await?;
         if let Ok(base) = reqwest::Url::parse(&fetched.final_url) {
             self.learn(session, &base, &fetched.body, fetched.body.len());
         }

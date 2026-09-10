@@ -6,6 +6,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import time
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +19,7 @@ import check_version
 import core_tests
 import guard_vendor
 from hook_input import edited_paths, read_event
+from process_tree import run_process
 
 
 def event(patch_text, cwd=ROOT):
@@ -72,6 +74,13 @@ class PatchPathsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 read_event()
 
+    def test_utf8_event_is_independent_of_windows_text_encoding(self):
+        payload = event("*** Update File: src/vendor/\u00e9.js", ROOT / "\u00e9")
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        stream = io.TextIOWrapper(io.BytesIO(encoded), encoding="cp1252")
+        with patch.object(sys, "stdin", stream):
+            self.assertEqual(read_event(), payload)
+
     def test_malformed_known_patch_fails_closed(self):
         for tool_input in (None, {}, {"command": []}, {"command": "not a patch"}):
             payload = {"tool_name": "apply_patch", "tool_input": tool_input}
@@ -109,7 +118,7 @@ class CoreTests(unittest.TestCase):
         payload = event("*** Update File: src/app.js\n*** Update File: src-tauri/core/src/lib.rs")
         result = subprocess.CompletedProcess([], 0, "tests passed", "")
         with patch.object(core_tests, "find_cargo", return_value=("cargo", None)), \
-                patch.object(core_tests.subprocess, "run", return_value=result) as run:
+                patch.object(core_tests, "run_process", return_value=result) as run:
             self.assertEqual(invoke_main(core_tests, ["--hook"], payload)[0], 0)
             run.assert_called_once()
             self.assertEqual(run.call_args.args[0], ["cargo", "test", "-p", "aerowave-core"])
@@ -133,10 +142,45 @@ class CoreTests(unittest.TestCase):
     def test_failed_tests_are_reported(self):
         result = subprocess.CompletedProcess([], 1, "", "assertion failed")
         with patch.object(core_tests, "find_cargo", return_value=("cargo", None)), \
-                patch.object(core_tests.subprocess, "run", return_value=result):
+                patch.object(core_tests, "run_process", return_value=result):
             code, _, errors = invoke_main(core_tests, [])
             self.assertEqual(code, 2)
             self.assertIn("assertion failed", errors)
+
+
+class ProcessTreeTests(unittest.TestCase):
+    def test_success_and_unicode_output_are_preserved(self):
+        result = run_process([sys.executable, "-X", "utf8", "-c", "print('caf\\u00e9')"], timeout=5)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "caf\u00e9")
+
+    def test_timeout_terminates_the_child_holding_output_open(self):
+        program = (
+            "import subprocess,sys,time; "
+            "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+            "print(child.pid,flush=True); time.sleep(60)"
+        )
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired) as caught:
+            run_process([sys.executable, "-c", program], timeout=2)
+        self.assertLess(time.monotonic() - started, 8)
+        pid = int(caught.exception.output.strip())
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+            api = ctypes.WinDLL("kernel32", use_last_error=True)
+            api.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            api.OpenProcess.restype = wintypes.HANDLE
+            api.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            api.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = api.OpenProcess(0x1000, False, pid)
+            if handle:
+                try:
+                    code = wintypes.DWORD()
+                    self.assertTrue(api.GetExitCodeProcess(handle, ctypes.byref(code)))
+                    self.assertNotEqual(code.value, 259, "test child is still running")
+                finally:
+                    api.CloseHandle(handle)
 
 
 class StopTests(unittest.TestCase):

@@ -5,6 +5,7 @@
 //! at the next occurrence" and so matches every day.
 
 use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike};
+use std::collections::HashMap;
 
 /// How late an alarm may be and still ring after the machine wakes from
 /// sleep. Later than this and ringing would only be confusing.
@@ -12,6 +13,81 @@ pub const CATCHUP_GRACE_SECS: i64 = 15 * 60;
 
 /// A gap between ticks longer than this means the machine was asleep.
 pub const SLEEP_GAP_SECS: i64 = 90;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Snooze {
+    pub at: i64,
+    ready: bool,
+}
+
+impl Snooze {
+    pub fn new(at: i64) -> Self {
+        Self { at, ready: false }
+    }
+}
+
+/// Leave due snoozes queued until a ring actually claims one. A slow source
+/// resolution can overlap an edit that cancels the occurrence.
+pub fn next_due_snooze(
+    pending: &mut HashMap<String, Snooze>,
+    now: i64,
+    busy: bool,
+) -> (Option<String>, Vec<String>) {
+    let mut expired = Vec::new();
+    pending.retain(|id, snooze| {
+        // Catch-up grace applies when first observing a deadline after sleep.
+        // Once eligible, waiting behind another ring must not expire it.
+        if snooze.ready {
+            true
+        } else if now.saturating_sub(snooze.at) > CATCHUP_GRACE_SECS {
+            expired.push(id.clone());
+            false
+        } else {
+            snooze.ready = snooze.at <= now;
+            true
+        }
+    });
+    let next = if busy {
+        None
+    } else {
+        pending
+            .iter()
+            .filter(|(_, snooze)| snooze.ready && snooze.at <= now)
+            .min_by(|(id_a, a), (id_b, b)| a.at.cmp(&b.at).then_with(|| id_a.cmp(id_b)))
+            .map(|(id, _)| id.clone())
+    };
+    (next, expired)
+}
+
+/// An automatically disabled one-shot may still have a legitimate snooze.
+/// Only an explicit enabled-to-disabled transition or removal cancels it.
+pub fn cancelled_alarms(previous: &[(&str, bool)], current: &[(&str, bool)]) -> Vec<String> {
+    previous
+        .iter()
+        .filter_map(
+            |(id, was_enabled)| match current.iter().find(|(new_id, _)| new_id == id) {
+                None => Some((*id).to_string()),
+                Some((_, enabled)) if *was_enabled && !enabled => Some((*id).to_string()),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+pub fn alarm_may_fire(
+    is_snooze: bool,
+    enabled: bool,
+    snooze: Option<Snooze>,
+    now: i64,
+    busy: bool,
+) -> bool {
+    !busy
+        && if is_snooze {
+            snooze.is_some_and(|s| s.ready && s.at <= now)
+        } else {
+            enabled
+        }
+}
 
 pub fn day_matches(days: &[u32], weekday_from_monday: u32) -> bool {
     days.is_empty() || days.contains(&weekday_from_monday)
@@ -106,6 +182,74 @@ pub fn missed_while_asleep<Tz: TimeZone>(
 mod tests {
     use super::*;
     use chrono::{FixedOffset, NaiveDate};
+
+    #[test]
+    fn overdue_snoozes_wait_for_each_other_and_keep_their_deadlines() {
+        let mut pending = HashMap::from([
+            ("first".into(), Snooze::new(100)),
+            ("second".into(), Snooze::new(110)),
+        ]);
+        assert_eq!(
+            next_due_snooze(&mut pending, 120, false).0.as_deref(),
+            Some("first")
+        );
+        assert_eq!(pending.len(), 2);
+        pending.remove("first");
+        assert_eq!(next_due_snooze(&mut pending, 121, true).0, None);
+        assert_eq!(pending.get("second").unwrap().at, 110);
+        // The first alarm can ring longer than the catch-up grace period.
+        assert_eq!(next_due_snooze(&mut pending, 2000, true).0, None);
+        assert_eq!(
+            next_due_snooze(&mut pending, 2001, false).0.as_deref(),
+            Some("second")
+        );
+        assert!(alarm_may_fire(
+            true,
+            false,
+            pending.get("second").copied(),
+            2001,
+            false
+        ));
+    }
+
+    #[test]
+    fn snoozes_first_observed_after_the_grace_period_expire() {
+        let mut pending = HashMap::from([
+            ("old".into(), Snooze::new(1)),
+            ("future".into(), Snooze::new(2000)),
+        ]);
+        assert_eq!(
+            next_due_snooze(&mut pending, 1000, true),
+            (None, vec!["old".into()])
+        );
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn explicit_disable_and_removal_cancel_but_one_shot_autodisable_does_not() {
+        let old = [("repeat", true), ("one-shot", false), ("deleted", false)];
+        let new = [("repeat", false), ("one-shot", false)];
+        assert_eq!(cancelled_alarms(&old, &new), vec!["repeat", "deleted"]);
+    }
+
+    #[test]
+    fn a_cancelled_or_postponed_snooze_cannot_fire_after_source_resolution() {
+        assert!(!alarm_may_fire(true, true, None, 100, false));
+        assert!(!alarm_may_fire(
+            true,
+            true,
+            Some(Snooze::new(110)),
+            100,
+            false
+        ));
+        assert!(!alarm_may_fire(false, false, None, 100, false));
+        let ready = Snooze {
+            at: 90,
+            ready: true,
+        };
+        assert!(alarm_may_fire(true, false, Some(ready), 100, false));
+        assert!(!alarm_may_fire(true, false, Some(ready), 100, true));
+    }
 
     /// The local calendar date an instant falls on, in a given zone.
     fn next_local_date<Tz: TimeZone>(tz: &Tz, unix: i64) -> chrono::NaiveDate {

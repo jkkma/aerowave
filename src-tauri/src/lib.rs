@@ -72,17 +72,34 @@ fn save_stations(state: State<AppState>, stations: Vec<Station>) -> Result<(), S
 
 #[tauri::command]
 fn save_alarms(app: AppHandle, state: State<AppState>, alarms: Vec<Alarm>) -> Result<(), String> {
-    state.store.update(|d| d.alarms = alarms)?;
+    state.store.update(|d| {
+        let previous: Vec<_> = d.alarms.iter().map(|a| (a.id.as_str(), a.enabled)).collect();
+        let current: Vec<_> = alarms.iter().map(|a| (a.id.as_str(), a.enabled)).collect();
+        let cancelled = aerowave_core::schedule::cancelled_alarms(&previous, &current);
+        let mut sched = state.sched.lock().unwrap();
+        for id in cancelled {
+            sched.cancel_pending(&id);
+        }
+        d.alarms = alarms;
+    })?;
     let _ = app.emit("alarms-updated", ());
     Ok(())
 }
 
 #[tauri::command]
-fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> Result<(), String> {
+fn save_settings(
+    app: AppHandle,
+    state: State<AppState>,
+    mut settings: Settings,
+    explicit_autostart: Option<bool>,
+) -> Result<(), String> {
+    if let Some(want) = explicit_autostart {
+        settings.start_with_windows = want;
+    }
     let want_autostart = settings.start_with_windows;
     state.store.update(|d| d.settings = settings)?;
     // Never let this lose the rest of the settings - they are saved already.
-    sync_autostart(&app, &state, want_autostart)
+    sync_autostart(&app, &state, want_autostart, explicit_autostart)
 }
 
 /// What Windows would actually run at logon, and whether the user has said no
@@ -152,11 +169,16 @@ mod logon {
     }
 
     /// Drop that override, so the app's own toggle is the only truth again.
-    pub fn clear_override() {
-        if let Ok(key) =
-            RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(APPROVED, KEY_SET_VALUE)
-        {
-            let _ = key.delete_value(VALUE);
+    pub fn clear_override() -> Result<(), String> {
+        let key = match RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(APPROVED, KEY_SET_VALUE) {
+            Ok(key) => key,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("cannot open startup approval: {e}")),
+        };
+        match key.delete_value(VALUE) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("cannot clear startup override: {e}")),
         }
     }
 
@@ -181,34 +203,28 @@ mod logon {
 /// reads ON, and settings are written on every volume nudge, so acting on a
 /// bare mismatch would quietly overturn the user's own choice every time.
 #[cfg(windows)]
-fn sync_autostart(app: &AppHandle, state: &AppState, want: bool) -> Result<(), String> {
-    let present = logon::entry().is_some();
-
-    let result: Result<(), String> = if want {
-        if !present || !logon::entry_is_this_exe() {
-            logon::enable_for_this_exe().map(|_| ())
-        } else if logon::switched_off_by_user() {
+fn sync_autostart(app: &AppHandle, state: &AppState, want: bool, explicit: Option<bool>) -> Result<(), String> {
+    use aerowave_core::settings::{autostart_action, AutostartAction};
+    let result = match autostart_action(want, explicit, logon::entry_is_this_exe(), logon::switched_off_by_user()) {
+        AutostartAction::Enable => logon::enable_for_this_exe().and_then(|_| {
+            if explicit == Some(true) { logon::clear_override() } else { Ok(()) }
+        }),
+        AutostartAction::ReflectDisabled => {
             // Present, correct, and disabled outside the app. That is the
             // user's decision; make our toggle agree rather than fight it.
             let _ = state.store.update(|d| d.settings.start_with_windows = false);
             let _ = app.emit("settings-updated", ());
             return Ok(());
-        } else {
-            Ok(())
         }
-    } else if present {
-        let disabled = logon::disable();
-        logon::clear_override();
-        disabled
-    } else {
-        Ok(())
+        AutostartAction::Disable => logon::disable().and_then(|_| logon::clear_override()),
+        AutostartAction::Keep => Ok(()),
     };
 
     result.map_err(|e| format!("settings saved, but start-with-Windows failed: {e}"))
 }
 
 #[cfg(not(windows))]
-fn sync_autostart(app: &AppHandle, _state: &AppState, want: bool) -> Result<(), String> {
+fn sync_autostart(app: &AppHandle, _state: &AppState, want: bool, _explicit: Option<bool>) -> Result<(), String> {
     let manager = app.autolaunch();
     if manager.is_enabled().unwrap_or(false) == want {
         return Ok(());

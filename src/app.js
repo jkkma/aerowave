@@ -146,6 +146,9 @@ function clearTimers() {
 
 function stopPlayback(quiet) {
   playGeneration += 1;
+  // pause/load/destroy can queue events until after the next source is set.
+  // Keep those teardown events guarded through the next connection attempt.
+  switchingSource = true;
   // Load-bearing: without this an alarm firing while the radio is already
   // playing inherits a fresh timestamp and its watchdog never trips.
   player.lastProgress = 0;
@@ -159,7 +162,6 @@ function stopPlayback(quiet) {
   audio.load();
   player.retries = 0;
   player.paused = false;
-  switchingSource = false;
   player.resolved = null;
   player.probed = false;
   player.relayed = false;
@@ -225,32 +227,93 @@ function fadeOut(seconds) {
  * server answers - plenty of stations serve a perfectly good HTTP response
  * that the media element then refuses. This is the check that counts.
  */
-function canDecode(url, timeoutMs = 9000) {
+function canDecode(url, timeoutMs = 9000, { hls = false, signal } = {}) {
   return new Promise((resolve) => {
     const probe = new Audio();
     probe.preload = "auto";
     probe.muted = true;
     let settled = false;
+    let decoder = null;
+    let base = null;
+    let timer = null;
+    let relayed = false;
     const done = (result) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      if (decoder) {
+        try { decoder.destroy(); } catch { /* an errored decoder may already be detached */ }
+      }
+      if (base) closeHlsSession(base);
+      probe.pause();
       probe.removeAttribute("src");
       probe.load();
       resolve(result);
     };
-    probe.addEventListener("loadedmetadata", () => done({ ok: true }));
+    const abort = () => done({ ok: false, cancelled: true });
+    if (signal?.aborted) { abort(); return; }
+    signal?.addEventListener("abort", abort, { once: true });
     probe.addEventListener("canplay", () => done({ ok: true }));
+    probe.addEventListener("loadeddata", () => {
+      if (probe.readyState >= 3) done({ ok: true });
+    });
     probe.addEventListener("error", () => {
       const code = probe.error ? probe.error.code : 0;
+      if (!settled && code === 4 && relayed) {
+        relayed = false;
+        probe.src = url;
+        probe.load();
+        startProbe();
+        return;
+      }
       done({
         ok: false,
-        reason: code === 4 ? "the player cannot decode this stream" : "media error " + code,
+        reason: code === 4 ? "the player could not load or decode this stream" : "media error " + code,
       });
     });
-    setTimeout(() => done({ ok: false, reason: "no audio within " + Math.round(timeoutMs / 1000) + "s" }), timeoutMs);
-    probe.src = url;
-    probe.load();
+    const startProbe = () => {
+      if (settled) return;
+      const attemptUrl = probe.src;
+      if (probe.readyState >= 3) done({ ok: true });
+      else probe.play().catch((e) => {
+        if (probe.src === attemptUrl && !isAbort(e)) done({ ok: false, reason: String(e.message || e) });
+      });
+    };
+    timer = setTimeout(() => done({ ok: false, reason: "no audio within " + Math.round(timeoutMs / 1000) + "s" }), timeoutMs);
+    const connect = async () => {
+      if (hls) {
+        if (typeof Hls === "undefined" || !Hls.isSupported()) {
+          done({ ok: false, reason: "this build cannot play HLS" });
+          return;
+        }
+        const opened = await invoke("hls_session", { url });
+        if (settled) { if (opened) closeHlsSession(opened); return; }
+        base = opened;
+        if (!base) { done({ ok: false, reason: "could not open an HLS session" }); return; }
+        decoder = new Hls({ enableWorker: false, loader: relayLoader(Hls.DefaultConfig.loader, base) });
+        decoder.on(Hls.Events.ERROR, (_event, data) => {
+          if (data?.fatal) done({ ok: false, reason: "HLS " + (data.details || data.type || "error") });
+        });
+        decoder.loadSource(url);
+        decoder.attachMedia(probe);
+      } else {
+        const playUrl = await playable({ kind: "station" }, url);
+        if (settled) return;
+        relayed = playUrl !== url;
+        probe.src = playUrl;
+        probe.load();
+      }
+      startProbe();
+    };
+    connect().catch((e) => done({ ok: false, reason: String(e.message || e) }));
   });
+}
+
+let stationTest = null;
+function cancelStationTest() {
+  stationTest?.abort();
+  stationTest = null;
 }
 
 function showNowPlaying(title, sub, meta) {
@@ -312,13 +375,18 @@ function b64url(text) {
  * relative URI in a playlist against that - point it at us and the next
  * request would be for a segment relative to our own origin.
  */
-function relayLoader(Base) {
+function relayLoader(Base, base) {
   return class extends Base {
     load(context, config, callbacks) {
       const upstream = context.url;
-      const proxied = Object.assign({}, context, {
-        url: hlsBase + "?u=" + b64url(upstream),
-      });
+      let url = base + "?u=" + b64url(upstream);
+      // hls.js uses an exclusive end; HTTP byte ranges use an inclusive one.
+      // Carry it in the URL because the custom protocol reads this parameter.
+      if (Number.isSafeInteger(context.rangeStart) && context.rangeStart >= 0 &&
+          Number.isSafeInteger(context.rangeEnd) && context.rangeEnd > context.rangeStart) {
+        url += "&r=" + context.rangeStart + "-" + (context.rangeEnd - 1);
+      }
+      const proxied = Object.assign({}, context, { url });
       const wrapped = Object.assign({}, callbacks, {
         onSuccess: (response, stats, _ctx, networkDetails) => {
           let final = null;
@@ -407,17 +475,23 @@ function stopHls() {
   hlsTitles = [];
   hlsCodec = null;
   if (hlsPlayer) {
-    try {
-      hlsPlayer.destroy();
-    } catch { /* already gone */ }
+    switchingSource = true;
+    const old = hlsPlayer;
     hlsPlayer = null;
+    try {
+      old.destroy();
+    } catch { /* already gone */ }
   }
   if (hlsBase) {
-    const session = hlsBase.split("/").pop();
+    closeHlsSession(hlsBase);
     hlsBase = null;
-    invoke("hls_close", { session }).catch(() => {});
   }
   player.hls = false;
+}
+
+function closeHlsSession(base) {
+  const session = base.split("/").pop();
+  invoke("hls_close", { session }).catch(() => {});
 }
 
 /**
@@ -425,6 +499,9 @@ function stopHls() {
  * already said why.
  */
 async function startHls(source, url, generation) {
+  switchingSource = true;
+  clearInterval(player.metaTimer);
+  player.metaTimer = null;
   if (typeof Hls === "undefined" || !Hls.isSupported()) {
     failure("this build cannot play HLS", { fatal: true });
     return false;
@@ -433,7 +510,10 @@ async function startHls(source, url, generation) {
   try {
     base = await invoke("hls_session", { url });
   } catch { /* falls through to the null check */ }
-  if (superseded(generation) || player.source !== source) return false;
+  if (superseded(generation) || player.source !== source) {
+    if (base) closeHlsSession(base);
+    return false;
+  }
   if (!base) {
     failure("could not open an HLS session", { fatal: true });
     return false;
@@ -446,7 +526,7 @@ async function startHls(source, url, generation) {
     // like a station that simply never starts. Demuxing one audio stream on
     // the main thread costs nothing worth having.
     enableWorker: false,
-    loader: relayLoader(Hls.DefaultConfig.loader),
+    loader: relayLoader(Hls.DefaultConfig.loader, base),
   });
   hlsPlayer = hls;
   player.hls = true;
@@ -507,12 +587,10 @@ async function startHls(source, url, generation) {
 /**
  * What to hand <audio>.
  *
- * Every station goes through the loopback relay. A media element cannot choose
- * its own request headers, and enough broadcasters decide whether to answer on
- * the strength of them that going direct is the thing that fails - SomaFM
- * answers 403 to the webview's User-Agent and 200 to an ordinary browser's.
- * Rust can say whatever gets served, and resolves playlists, redirects and
- * Shoutcast v1 on the way past. See src-tauri/src/relay.rs.
+ * Ordinary stations go through the loopback relay. A media element cannot
+ * choose its request headers or strip ICY blocks. Rust presents Aerowave's
+ * measured User-Agent and resolves playlists, redirects and Shoutcast v1 on
+ * the way past. See src-tauri/src/relay.rs.
  *
  * Files are not relayed: they are already playable and there is nothing to
  * negotiate. Nor is anything relayed when the listener would not bind, in
@@ -549,24 +627,35 @@ async function play(source, opts = {}) {
   markPlaying(true);
 
   setStatus("CONNECTING", "busy");
-  let url = source.url;
+  // A resumed station keeps the manifest reached through its playlist wrapper.
+  // The original URL still identifies the station in BROWSE and the saved list.
+  let url = source.hls && source.hlsUrl ? source.hlsUrl : source.url;
 
-  let useHls = false;
-  if (source.kind === "station" && /\.(pls|m3u|m3u8|asx)(\?|$)/i.test(url)) {
-    // A playlist file cannot be handed to <audio> - resolve it first, and
-    // find out which of the two players it wants on the way past.
+  let useHls = source.kind === "station" && !!source.hls;
+  let initialInfo = null;
+  if (source.kind === "station" && (!useHls || /\.(pls|m3u|asx)(\?|$)/i.test(url))) {
+    // A /listen endpoint can serve or redirect to HLS just as a .m3u8 can.
+    // Reuse this request's station headers for the first metadata update.
     try {
       const info = await invoke("probe_stream", { url, wantTitle: false });
+      if (superseded(generation)) return;
+      initialInfo = info;
       url = info.url;
       player.resolved = info.url;
       player.probed = true;
       useHls = !!info.hls;
+      source.hls = useHls;
+      source.hlsUrl = useHls ? info.url : null;
       if (info.warning) say(info.warning, "bad");
     } catch (e) {
-      if (!superseded(generation)) failure(String(e));
-      return;
+      if (superseded(generation)) return;
+      // A failed informational request need not prevent a relay from playing.
+      // Explicit playlists still need resolution before any media load.
+      if (/\.(pls|m3u|m3u8|asx)(\?|$)/i.test(url)) {
+        failure(String(e));
+        return;
+      }
     }
-    if (superseded(generation)) return;
   }
 
   // Remember the station's own URL. The metadata poll talks to the
@@ -601,7 +690,7 @@ async function play(source, opts = {}) {
   if (superseded(generation)) return;
   if (opts.fadeSecs > 0) fadeTo(volume, opts.fadeSecs);
 
-  if (source.kind === "station" && !player.hls) startMetadata(source);
+  if (source.kind === "station" && !player.hls) startMetadata(source, initialInfo);
 }
 
 /*
@@ -686,27 +775,28 @@ async function setOrbArt(source) {
   if (picture) orb.setImage(picture);
 }
 
-function startMetadata(source) {
+function startMetadata(source, initialInfo = null) {
   clearInterval(player.metaTimer);
   if (state.settings.showMetadata === false) return;
   // Plenty of stations send no ICY titles at all. Polling one of those opens a
   // connection a minute, for ever, to learn nothing - so give up after three.
   let titleless = 0;
-  const poll = async () => {
+  const generation = playGeneration;
+  const poll = async (initial = null) => {
     if (player.source !== source) return;
     try {
-      const info = await invoke("probe_stream", {
+      const info = initial || await invoke("probe_stream", {
         url: player.resolved || source.url,
         wantTitle: true,
         skipResolve: player.probed,
       });
-      if (player.source !== source) return;
+      if (superseded(generation) || player.source !== source) return;
       if (info.title) {
         titleless = 0;
         // Unless the stream has already said, on the connection that is
         // actually playing. This poll was in flight before that arrived.
         if (!player.streamTitle) $("#np-track").textContent = info.title;
-      } else if (++titleless >= 3) {
+      } else if (!initial && ++titleless >= 3) {
         clearInterval(player.metaTimer);
         player.metaTimer = null;
         return;
@@ -722,7 +812,7 @@ function startMetadata(source) {
       /* metadata is a nicety; a failure here must not disturb playback */
     }
   };
-  poll();
+  poll(initialInfo);
   // The first poll is the one that matters: it fills in bitrate, genre and
   // the station's own name, none of which change. Titles come from the relay
   // now - off the connection that is playing, so they arrive with the song -
@@ -831,10 +921,13 @@ function failure(detail, opts = {}) {
         if (superseded(generation) || player.source !== source) return;
         player.resolved = info.url;
         player.probed = true;
+        source.hls = !!info.hls;
+        source.hlsUrl = info.hls ? info.url : null;
       } catch { /* stay with the original */ }
     }
+    if (superseded(generation) || player.source !== source) return;
     const upstream = player.resolved || source.url;
-    if (player.hls) {
+    if (player.hls || source.hls) {
       // Start the HLS player over rather than assigning a source: the element
       // plays a MediaSource, and pointing it at the .m3u8 would give it a
       // playlist it cannot read.
@@ -858,16 +951,30 @@ function failure(detail, opts = {}) {
  *
  * Relaying fixes more stations than it breaks, but it is one more thing
  * between the player and the broadcaster: if the loopback listener has gone,
- * or the relay cannot make sense of a source the media element could have
- * handled by itself (an HLS playlist, which must not be relayed), then going
- * direct is strictly better than going nowhere.
+ * or an ordinary stream works only with the media element's request, that
+ * direct connection is worth trying. HLS must still go through hls.js.
  */
-function fallBackToDirect(source, generation) {
+async function fallBackToDirect(source, generation) {
   player.triedDirect = true;
   player.relayed = false;
+  if (!player.probed) {
+    try {
+      const info = await invoke("probe_stream", { url: source.url, wantTitle: false });
+      if (superseded(generation) || player.source !== source) return;
+      player.resolved = info.url;
+      player.probed = true;
+      source.hls = !!info.hls;
+      source.hlsUrl = info.hls ? info.url : null;
+    } catch { /* the direct request may still work */ }
+  }
+  if (superseded(generation) || player.source !== source) return;
   const upstream = player.resolved || source.url;
-  setStatus("RETRYING DIRECT", "busy");
-  setAudioSource(upstream);
+  if (source.hls) {
+    if (!(await startHls(source, upstream, generation))) return;
+  } else {
+    setStatus("RETRYING DIRECT", "busy");
+    setAudioSource(upstream);
+  }
   audio.play().catch((e) => {
     if (superseded(generation) || isAbort(e)) return;
     failure(String(e && e.message ? e.message : e));
@@ -951,7 +1058,7 @@ audio.addEventListener("error", () => {
       fallBackToDirect(source, playGeneration);
       return;
     }
-    failure("this stream is not one the player can decode", { fatal: true });
+    failure("the player could not load or decode this stream", { fatal: true });
     return;
   }
   failure(err ? "media error " + err.code : "unknown media error");
@@ -993,6 +1100,7 @@ function playStation(station, opts) {
       subtitle: state.settings.showMetadata === false ? station.url : "…",
       logo: station.logo,
       stationId: station.id,
+      hls: !!station.hls,
     },
     opts
   );
@@ -1006,14 +1114,19 @@ function playStation(station, opts) {
  * shuffle instead of rolling the dice again.
  */
 let folderHistory = [];
+let folderPickRequest = 0;
 
 async function playRandomFromFolder(folder, opts = {}) {
   if (!folder) {
     say("choose a folder first", "bad");
     return;
   }
+  const request = ++folderPickRequest;
+  const generation = playGeneration;
+  const stale = () => request !== folderPickRequest || superseded(generation) || givingUp;
   try {
     const pick = await invoke("random_track", { path: folder });
+    if (stale()) return;
     // Remember what is being left so prev has somewhere to go back to. A
     // different folder is a different shuffle: what came before it is not
     // part of this one.
@@ -1036,6 +1149,7 @@ async function playRandomFromFolder(folder, opts = {}) {
       opts
     );
   } catch (e) {
+    if (stale()) return;
     if (!opts.silentErrors) say(String(e), "bad");
     stopPlayback();
   }
@@ -1433,6 +1547,7 @@ async function refreshBrowseFilters() {
       narrow("#browse-tag", facetQuery({ countryCode: browseCountry }), (f) => f.tags, asTag, "genre")
     );
   } else if (browseTags) {
+    invalidateBrowseNarrow("#browse-tag");
     setBrowseOptions("#browse-tag", browseTags, asTag, browseTag, browseTagLabel);
   }
 
@@ -1441,6 +1556,7 @@ async function refreshBrowseFilters() {
       narrow("#browse-country", facetQuery({ tag: browseTag }), (f) => f.countries, asCountry, "country")
     );
   } else if (browseCountries) {
+    invalidateBrowseNarrow("#browse-country");
     setBrowseOptions("#browse-country", browseCountries, asCountry, browseCountry, browseCountryLabel);
   }
 
@@ -1493,7 +1609,13 @@ function annotateFixed(selector, buckets, sampled) {
 }
 
 /** Back to plain labels, for when nothing is narrowing these any more. */
+function invalidateBrowseNarrow(selector) {
+  browseNarrows.set(selector, (browseNarrows.get(selector) || 0) + 1);
+  $(selector).disabled = false;
+}
+
 function resetFixed(selector) {
+  invalidateBrowseNarrow(selector);
   Array.prototype.forEach.call($(selector).options, (option) => {
     if (option.dataset.label) option.textContent = option.dataset.label;
     option.disabled = false;
@@ -1586,6 +1708,7 @@ function previewBrowse(st) {
     meta: [st.codec, st.bitrate ? st.bitrate + " kbps" : ""].filter(Boolean).join("  ·  "),
     logo: st.favicon,
     stationId: null,
+    hls: !!st.hls,
   });
   if (st.hls) say("HLS — this one plays through hls.js");
   // Nothing in the saved list is playing any more; both lists should say so.
@@ -1676,7 +1799,7 @@ function renderBrowse() {
     li.setAttribute("aria-label", `Listen to ${st.name}`);
     li.addEventListener("click", () => previewBrowse(st));
     li.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.code === "Space") {
+      if (e.target === li && (e.key === "Enter" || e.code === "Space")) {
         e.preventDefault();
         previewBrowse(st);
       }
@@ -1847,6 +1970,8 @@ function onAlarmFire(payload) {
     (payload.title || "");
   $("#ring-note").textContent = payload.note || "";
   $("#ring-snooze-mins").textContent = payload.snoozeMins + " min";
+  $("#ring-snooze").disabled = payload.trigger === "test";
+  $("#ring-snooze").title = payload.trigger === "test" ? "Test alarms cannot be snoozed" : "";
   overlay.hidden = false;
   // After unhiding, not before: focus() on a hidden subtree does nothing, and
   // an alarm nobody can dismiss from the keyboard is not much of an alarm.
@@ -1962,23 +2087,51 @@ function closeRingUi() {
   ringing = null;
 }
 
+const pendingRingActions = new WeakSet();
+
 async function dismissRing() {
-  const id = ringing && ringing.alarmId;
-  closeRingUi();
-  stopPlayback();
-  if (id) await invoke("dismiss_alarm", { alarmId: id });
-  refreshNextAlarm();
+  const ring = ringing;
+  if (!ring || pendingRingActions.has(ring)) return;
+  pendingRingActions.add(ring);
+  try {
+    if (ring.trigger !== "test" && ring.alarmId) {
+      await invoke("dismiss_alarm", { alarmId: ring.alarmId });
+    }
+    if (ringing !== ring) return;
+    closeRingUi();
+    stopPlayback();
+    refreshNextAlarm();
+  } catch (e) {
+    if (ringing !== ring) return;
+    $("#ring-note").textContent = "Could not dismiss the alarm: " + e + ". Try again.";
+    say("could not dismiss the alarm: " + e, "bad");
+  } finally {
+    pendingRingActions.delete(ring);
+  }
 }
 
 /** `why` is set when the alarm snoozed itself rather than being asked to. */
 async function snoozeRing(why) {
-  if (!ringing) return;
-  const { alarmId, snoozeMins } = ringing;
-  closeRingUi();
-  stopPlayback();
-  await invoke("snooze_alarm", { alarmId, minutes: snoozeMins });
-  say((why ? why + " - " : "") + "snoozed for " + snoozeMins + " minutes", "good");
-  refreshNextAlarm();
+  const ring = ringing;
+  if (!ring || ring.trigger === "test" || pendingRingActions.has(ring)) return;
+  const { alarmId, snoozeMins } = ring;
+  pendingRingActions.add(ring);
+  try {
+    await invoke("snooze_alarm", { alarmId, minutes: snoozeMins });
+    // A later alarm can arrive while IPC is pending. Its card and audio belong
+    // to that occurrence, even if both occurrences have the same alarm id.
+    if (ringing !== ring) return;
+    closeRingUi();
+    stopPlayback();
+    say((why ? why + " - " : "") + "snoozed for " + snoozeMins + " minutes", "good");
+    refreshNextAlarm();
+  } catch (e) {
+    if (ringing !== ring) return;
+    $("#ring-note").textContent = "Could not snooze the alarm: " + e + ". Try again or dismiss it.";
+    say("could not snooze the alarm: " + e, "bad");
+  } finally {
+    pendingRingActions.delete(ring);
+  }
 }
 
 async function refreshNextAlarm() {
@@ -2075,7 +2228,7 @@ function renderStations() {
     }
     li.addEventListener("click", () => playStation(station));
     li.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.code === "Space") {
+      if (e.target === li && (e.key === "Enter" || e.code === "Space")) {
         e.preventDefault();
         playStation(station);
       }
@@ -2232,10 +2385,15 @@ const saveAlarms = () =>
     .catch((e) => say(String(e), "bad"));
 
 let settingsSaveTimer = null;
-function saveSettings() {
+let settingsAutostartIntent = null;
+function saveSettings(explicitAutostart = null) {
+  if (explicitAutostart !== null) settingsAutostartIntent = explicitAutostart;
   clearTimeout(settingsSaveTimer);
   settingsSaveTimer = setTimeout(() => {
-    invoke("save_settings", { settings: state.settings }).catch((e) => {
+    const explicitAutostart = settingsAutostartIntent;
+    settingsAutostartIntent = null;
+    if (explicitAutostart !== null) state.settings.startWithWindows = explicitAutostart;
+    invoke("save_settings", { settings: state.settings, explicitAutostart }).catch((e) => {
       say(String(e), "bad");
       // start-with-Windows can fail on its own; reflect what actually stuck.
       loadState();
@@ -2257,6 +2415,7 @@ async function loadState() {
 let editingStation = null;
 
 function openStationEditor(station) {
+  cancelStationTest();
   editingStation = station || null;
   $("#st-name").value = station ? station.name : "";
   $("#st-url").value = station ? station.url : "";
@@ -2269,6 +2428,7 @@ function openStationEditor(station) {
 }
 
 function closeStationEditor() {
+  cancelStationTest();
   editingStation = null;
   $("#station-editor").classList.add("hidden");
 }
@@ -2682,14 +2842,24 @@ function wire() {
     say("station deleted");
   });
 
+  $("#st-url").addEventListener("input", () => {
+    cancelStationTest();
+    $("#st-note").textContent = "";
+    $("#st-note").className = "editor-note";
+  });
   $("#st-test").addEventListener("click", async () => {
+    cancelStationTest();
     const url = $("#st-url").value.trim();
     const note = $("#st-note");
     if (!url) return;
+    const test = new AbortController();
+    stationTest = test;
+    const stale = () => test.signal.aborted || $("#st-url").value.trim() !== url;
     note.className = "editor-note";
     note.textContent = "Connecting…";
     try {
       const info = await invoke("probe_stream", { url, wantTitle: true });
+      if (stale()) return;
       const bits = [info.contentType, info.bitrate ? info.bitrate + " kbps" : null, info.name, info.title]
         .filter(Boolean)
         .join("  ·  ");
@@ -2701,24 +2871,22 @@ function wire() {
         return;
       }
 
-      // An .m3u8 will never satisfy the decode check - the media element is
-      // not what plays it. Saying so beats reporting a working station as
-      // broken because the wrong player was asked.
-      if (info.hls) {
-        note.className = "editor-note good";
-        note.textContent = "✓ HLS — plays through hls.js — " + (bits || info.url);
-        return;
-      }
-
       note.textContent = "Server answered — checking the player can decode it…";
-      const playable = await canDecode(info.url);
-      note.className = "editor-note " + (playable.ok ? "good" : "bad");
-      note.textContent = playable.ok
-        ? "✓ live and playable — " + (bits || info.url)
-        : "✕ the server answers but nothing plays: " + playable.reason;
+      const decoded = await canDecode(info.url, info.hls ? 15000 : 9000, {
+        hls: !!info.hls,
+        signal: test.signal,
+      });
+      if (stale()) return;
+      note.className = "editor-note " + (decoded.ok ? "good" : "bad");
+      note.textContent = decoded.ok
+        ? "✓ live and playable" + (info.hls ? " (HLS)" : "") + " — " + (bits || info.url)
+        : "✕ the server answers but nothing plays: " + decoded.reason;
     } catch (e) {
+      if (stale()) return;
       note.className = "editor-note bad";
       note.textContent = "✕ " + e;
+    } finally {
+      if (stationTest === test) stationTest = null;
     }
   });
 
@@ -2910,7 +3078,7 @@ function wire() {
         refreshNextAlarm();
         applyClockMode(was.hour, was.minute);
       }
-      saveSettings();
+      saveSettings(row.dataset.setting === "startWithWindows" ? next : null);
     });
   });
 

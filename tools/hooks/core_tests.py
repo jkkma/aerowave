@@ -13,6 +13,7 @@ import subprocess
 import sys
 
 from hook_input import edited_paths, read_event
+from process_tree import run_process
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 CORE = ROOT / "src-tauri" / "core"
@@ -75,12 +76,10 @@ def main(argv=None):
         env["PATH"] = str(mingw) + os.pathsep + env.get("PATH", "")
 
     try:
-        result = subprocess.run(
+        result = run_process(
             [cargo, "test", "-p", "aerowave-core"],
             cwd=ROOT / "src-tauri",
             env=env,
-            capture_output=True,
-            text=True,
             timeout=170,
         )
     except (OSError, subprocess.TimeoutExpired) as error:

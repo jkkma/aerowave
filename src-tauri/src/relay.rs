@@ -25,7 +25,7 @@ use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::stream::{open_for_relay, RelayBody};
+use crate::stream::{open_for_relay, RelayBody, RELAY_READ_TIMEOUT};
 
 /// A request head is a few hundred bytes and the webview sends nothing like
 /// this much. Anything still writing one after this is not a browser.
@@ -175,7 +175,9 @@ impl Relay {
                 }
                 let mut chunk = [0u8; 16384];
                 loop {
-                    let Ok(read) = upstream.read(&mut chunk).await else {
+                    let Ok(Ok(read)) =
+                        tokio::time::timeout(RELAY_READ_TIMEOUT, upstream.read(&mut chunk)).await
+                    else {
                         break;
                     };
                     if read == 0 {
