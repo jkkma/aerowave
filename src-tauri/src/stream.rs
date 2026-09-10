@@ -11,8 +11,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use aerowave_core::icy::{
-    decode_text, first_url_in_playlist, head_end, is_hls, looks_like_playlist, parse_head,
-    scan_metadata, Head,
+    decode_text, first_url_in_playlist, head_end, is_hls, looks_like_playlist, metadata_interval,
+    parse_head, scan_metadata, Head,
 };
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -40,6 +40,8 @@ const MAX_HEAD_BYTES: usize = 8 * 1024;
 /// to megabytes is a broken or hostile server, and buffering it whole would
 /// let it decide how much memory this process uses.
 const MAX_PLAYLIST_BYTES: usize = 256 * 1024;
+pub(crate) const RELAY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const ICY_HEAD_TIMEOUT: Duration = Duration::from_secs(8);
 
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static RELAY_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -73,7 +75,7 @@ fn relay_client() -> Result<reqwest::Client, String> {
     if let Some(existing) = RELAY_CLIENT.get() {
         return Ok(existing.clone());
     }
-    let built = build_client(Some(Duration::from_secs(30)))?;
+    let built = build_client(Some(RELAY_READ_TIMEOUT))?;
     Ok(RELAY_CLIENT.get_or_init(|| built).clone())
 }
 
@@ -329,29 +331,39 @@ async fn icy_connect(
         "GET {target} HTTP/1.0\r\nHost: {host}:{port}\r\nUser-Agent: {UA}\r\n\
          {metadata}Connection: close\r\n\r\n"
     );
-    socket
-        .write_all(request.as_bytes())
-        .await
-        .map_err(|e| unproven(format!("could not ask {host} for the stream: {e}")))?;
-
-    let mut buf: Vec<u8> = Vec::with_capacity(2048);
-    let (head_len, body_at) = loop {
-        if let Some(found) = head_end(&buf) {
-            break found;
-        }
-        if buf.len() > MAX_HEAD_BYTES {
-            return Err(unproven(format!("{host} never finished its response head")));
-        }
-        let mut chunk = [0u8; 2048];
-        let read = socket
-            .read(&mut chunk)
+    // Bound the entire head, not each read: a server trickling a byte at a
+    // time otherwise keeps the connection pending forever.
+    let head_work = async {
+        socket
+            .write_all(request.as_bytes())
             .await
-            .map_err(|e| unproven(format!("{host} stopped talking: {e}")))?;
-        if read == 0 {
-            return Err(unproven(format!("{host} closed before answering")));
+            .map_err(|e| unproven(format!("could not ask {host} for the stream: {e}")))?;
+        let mut buf: Vec<u8> = Vec::with_capacity(2048);
+        loop {
+            if let Some((head_len, body_at)) = head_end(&buf) {
+                if head_len > MAX_HEAD_BYTES {
+                    return Err(unproven(format!("{host} sent too large a response head")));
+                }
+                return Ok((buf, head_len, body_at));
+            }
+            if buf.len() > MAX_HEAD_BYTES {
+                return Err(unproven(format!("{host} never finished its response head")));
+            }
+            let mut chunk = [0u8; 2048];
+            let read = socket
+                .read(&mut chunk)
+                .await
+                .map_err(|e| unproven(format!("{host} stopped talking: {e}")))?;
+            if read == 0 {
+                return Err(unproven(format!("{host} closed before answering")));
+            }
+            buf.extend_from_slice(&chunk[..read]);
         }
-        buf.extend_from_slice(&chunk[..read]);
     };
+    let (mut buf, head_len, body_at) =
+        tokio::time::timeout(ICY_HEAD_TIMEOUT, head_work)
+            .await
+            .map_err(|_| unproven(format!("{host} timed out answering the stream request")))??;
 
     let head = {
         let text = decode_text(&buf[..head_len]);
@@ -411,9 +423,10 @@ async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure
         let mut chunk = [0u8; 8192];
         // The head is already in hand at this point, so a stream that stops
         // mid-metadata still hands back the bitrate and genre it gave us.
-        let read = match socket.read(&mut chunk).await {
-            Ok(read) => read,
-            Err(_) => break,
+        let read = match tokio::time::timeout(Duration::from_secs(5), socket.read(&mut chunk)).await
+        {
+            Ok(Ok(read)) => read,
+            _ => break,
         };
         if read == 0 {
             break;
@@ -528,15 +541,6 @@ pub struct RelaySource {
     pub metaint: usize,
 }
 
-/// `icy-metaint` as a length to strip at, or 0 for anything absent, zero or
-/// implausible. A server claiming a gap larger than the probe's whole budget
-/// is not one to take at its word.
-fn metaint_of(raw: Option<&str>) -> usize {
-    raw.and_then(|v| v.parse::<usize>().ok())
-        .filter(|n| *n > 0 && *n < MAX_META_BYTES)
-        .unwrap_or(0)
-}
-
 /// Open a station on behalf of the relay: playlists followed, redirects
 /// followed, Shoutcast v1 handled - the same three problems `probe` already
 /// solves, and the reason relaying is worth doing in Rust rather than in the
@@ -576,7 +580,7 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
             };
             return Ok(RelaySource {
                 content_type,
-                metaint: metaint_of(header(&resp, "icy-metaint").as_deref()),
+                metaint: metadata_interval(header(&resp, "icy-metaint").as_deref())?,
                 body: RelayBody::Http(resp),
             });
         }
@@ -593,7 +597,7 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
                 .get("content-type")
                 .map(|c| c.to_ascii_lowercase())
                 .unwrap_or_else(|| "audio/mpeg".to_string()),
-            metaint: metaint_of(head.get("icy-metaint")),
+            metaint: metadata_interval(head.get("icy-metaint"))?,
             body: RelayBody::Icy { socket, primed },
         }),
         Err(icy) if icy.proven => Err(icy.message),
@@ -605,12 +609,13 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
 /// size cap and a deadline. The HLS side wants exactly this - hls.js walks
 /// the playlists itself and only needs each individual file handed back.
 pub async fn fetch_once(
+    client: &reqwest::Client,
     url: &str,
     range: Option<(u64, u64)>,
     cap: usize,
 ) -> Result<crate::hls::Fetched, String> {
     let work = async {
-        let mut request = relay_client()?.get(url);
+        let mut request = client.get(url);
         if let Some((start, end)) = range {
             request = request.header("Range", format!("bytes={start}-{end}"));
         }

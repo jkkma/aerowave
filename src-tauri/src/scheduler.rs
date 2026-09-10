@@ -25,13 +25,20 @@ pub struct SchedState {
     /// cannot fire the same alarm sixty times in its minute.
     fired: HashMap<String, String>,
     /// alarm id -> unix seconds when a snooze runs out.
-    snoozed: HashMap<String, i64>,
+    snoozed: HashMap<String, schedule::Snooze>,
     /// Whatever is ringing right now.
     pub ringing: Option<String>,
     /// The track each folder alarm's current occurrence is playing, held so
     /// that the snoozes after it come back with the same one.
     holds: RingHolds,
     last_tick: i64,
+}
+
+impl SchedState {
+    pub fn cancel_pending(&mut self, alarm_id: &str) {
+        self.snoozed.remove(alarm_id);
+        self.holds.release(alarm_id);
+    }
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -196,12 +203,14 @@ pub fn resolve_source(app: &AppHandle, alarm: &Alarm, trigger: &str) -> FirePayl
                     // alarm's own folder: the backup folder below is the
                     // sound of something having gone wrong, and is meant to
                     // be played through rather than held.
-                    state
-                        .sched
-                        .lock()
-                        .unwrap()
-                        .holds
-                        .remember(&alarm.id, path, &track);
+                    if trigger != "test" {
+                        state
+                            .sched
+                            .lock()
+                            .unwrap()
+                            .holds
+                            .remember(&alarm.id, path, &track);
+                    }
                     payload.kind = "folder".into();
                     payload.path = Some(track);
                     payload.folder = Some(path.clone());
@@ -248,28 +257,42 @@ fn surface_window(app: &AppHandle) {
     }
 }
 
-pub fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str) {
+pub fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str) -> bool {
     let payload = resolve_source(app, alarm, trigger);
-    {
-        let state = app.state::<AppState>();
+    let state = app.state::<AppState>();
+    let one_shot = {
+        // Edits take these locks in the same order. Recheck after disk/network
+        // source work so a cancelled snooze cannot publish an obsolete ring.
+        let mut data = state.store.data.lock().unwrap();
         let mut sched = state.sched.lock().unwrap();
+        let Some(current) = data.alarms.iter_mut().find(|a| a.id == alarm.id) else {
+            return false;
+        };
+        let now = Local::now();
+        if !schedule::alarm_may_fire(
+            trigger == "snooze", current.enabled, sched.snoozed.get(&alarm.id).copied(),
+            now.timestamp(), sched.ringing.is_some(),
+        ) {
+            return false;
+        }
         sched.ringing = Some(alarm.id.clone());
         sched.snoozed.remove(&alarm.id);
-    }
+        sched.fired.insert(alarm.id.clone(), now.format("%Y-%m-%d %H:%M").to_string());
+        let one_shot = current.days.is_empty();
+        if one_shot {
+            current.enabled = false;
+        }
+        one_shot
+    };
     surface_window(app);
     let _ = app.emit("alarm-fire", payload);
 
     // A one-shot alarm has now done its job.
-    if alarm.days.is_empty() {
-        let state = app.state::<AppState>();
-        let id = alarm.id.clone();
-        let _ = state.store.update(|d| {
-            if let Some(a) = d.alarms.iter_mut().find(|a| a.id == id) {
-                a.enabled = false;
-            }
-        });
+    if one_shot {
+        let _ = state.store.save();
         let _ = app.emit("alarms-updated", ());
     }
+    true
 }
 
 /// Stop the ringing: drop the always-on-top grab and clear the snooze.
@@ -293,8 +316,15 @@ pub fn snooze(app: &AppHandle, alarm_id: &str, minutes: u32) -> Result<i64, Stri
     let at = Local::now().timestamp() + (minutes.max(1) as i64) * 60;
     let state = app.state::<AppState>();
     {
+        let data = state.store.data.lock().unwrap();
+        if !data.alarms.iter().any(|alarm| alarm.id == alarm_id) {
+            return Err("that alarm is no longer saved".into());
+        }
         let mut sched = state.sched.lock().unwrap();
-        sched.snoozed.insert(alarm_id.to_string(), at);
+        if sched.ringing.as_deref() != Some(alarm_id) {
+            return Err("that alarm is no longer ringing".into());
+        }
+        sched.snoozed.insert(alarm_id.to_string(), schedule::Snooze::new(at));
         if sched.ringing.as_deref() == Some(alarm_id) {
             sched.ringing = None;
         }
@@ -315,8 +345,8 @@ pub fn next_alarm(app: &AppHandle) -> Option<NextAlarm> {
     let mut best: Option<(i64, &Alarm, bool)> = None;
     for alarm in &alarms {
         let mut candidates: Vec<(i64, bool)> = Vec::new();
-        if let Some(at) = snoozed.get(&alarm.id) {
-            candidates.push((*at, true));
+        if let Some(snooze) = snoozed.get(&alarm.id) {
+            candidates.push((snooze.at, true));
         }
         if alarm.enabled {
             if let Some(at) = schedule::next_occurrence(alarm.hour, alarm.minute, &alarm.days, &now)
@@ -356,34 +386,14 @@ fn tick(app: &AppHandle) {
     let busy = state.sched.lock().unwrap().ringing.is_some();
     let mut fired_this_pass = false;
 
-    let (due_snoozes, stale_snoozes, last_tick) = {
+    let (due_snooze, stale_snoozes, last_tick) = {
         let mut sched = state.sched.lock().unwrap();
         let last = sched.last_tick;
         sched.last_tick = now_secs;
 
-        let expired: Vec<(String, i64)> = sched
-            .snoozed
-            .iter()
-            .filter(|(_, at)| **at <= now_secs)
-            .map(|(id, at)| (id.clone(), *at))
-            .collect();
-
-        let mut due = Vec::new();
-        let mut stale = Vec::new();
-        for (id, at) in expired {
-            // Out of the map either way: a snooze left sitting in the past
-            // reports a negative countdown in the NEXT ALARM readout.
-            sched.snoozed.remove(&id);
-            if now_secs - at > schedule::CATCHUP_GRACE_SECS {
-                // Snoozes live in memory only, so a suspended machine can wake
-                // hours later with one still due. Ringing then is not waking
-                // anybody up on time, it is just a fright.
-                stale.push(id);
-            } else if busy {
-                sched.snoozed.insert(id, at);
-            } else {
-                due.push(id);
-            }
+        let (due, stale) = schedule::next_due_snooze(&mut sched.snoozed, now_secs, busy);
+        for id in &stale {
+            sched.holds.release(id);
         }
         (due, stale, last)
     };
@@ -393,10 +403,9 @@ fn tick(app: &AppHandle) {
         let _ = app.emit("alarms-updated", ());
     }
 
-    for id in due_snoozes {
+    if let Some(id) = due_snooze {
         if let Some(alarm) = alarms.iter().find(|a| a.id == id) {
-            fire(app, alarm, "snooze");
-            fired_this_pass = true;
+            fired_this_pass = fire(app, alarm, "snooze");
         }
     }
 
@@ -428,12 +437,7 @@ fn tick(app: &AppHandle) {
         if busy || fired_this_pass {
             continue;
         }
-        {
-            let mut sched = state.sched.lock().unwrap();
-            sched.fired.insert(alarm.id.clone(), key.clone());
-        }
-        fire(app, alarm, if missed { "catchup" } else { "scheduled" });
-        fired_this_pass = true;
+        fired_this_pass = fire(app, alarm, if missed { "catchup" } else { "scheduled" });
     }
 }
 

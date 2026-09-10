@@ -40,6 +40,16 @@ pub fn is_hls(body: &str) -> bool {
     body.contains("#EXT-X-")
 }
 
+/// The relay must honor every valid interval after asking for metadata. Its
+/// streaming stripper keeps only the metadata block, so the probe's buffer
+/// budget is not a limit on the distance between blocks.
+pub fn metadata_interval(raw: Option<&str>) -> Result<usize, &'static str> {
+    match raw {
+        None => Ok(0),
+        Some(value) => value.trim().parse().map_err(|_| "invalid icy-metaint header"),
+    }
+}
+
 /// A response head from a radio server.
 ///
 /// Shoutcast v1 answers `ICY 200 OK`, which is not an HTTP status line and
@@ -587,5 +597,32 @@ mod tests {
     fn spots_hls() {
         assert!(is_hls("#EXTM3U\n#EXT-X-VERSION:3\n"));
         assert!(!is_hls("#EXTM3U\nhttps://x/y.mp3\n"));
+    }
+
+    #[test]
+    fn strips_intervals_larger_than_a_probe_can_buffer() {
+        for metaint in [512 * 1024, 512 * 1024 + 1, 1024 * 1024] {
+            let raw = metaint.to_string();
+            let interval = metadata_interval(Some(&raw)).unwrap();
+            let mut strip = MetaStrip::new(interval);
+            let stream = stream_with(metaint, &["StreamTitle='Long interval';"]);
+            let mut audio = Vec::new();
+            let mut titles = Vec::new();
+            for chunk in stream.chunks(8191) {
+                titles.extend(strip.push(chunk, &mut audio));
+            }
+            assert_eq!(audio, vec![b'a'; metaint]);
+            assert_eq!(titles, ["Long interval"]);
+        }
+    }
+
+    #[test]
+    fn invalid_intervals_cannot_silently_turn_stripping_off() {
+        assert_eq!(metadata_interval(None), Ok(0));
+        assert_eq!(metadata_interval(Some("0")), Ok(0));
+        assert_eq!(metadata_interval(Some(&usize::MAX.to_string())), Ok(usize::MAX));
+        for raw in ["", "abc", "-1", "184467440737095516160"] {
+            assert!(metadata_interval(Some(raw)).is_err());
+        }
     }
 }

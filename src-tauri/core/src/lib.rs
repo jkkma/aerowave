@@ -9,5 +9,7 @@
 
 pub mod directory;
 pub mod icy;
+pub mod network;
 pub mod ring;
 pub mod schedule;
+pub mod settings;

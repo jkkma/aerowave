@@ -47,7 +47,12 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - The TEST button in the station editor does a two-part check, because the
   server answering and the player playing are still different questions: the
   Rust side proves the server answers, then a hidden media element proves the
-  player can decode it.
+  player can decode it. HLS uses its own hidden hls.js player for this check;
+  neither a readable manifest nor metadata alone counts as success.
+- A station whose format is not already known is resolved before playback so
+  an extensionless endpoint or a playlist pointing to HLS reaches hls.js. That
+  request also supplies the initial station headers, avoiding another immediate
+  metadata request. A known HLS directory entry can start its decoder directly.
 - `.pls` and `.m3u` links are followed to the real stream URL — in the relay
   now, so a playlist that does not admit to being one in its file name is
   followed just the same.
@@ -67,7 +72,10 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   A session will only fetch from origins the app has itself seen — the
   redirects it followed and the playlist bodies it served — because segments
   routinely live on a different host from the playlist, so same-origin scoping
-  would break a fifth of them.
+  would break a fifth of them. Every redirect and the actual DNS answers are
+  checked to keep those requests off loopback and private networks. HLS connects
+  directly instead of using system proxies so a proxy cannot bypass that check;
+  networks that require an outbound proxy cannot use this HLS path.
 - Now-playing for an HLS station is read from the ID3 tags inside the segments
   and queued against the playback clock, since a segment is parsed up to half a
   minute before it is audible. The tags are parsed here rather than by hls.js,
@@ -214,8 +222,7 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   reach are left out, duplicate submissions of one stream are collapsed, and
   anything that is not an `http(s)` address is dropped rather than saved as a
   station that could only ever fail.
-- HLS entries are flagged in the row rather than hidden: the station may well be
-  worth keeping, but WebView2 has no decoder for it.
+- HLS entries are flagged in the row and play through hls.js.
 - An added station is an ordinary station — editable, taggable, and usable as an
   alarm source like any other.
 
@@ -249,6 +256,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   it does reads as a different alarm rather than the one you set. Dismissing it
   ends the hold, so the next day draws again — as does pointing the alarm at
   another folder, or the held file going missing between snoozes.
+- Due snoozes wait their turn while another alarm rings. Turning an alarm off
+  cancels its pending snooze; a test ring can be dismissed but cannot schedule
+  a real snooze.
 - No repeat days set means "once, at the next occurrence", and the alarm disables
   itself afterwards.
 - Fade-in ramps the volume over up to 90 s.

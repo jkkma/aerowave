@@ -47,7 +47,23 @@ python -B tools/hooks/core_tests.py
 python -B tools/hooks/check_version.py --strict
 python -B tools/hooks/check_seam.py
 python -B -m unittest discover -s tools/hooks/tests -v
+node --test tools/tests/*.test.cjs
+cargo run --manifest-path src-tauri/Cargo.toml --example networkcheck --locked
 ```
+
+The frontend tests run the actual application functions in an isolated DOM/media
+harness, covering delayed IPC, source replacement, station TEST readiness, HLS
+ranges, browse resets and keyboard event bubbling. They do not establish native
+WebView2 decoding or Windows keyboard delivery.
+
+`networkcheck` starts local fixture servers and exercises the production relay
+and HLS client without opening the app or its settings. It checks ICY stripping,
+redirect/address validation and byte ranges, then waits for the actual 8-second
+response-head and 30-second idle-stream deadlines. It makes no broadcaster calls.
+
+The core-test hook owns its subprocess tree. On Windows a job object is attached
+before Cargo can start, so a timeout terminates test descendants too. Hook JSON
+and Git's repository path are decoded as UTF-8 regardless of the Windows code page.
 
 Pass every proposed target to `guard_vendor.py` before editing through another
 tool. With no paths, `core_tests.py` runs the core suite; with paths, it runs
