@@ -6,6 +6,61 @@ function folderHarness(pick) {
   return createHarness({ invoke: (command) => command === "random_track" ? pick.promise : undefined });
 }
 
+for (const routed of [null, "http://127.0.0.1:1234/f/private-token"]) {
+  test(`local files use ${routed ? "the scoped media route" : "the platform asset URL"}`, async () => {
+    const h = createHarness({ invoke: (command) => command === "local_file_url" ? routed : undefined });
+    await h.evaluate("play({ kind: 'folder', path: '/music/track.wav', url: 'asset://track.wav', title: 'Track' })");
+    assert.equal(h.audios[0].src, routed || "asset://track.wav");
+    assert.equal(h.calls.find(({ command }) => command === "local_file_url").args.path, "/music/track.wav");
+    assert.equal(h.calls.some(({ command }) => command === "relay_url"), false);
+  });
+}
+
+for (const rejects of [false, true]) {
+  test(`a late local-file route ${rejects ? "failure" : "reply"} cannot replace a newer station`, async () => {
+    const route = deferred();
+    const h = createHarness({ invoke: (command) => command === "local_file_url" ? route.promise : undefined });
+    const old = h.evaluate("play({ kind: 'folder', path: '/music/old.wav', url: 'asset://old.wav', title: 'Old' })");
+    await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Live' })");
+    const current = h.audios[0].src;
+    if (rejects) route.reject(new Error("old file disappeared"));
+    else route.resolve("http://127.0.0.1:1234/f/old");
+    await old;
+    assert.equal(h.evaluate("player.source.title"), "Live");
+    assert.equal(h.audios[0].src, current);
+    assert.equal(h.calls.some(({ command }) => command === "backup_track"), false);
+  });
+}
+
+test("a delayed local route cannot restart an alarm that is fading out", async () => {
+  const route = deferred();
+  const h = createHarness({ invoke: (command) => command === "local_file_url" ? route.promise : undefined });
+  h.evaluate("ringing = { alarmId: 'wake' }");
+  const pending = h.evaluate("play({ kind: 'folder', path: '/music/alarm.wav', url: 'asset://alarm.wav', title: 'Alarm' }, { fadeSecs: 20 })");
+  h.evaluate("giveUp()");
+  const fade = h.evaluate("player.fadeTimer");
+  route.resolve("http://127.0.0.1:1234/f/alarm");
+  await pending;
+  assert.equal(h.audios[0].src, "");
+  assert.equal(h.evaluate("givingUp"), true);
+  assert.equal(h.evaluate("player.fadeTimer"), fade);
+});
+
+test("pause while a local route is pending keeps the file paused until resume", async () => {
+  const route = deferred();
+  const h = createHarness({ invoke: (command) => command === "local_file_url" ? route.promise : undefined });
+  const pending = h.evaluate("play({ kind: 'folder', path: '/music/track.wav', url: 'asset://track.wav', title: 'Track' })");
+  h.evaluate("pausePlayback()");
+  route.resolve("http://127.0.0.1:1234/f/track");
+  await pending;
+  assert.equal(h.audios[0].paused, true);
+  assert.equal(h.evaluate("player.paused"), true);
+  h.evaluate("resumePlayback()");
+  await flush();
+  assert.equal(h.audios[0].src, "http://127.0.0.1:1234/f/track");
+  assert.equal(h.audios[0].paused, false);
+});
+
 test("a folder pick cannot restart playback after Stop", async () => {
   const pick = deferred();
   const h = folderHarness(pick);
@@ -56,7 +111,7 @@ test("a late playlist probe cannot overwrite a newer station's resolved URL", as
   assert.equal(h.evaluate("player.source.title"), "B");
   assert.equal(h.evaluate("player.resolved"), "https://radio.test/b");
   assert.equal(h.evaluate("player.hls"), false);
-  assert.notEqual(h.el("#status-msg").textContent, "OLD WARNING");
+  assert.notEqual(h.el("#status-msg").textContent, "old warning");
 });
 
 test("extensionless HLS discovered by resolution uses hls.js without a relay", async () => {

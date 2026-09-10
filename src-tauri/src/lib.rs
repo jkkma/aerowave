@@ -58,11 +58,41 @@ pub struct TrackPick {
     pub total: usize,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalTime {
+    at_ms: i64,
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+}
+
 // ---------------------------------------------------------------- commands
 
 #[tauri::command]
 fn get_state(state: State<AppState>) -> AppData {
     state.store.snapshot()
+}
+
+/// Use the scheduler's OS timezone rules even when the webview's bundled
+/// timezone database is older. Convert each instant, including future DST.
+#[tauri::command]
+fn local_time(at_ms: Option<i64>) -> Result<LocalTime, String> {
+    let at_ms = at_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+    let time = aerowave_core::clock::local_time(&chrono::Local, at_ms)
+        .ok_or_else(|| "that time is outside the supported date range".to_string())?;
+    Ok(LocalTime {
+        at_ms: time.at_ms,
+        year: time.year,
+        month: time.month,
+        day: time.day,
+        hour: time.hour,
+        minute: time.minute,
+        second: time.second,
+    })
 }
 
 #[tauri::command]
@@ -234,7 +264,7 @@ fn sync_autostart(app: &AppHandle, _state: &AppState, want: bool, _explicit: Opt
     } else {
         manager.disable()
     };
-    result.map_err(|e| format!("settings saved, but start-with-Windows failed: {e}"))
+    result.map_err(|e| format!("settings saved, but start-at-login failed: {e}"))
 }
 
 /// Open the folder picker. Async so the dialog does not block the main
@@ -310,7 +340,7 @@ fn hls_session(state: State<'_, AppState>, url: String) -> Option<String> {
     state
         .hls
         .open(&url)
-        .map(|session| format!("http://awhls.localhost/{session}"))
+        .map(|session| format!("{HLS_ORIGIN}/{session}"))
 }
 
 #[tauri::command]
@@ -413,6 +443,38 @@ struct IcyTitle {
 fn relay_url(state: State<'_, AppState>, url: String) -> Option<String> {
     let relay = state.relay.lock().unwrap();
     relay.as_ref().map(|r| r.route(&url))
+}
+
+/// WebKitGTK cannot stream media from Tauri's asset protocol. Only files
+/// already granted to that protocol may receive a loopback playback token.
+#[tauri::command]
+fn local_file_url(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Option<String>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let scope = app.asset_protocol_scope();
+        if !scope.is_allowed(&path) {
+            return Err("audio file has not been granted access".to_string());
+        }
+        let path = std::fs::canonicalize(path)
+            .map_err(|e| format!("could not locate audio file: {e}"))?;
+        if !scope.is_allowed(&path) {
+            return Err("audio file has not been granted access".to_string());
+        }
+        let relay = state.relay.lock().unwrap();
+        let relay = relay
+            .as_ref()
+            .ok_or_else(|| "local audio relay is not available".to_string())?;
+        relay.route_file(&path).map(Some)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, state, path);
+        Ok(None)
+    }
 }
 
 #[tauri::command]
@@ -609,12 +671,18 @@ fn pending_alarm(app: AppHandle, state: State<AppState>) -> Option<FirePayload> 
     }
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-/// Where the webview itself is served from. Tauri v2 uses this on Windows;
-/// it is the only origin the HLS protocol answers.
+// Tauri maps custom protocols onto HTTP hosts on Windows. WebKit uses the
+// schemes directly, so both the loader URL and its CORS reply must match.
+#[cfg(windows)]
 const WEBVIEW_ORIGIN: &str = "http://tauri.localhost";
+#[cfg(not(windows))]
+const WEBVIEW_ORIGIN: &str = "tauri://localhost";
+#[cfg(windows)]
+const HLS_ORIGIN: &str = "http://awhls.localhost";
+#[cfg(not(windows))]
+const HLS_ORIGIN: &str = "awhls://localhost";
 
-
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let hls_state: Arc<hls::Hls> = Arc::new(hls::Hls::default());
     let hls_protocol = hls_state.clone();
@@ -735,6 +803,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            local_time,
             save_stations,
             save_alarms,
             save_settings,
@@ -744,6 +813,7 @@ pub fn run() {
             backup_track,
             probe_stream,
             relay_url,
+            local_file_url,
             hls_session,
             hls_close,
             browse_stations,

@@ -24,20 +24,23 @@ const shuffleFolder = () => state.settings.shuffleFolder || null;
 
 // ---------------------------------------------------------------- clock ---
 
-function fmtClock(d, withSeconds) {
+let clockNow = null;
+let clockRequest = 0;
+
+function fmtClock(time, withSeconds) {
   const h24 = state.settings.clock24h !== false;
-  let h = d.getHours();
+  let h = time.hour;
   let suffix = "";
   if (!h24) {
     suffix = h < 12 ? " AM" : " PM";
     h = h % 12 || 12;
   }
-  const core = `${h24 ? pad2(h) : h}:${pad2(d.getMinutes())}`;
-  return (withSeconds ? `${core}:${pad2(d.getSeconds())}` : core) + suffix;
+  const core = `${h24 ? pad2(h) : h}:${pad2(time.minute)}`;
+  return (withSeconds ? `${core}:${pad2(time.second)}` : core) + suffix;
 }
 
 function fmtAlarmTime(hour, minute) {
-  return fmtClock(new Date(2000, 0, 1, hour, minute), false);
+  return fmtClock({ hour, minute }, false);
 }
 
 function fmtDuration(secs) {
@@ -49,12 +52,24 @@ function fmtDuration(secs) {
   return `${secs}s`;
 }
 
-function tickClock() {
-  const now = new Date();
-  $("#tb-clock").textContent = fmtClock(now, true);
-  $("#tb-date").textContent = now
-    .toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "short" })
-    .toUpperCase();
+async function tickClock() {
+  const request = ++clockRequest;
+  try {
+    // The webview may carry older timezone rules than the OS scheduler.
+    // Rust supplies wall time; the browser only supplies date language.
+    const now = await invoke("local_time");
+    if (request !== clockRequest) return;
+    clockNow = now;
+    $("#tb-clock").textContent = fmtClock(now, true);
+    $("#tb-date").textContent = new Date(Date.UTC(now.year, now.month - 1, now.day))
+      .toLocaleDateString(undefined, { timeZone: "UTC", weekday: "short", day: "2-digit", month: "short" })
+      .toUpperCase();
+  } catch {
+    if (request !== clockRequest) return;
+    clockNow = null;
+    $("#tb-clock").textContent = "--:--:--";
+    $("#tb-date").textContent = "Clock unavailable";
+  }
 }
 
 // -------------------------------------------------------------- signals ---
@@ -67,9 +82,9 @@ function setStatus(text, lamp) {
 let statusMsgTimer = null;
 function say(msg, mood, sticky) {
   const el = $("#status-msg");
-  el.textContent = msg.toUpperCase();
+  el.textContent = msg;
   el.style.color = mood === "bad" ? "var(--alert)" : mood === "good" ? "var(--alien)" : "";
-  // Announce it too. This one is never cleared, so the reset to READY is not
+  // Announce it too. This one is never cleared, so the reset to Ready is not
   // read out over whatever the user is doing.
   const log = $("#a11y-log");
   if (log) log.textContent = msg;
@@ -78,7 +93,7 @@ function say(msg, mood, sticky) {
   // must not scroll past while the user is looking at another tab.
   if (sticky) return;
   statusMsgTimer = setTimeout(() => {
-    el.textContent = "READY";
+    el.textContent = "Ready";
     el.style.color = "";
   }, 6000);
 }
@@ -170,9 +185,9 @@ function stopPlayback(quiet) {
   markPlaying(false);
   if (!quiet) {
     setOrbArt(null);
-    setStatus("STANDBY", "");
-    $("#np-station").textContent = "NO CARRIER";
-    $("#np-track").textContent = "Pick a station, choose a folder, or set an alarm.";
+    setStatus("Stopped", "");
+    $("#np-station").textContent = "Ready to listen";
+    $("#np-track").textContent = "Browse stations or play music from a folder.";
     $("#np-meta").textContent = "";
   }
 }
@@ -592,12 +607,15 @@ async function startHls(source, url, generation) {
  * measured User-Agent and resolves playlists, redirects and Shoutcast v1 on
  * the way past. See src-tauri/src/relay.rs.
  *
- * Files are not relayed: they are already playable and there is nothing to
- * negotiate. Nor is anything relayed when the listener would not bind, in
- * which case this hands back the URL untouched and playback is what it was
- * before the relay existed.
+ * WebKitGTK cannot reliably play files from the asset protocol, so Linux
+ * serves files already granted by the picker through the same listener.
+ * Other platforms keep the asset URL. Stations can still connect directly
+ * when the relay is unavailable.
  */
 async function playable(source, url) {
+  if (source.kind === "folder" && source.path) {
+    return await invoke("local_file_url", { path: source.path }) || url;
+  }
   if (source.kind !== "station") return url;
   try {
     const relayed = await invoke("relay_url", { url });
@@ -626,7 +644,7 @@ async function play(source, opts = {}) {
   setOrbArt(source);
   markPlaying(true);
 
-  setStatus("CONNECTING", "busy");
+  setStatus("Connecting", "busy");
   // A resumed station keeps the manifest reached through its playlist wrapper.
   // The original URL still identifies the station in BROWSE and the saved list.
   let url = source.hls && source.hlsUrl ? source.hlsUrl : source.url;
@@ -668,8 +686,14 @@ async function play(source, opts = {}) {
     if (!(await startHls(source, url, generation))) return;
     if (superseded(generation)) return;
   } else {
-    const playUrl = await playable(source, url);
-    if (superseded(generation)) return;
+    let playUrl;
+    try {
+      playUrl = await playable(source, url);
+    } catch (e) {
+      if (!superseded(generation) && !givingUp) failure(String(e));
+      return;
+    }
+    if (superseded(generation) || givingUp) return;
     player.relayed = playUrl !== url;
     setAudioSource(playUrl);
   }
@@ -678,16 +702,17 @@ async function play(source, opts = {}) {
   audio.loop = !!source.loop;
   audio.volume = opts.fadeSecs > 0 ? 0.02 : volume;
   player.target = volume;
+  if (player.paused || givingUp) return;
   try {
     await audio.play();
   } catch (e) {
     // Autoplay refusals and decode errors land here - but so do aborts from
     // this code starting something else, which must not count as a failure.
-    if (superseded(generation) || isAbort(e)) return;
+    if (superseded(generation) || givingUp || isAbort(e)) return;
     failure(String(e && e.message ? e.message : e));
     return;
   }
-  if (superseded(generation)) return;
+  if (superseded(generation) || player.paused || givingUp) return;
   if (opts.fadeSecs > 0) fadeTo(volume, opts.fadeSecs);
 
   if (source.kind === "station" && !player.hls) startMetadata(source, initialInfo);
@@ -886,13 +911,13 @@ function failure(detail, opts = {}) {
 
   if (source.kind === "folder") {
     if (source.folder === BACKUP || !source.folder) {
-      setStatus("TRACK FAILED", "error");
+      setStatus("Could not play track", "error");
       say("could not play that file: " + detail, "bad");
       stopPlayback();
       return;
     }
     // A file from the shuffle folder would not play; move on to another one.
-    setStatus("SKIPPING", "busy");
+    setStatus("Skipping", "busy");
     playRandomFromFolder(source.folder, { volume: player.target, silentErrors: true });
     return;
   }
@@ -905,7 +930,7 @@ function failure(detail, opts = {}) {
     return;
   }
   const wait = 1500 * player.retries;
-  setStatus("RECONNECTING " + player.retries + "/4", "busy");
+  setStatus("Reconnecting " + player.retries + "/4", "busy");
   clearTimeout(player.retryTimer);
   player.retryTimer = setTimeout(async () => {
     // Snapshot before the await, not after: taken afterwards this could only
@@ -972,7 +997,7 @@ async function fallBackToDirect(source, generation) {
   if (source.hls) {
     if (!(await startHls(source, upstream, generation))) return;
   } else {
-    setStatus("RETRYING DIRECT", "busy");
+    setStatus("Trying another connection", "busy");
     setAudioSource(upstream);
   }
   audio.play().catch((e) => {
@@ -998,7 +1023,7 @@ audio.addEventListener("playing", () => {
   switchingSource = false;
   if (!player.source) return;
   player.retries = 0;
-  setStatus(player.source.kind === "folder" ? "PLAYING FILE" : "ON AIR", "on");
+  setStatus(player.source.kind === "folder" ? "Playing your music" : "Live radio", "on");
 });
 // The only event that means audio is genuinely coming out, rather than that
 // something was asked to start.
@@ -1034,8 +1059,8 @@ audio.addEventListener("pause", () => {
   if (audio.ended) return;
   stopPlayback();
 });
-audio.addEventListener("waiting", () => player.source && setStatus("BUFFERING", "busy"));
-audio.addEventListener("stalled", () => player.source && setStatus("STALLED", "busy"));
+audio.addEventListener("waiting", () => player.source && setStatus("Buffering", "busy"));
+audio.addEventListener("stalled", () => player.source && setStatus("Waiting for audio", "busy"));
 audio.addEventListener("error", () => {
   const err = audio.error;
   console.error(
@@ -1142,6 +1167,7 @@ async function playRandomFromFolder(folder, opts = {}) {
       {
         kind: "folder",
         url: convertFileSrc(pick.path),
+        path: pick.path,
         title: pick.name.replace(/\.[^.]+$/, ""),
         subtitle: `${pick.total} track${pick.total === 1 ? "" : "s"} in the folder`,
         folder,
@@ -1178,7 +1204,7 @@ function pausePlayback() {
   audio.pause();
   markPlaying(false);
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
-  setStatus("PAUSED", "");
+  setStatus("Paused", "");
 }
 
 /**
@@ -1193,7 +1219,7 @@ function resumePlayback() {
   player.paused = false;
   if (source.kind === "folder") {
     markPlaying(true);
-    setStatus("PLAYING FILE", "on");
+    setStatus("Playing your music", "on");
     audio.play().catch((e) => {
       if (!isAbort(e)) failure(String(e && e.message ? e.message : e));
     });
@@ -1710,7 +1736,6 @@ function previewBrowse(st) {
     stationId: null,
     hls: !!st.hls,
   });
-  if (st.hls) say("HLS — this one plays through hls.js");
   // Nothing in the saved list is playing any more; both lists should say so.
   renderStations();
   renderBrowse();
@@ -1742,7 +1767,7 @@ function renderBrowse() {
   if (!browseResults.length) {
     const li = document.createElement("li");
     li.className = "empty";
-    li.textContent = browseBusy ? "Searching…" : "Search the directory, or pick a tag.";
+    li.textContent = browseBusy ? "Searching…" : "Search for a station, or explore by country and genre.";
     list.append(li);
     return;
   }
@@ -1812,7 +1837,7 @@ function renderBrowse() {
   tail.className = "empty";
   const more = document.createElement("button");
   more.className = "gel";
-  more.textContent = browseBusy ? "LOADING…" : "MORE";
+  more.textContent = browseBusy ? "Loading…" : "More stations";
   more.disabled = browseBusy;
   more.addEventListener("click", () => browseSearch(true));
   tail.append(more);
@@ -1870,6 +1895,7 @@ async function playBackupTrack(reason, opts = {}) {
       {
         kind: "folder",
         url: convertFileSrc(pick.path),
+        path: pick.path,
         title,
         subtitle: reason || "from the backup folder",
         folder: BACKUP,
@@ -1877,7 +1903,7 @@ async function playBackupTrack(reason, opts = {}) {
       opts
     );
     // Say what is actually ringing, not what was supposed to.
-    if (ringing) $("#ring-source").textContent = "BACKUP FOLDER · " + title.toUpperCase();
+    if (ringing) $("#ring-source").textContent = "Backup music · " + title;
     return true;
   } catch (e) {
     // Same again: a ring that has ended must not have its card rewritten.
@@ -1885,8 +1911,8 @@ async function playBackupTrack(reason, opts = {}) {
     if (ringing) {
       goSilent(String(e));
     } else {
-      setStatus("OFF AIR", "error");
-      showNowPlaying("NO CARRIER", reason || "", String(e));
+      setStatus("Station unavailable", "error");
+      showNowPlaying("Unable to connect", reason || "", String(e));
       stopPlayback(true);
       markPlaying(false);
     }
@@ -1901,8 +1927,8 @@ function goSilent(why) {
   stopPlayback(true);
   markPlaying(false);
   $("#ringcard").classList.add("silent");
-  $("#ring-trigger").textContent = "ALARM - NO SOUND";
-  $("#ring-source").textContent = "NOTHING TO PLAY";
+  $("#ring-trigger").textContent = "Alarm · no sound";
+  $("#ring-source").textContent = "No audio available";
   const advice = state.settings.backupFolder
     ? "Check the backup folder in SETUP."
     : "Set a backup folder in SETUP so this alarm can always ring.";
@@ -1959,14 +1985,14 @@ function onAlarmFire(payload) {
 
   const overlay = $("#ringing");
   $("#ring-trigger").textContent =
-    payload.trigger === "snooze" ? "SNOOZE OVER"
-      : payload.trigger === "catchup" ? "MISSED ALARM"
-      : payload.trigger === "test" ? "ALARM TEST"
-      : "ALARM";
+    payload.trigger === "snooze" ? "Snooze ended"
+      : payload.trigger === "catchup" ? "Missed alarm"
+      : payload.trigger === "test" ? "Alarm test"
+      : "Alarm";
   $("#ring-time").textContent = fmtAlarmTime(payload.hour, payload.minute);
   $("#ring-label").textContent = payload.label || "Alarm";
   $("#ring-source").textContent =
-    (payload.kind === "station" ? "STATION · " : payload.kind === "folder" ? "SHUFFLE · " : "") +
+    (payload.kind === "station" ? "Station · " : payload.kind === "folder" ? "Your music · " : "") +
     (payload.title || "");
   $("#ring-note").textContent = payload.note || "";
   $("#ring-snooze-mins").textContent = payload.snoozeMins + " min";
@@ -2006,6 +2032,7 @@ function onAlarmFire(payload) {
       {
         kind: "folder",
         url: convertFileSrc(payload.path),
+        path: payload.path,
         title: payload.title,
         subtitle: payload.label,
         folder,
@@ -2134,21 +2161,29 @@ async function snoozeRing(why) {
   }
 }
 
+let nextAlarmRequest = 0;
+
 async function refreshNextAlarm() {
+  const request = ++nextAlarmRequest;
   let next = null;
   try {
     next = await invoke("next_alarm");
   } catch { /* nothing scheduled */ }
+  if (request !== nextAlarmRequest) return;
   const box = $("#next-alarm");
   const bar = $("#status-next");
   if (!next) {
-    box.textContent = "NO ALARM SET";
+    box.textContent = "No alarm set";
     bar.textContent = "";
     return;
   }
-  const when = new Date(next.atMs);
+  let when = null;
+  try {
+    when = await invoke("local_time", { atMs: next.atMs });
+  } catch { /* the countdown remains useful without a wall-time reading */ }
+  if (request !== nextAlarmRequest) return;
   const label = next.label ? next.label + " · " : "";
-  const text = `${next.snoozed ? "SNOOZED" : "NEXT"} ${label}${fmtClock(when, false)} — IN ${fmtDuration(next.inSecs)}`;
+  const text = `${next.snoozed ? "Snoozed" : "Next"} ${label}${when ? fmtClock(when, false) + " · " : ""}in ${fmtDuration(next.inSecs)}`;
   box.textContent = text;
   bar.textContent = text;
 }
@@ -2166,7 +2201,7 @@ function renderStations() {
   if (!visibleStations.length) {
     const li = document.createElement("li");
     li.className = "empty";
-    li.textContent = state.stations.length ? "Nothing matches that filter." : "No stations yet.";
+    li.textContent = state.stations.length ? "Nothing matches that filter." : "Save stations from Browse, or add a stream URL.";
     list.append(li);
     return;
   }
@@ -2269,7 +2304,7 @@ function renderAlarms() {
   if (!sorted.length) {
     const li = document.createElement("li");
     li.className = "empty";
-    li.textContent = "No alarms. Add one and it will ring even with the window hidden.";
+    li.textContent = "Wake up to a station or your own music. Add your first alarm.";
     list.append(li);
     return;
   }
@@ -2342,7 +2377,7 @@ async function refreshFolderLabels() {
     const el = $(row.selector);
     if (!row.path) {
       el.textContent = row.critical
-        ? "No folder chosen — alarms have nothing to fall back on"
+        ? "No backup folder chosen"
         : "No folder chosen";
       el.classList.toggle("warn", row.critical);
       continue;
@@ -2453,8 +2488,11 @@ function newId() {
 const editorUses12h = () => state.settings.clock24h === false;
 let editorPm = false;
 let editorQuickMins = 0;
+let editorTimeRequest = 0;
+let editorPendingTime = 0;
 
 function setEditorTime(hour, minute, quickMins = 0) {
+  ++editorTimeRequest;
   // Only the RING IN chips pass a span, so every other way of moving the
   // time - typing, the steppers, AM/PM - puts the row back to nothing lit.
   editorQuickMins = quickMins;
@@ -2495,14 +2533,24 @@ function syncTimeUi() {
  * minute because the scheduler fires on the minute, and a nap set for
  * fifteen minutes should not go off in fourteen and a bit.
  */
-function setEditorTimeIn(mins) {
-  const at = new Date(Date.now() + mins * 60000);
-  if (at.getSeconds() > 0) at.setMinutes(at.getMinutes() + 1);
+async function setEditorTimeIn(mins) {
+  const request = ++editorTimeRequest;
+  editorPendingTime = request;
+  const atMs = Math.ceil((Date.now() + mins * 60000) / 60000) * 60000;
+  let at;
+  try {
+    at = await invoke("local_time", { atMs });
+  } catch (error) {
+    if (editorPendingTime === request) editorPendingTime = 0;
+    if (request === editorTimeRequest) say("Could not read the alarm time: " + error, "bad");
+    return;
+  }
+  if (request !== editorTimeRequest) return;
   // A span from now can only happen once. Leaving days selected would give
   // an alarm that repeats at that time instead - not what the chip says.
   editorDays = [];
   $$("#al-days button").forEach((b) => b.classList.remove("on"));
-  setEditorTime(at.getHours(), at.getMinutes(), mins);
+  setEditorTime(at.hour, at.minute, mins);
 }
 
 /** AM and PM mean nothing on a 24-hour clock, so the pair comes and goes
@@ -2541,7 +2589,7 @@ function setKind(kind) {
   if (!state.settings.backupFolder) {
     note.className = "editor-note bad";
     note.textContent +=
-      " No backup folder is set, so this alarm has nothing to fall back on - set one in SETUP.";
+      " Choose backup music in Settings in case this source is unavailable.";
   }
 }
 
@@ -2595,15 +2643,19 @@ function syncAutoSnooze() {
 }
 
 function openAlarmEditor(alarm) {
+  if (!alarm && !clockNow) {
+    say("Could not read the system clock. Try again.", "bad");
+    tickClock();
+    return;
+  }
   editingAlarm = alarm || null;
-  const now = new Date();
   // A new alarm opens on the last one that was saved. Somebody who wakes to
   // the same station, fading in over the same twenty seconds, should not have
   // to say so again - but the time and the label are theirs to fill in, so
   // those two start empty however the last one was set.
   const last = state.settings.alarmDefaults || {};
   const base = alarm || {
-    hour: (now.getHours() + 1) % 24,
+    hour: (clockNow.hour + 1) % 24,
     minute: 0,
     days: last.days || [],
     label: "",
@@ -2662,11 +2714,15 @@ function rememberAlarmSetup(alarm) {
 }
 
 function closeAlarmEditor() {
+  ++editorTimeRequest;
   editingAlarm = null;
   $("#alarm-editor").classList.add("hidden");
 }
 
 function readAlarmEditor() {
+  if (editorPendingTime === editorTimeRequest && editorPendingTime !== 0) {
+    return { error: "Wait for the alarm time to finish updating." };
+  }
   const { hour, minute } = readEditorTime();
   let source;
   if (editorKind === "station") {
@@ -2748,7 +2804,7 @@ setInterval(() => {
     sleepFading = true;
     fadeOut(Math.max(1, left / 1000));
   }
-  $("#sleep-left").textContent = fmtDuration(left / 1000) + " LEFT";
+  $("#sleep-left").textContent = fmtDuration(left / 1000) + " left";
 }, 1000);
 
 // ---------------------------------------------------------------- wiring ---
@@ -2944,6 +3000,7 @@ function wire() {
 
   $$("#al-days button").forEach((btn) =>
     btn.addEventListener("click", () => {
+      ++editorTimeRequest;
       const day = +btn.dataset.day;
       const i = editorDays.indexOf(day);
       if (i >= 0) editorDays.splice(i, 1);
@@ -2969,6 +3026,7 @@ function wire() {
   ["al-hour", "al-minute"].forEach((id) => {
     const field = $("#" + id);
     field.addEventListener("input", () => {
+      ++editorTimeRequest;
       editorQuickMins = 0; // a typed time is no longer a span from now
       syncTimeUi();
     });
@@ -3108,7 +3166,7 @@ function wire() {
 async function showBuildLabel() {
   try {
     const version = await window.__TAURI__.app.getVersion();
-    $("#build-label").textContent = "AERO CONSOLE v" + version;
+    $("#build-label").textContent = "Radio & alarms · " + version;
   } catch {
     /* the label reads fine without it */
   }
@@ -3130,7 +3188,7 @@ async function showConfigLocation() {
       problem.className = "wherefrom warn";
       problem.textContent = where.loadError;
       line.after(problem);
-      say("settings could not be loaded - see SETUP", "bad", true);
+      say("Settings could not be loaded. See Settings for details.", "bad", true);
     }
   } catch {
     /* nothing worth saying if the backend will not tell us */
@@ -3140,8 +3198,8 @@ async function showConfigLocation() {
 // ----------------------------------------------------------------- boot ---
 
 async function boot() {
+  await tickClock();
   wire();
-  tickClock();
   setInterval(tickClock, 1000);
   setInterval(refreshNextAlarm, 20000);
 
@@ -3173,7 +3231,7 @@ async function boot() {
 
   showBuildLabel();
   showConfigLocation();
-  say("aerowave online", "good");
+  say("Ready to listen", "good");
 }
 
 boot().catch((e) => {

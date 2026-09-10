@@ -1,7 +1,7 @@
 # Aerowave
 
-An internet radio player that is also an alarm clock, in Rust + Tauri v2: glossy
-Frutiger Aero glass over retro-console gunmetal, with a low-poly orb turning
+An internet radio player that is also an alarm clock, in Rust + Tauri v2:
+Frutiger Aero glass over a blue-green background, with a low-poly orb turning
 slowly at the centre of it in WebGL. Click it and it hops.
 
 Wake up to a radio station, or to a random track out of a folder you point it at.
@@ -262,7 +262,7 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - No repeat days set means "once, at the next occurrence", and the alarm disables
   itself afterwards.
 - Fade-in ramps the volume over up to 90 s.
-- **Everything falls back to the backup folder.** Set one in SETUP and it stands in
+- **Everything falls back to the backup folder.** Set one in Settings and it stands in
   whenever an alarm's own source will not make a sound: a station that 404s, a
   stream that has not started within twelve seconds, a station you deleted, a
   folder that has moved, a file that will not decode. If even the backup folder
@@ -275,6 +275,22 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - Ringing raises the window over whatever else is on screen.
 
 ## Installing it
+
+### Zorin OS / Ubuntu Linux
+
+Download the x64 `.deb` from [Releases](https://github.com/jkkma/aerowave/releases),
+then install it with `sudo apt install ./Aerowave_<version>_amd64.deb` from the
+download directory. Open Aerowave from the applications menu. The package declares
+the WebKitGTK and GStreamer dependencies needed for the interface and audio
+playback. The 0.10.0 package was built and tested on Zorin OS 18.1 / Ubuntu 24.04.
+
+To build from source, follow the [Linux setup and testing guide](docs/linux-testing.md).
+
+Settings normally live in `~/.config/com.aerowave.radio/aerowave.json`, or under
+`$XDG_CONFIG_HOME/com.aerowave.radio/` when that variable is set. Settings shows the
+active settings location.
+
+### Windows
 
 With [Scoop](https://scoop.sh):
 
@@ -290,11 +306,11 @@ If you added that bucket before it moved out of `jkkma/nmkoder`, `scoop bucket r
 ayylmao` first: adding the same bucket twice under two names is what produces
 Scoop's `WARN Multiple buckets contain manifest ...` line.
 
-Or portable: take the zip from [Releases](https://github.com/jkkma/aerowave/releases),
+Or portable: take the Windows zip from [Releases](https://github.com/jkkma/aerowave/releases),
 unzip it anywhere and run `aerowave.exe`. Keep the `data` folder next to the exe and
 the copy stays portable — settings live in `data\aerowave.json` and the webview's
 cache in `data\webview\`, and nothing is written to your user profile. Delete `data`
-and it falls back to `%APPDATA%\com.aerowave.radio`. SETUP tells you which of the two
+and it falls back to `%APPDATA%\com.aerowave.radio`. Settings tells you which of the two
 a running copy is using.
 
 Either way it needs the WebView2 runtime, which ships with Windows 11 and current
@@ -314,7 +330,11 @@ or the checksum quoted in the release notes.
 
 ## Building it
 
-Needs Rust, Node, the MSVC or MinGW build tools and WebView2.
+On Linux, follow the [native Linux build instructions](docs/linux-testing.md).
+Tauri automatically merges `src-tauri/tauri.linux.conf.json` to build a `.deb`;
+Windows builds continue to produce the NSIS installer.
+
+On Windows, this needs Rust, Node, the MSVC or MinGW build tools and WebView2.
 
 ```
 npm install
@@ -335,18 +355,20 @@ tidying):
 cd src-tauri && cargo test --workspace
 ```
 
-They live in the `aerowave-core` crate. The app crate links WebView2 and the Win32
-GUI stack, and a test binary built from it will not load outside a real app
-process, so its harness is switched off in `Cargo.toml` and anything worth testing
-lives in `core/` instead.
+They live in the `aerowave-core` crate. On Windows the app crate links WebView2 and
+the Win32 GUI stack, and a test binary built from it will not load outside a real
+app process, so its harness is switched off in `Cargo.toml` and anything worth
+testing lives in `core/` instead. Linux uses WebKitGTK and GStreamer; a successful
+core test run does not establish native playback on either platform.
 
 ## How it is put together
 
 For development with Codex, start with [AGENTS.md](AGENTS.md). Project skills,
 reviewer agents and automated checks are included; see
 [checks and hook trust](docs/checks.md) for activation and standalone commands.
-The [Windows testing guide](docs/windows-testing.md) preserves native input and
-accessibility lessons, and the [development handoff](docs/development-handoff.md)
+The [Linux testing guide](docs/linux-testing.md) covers native builds and playback
+checks. The [Windows testing guide](docs/windows-testing.md) preserves native input
+and accessibility lessons, and the [development handoff](docs/development-handoff.md)
 records the older local work that still needs reconciliation with this version.
 
 ```
@@ -375,8 +397,10 @@ while you were already looking at it. The Rust thread ticks once a second and
 emits `alarm-fire`; the webview is told when to ring and what to play, and only
 does the playing. Snooze goes back through Rust for the same reason.
 
-Config lives in `data\aerowave.json` beside the exe when that folder exists, and in
-`%APPDATA%\com.aerowave.radio\aerowave.json` otherwise.
+Config lives in `data/aerowave.json` beside the executable when that folder exists.
+Otherwise it uses `%APPDATA%\com.aerowave.radio\aerowave.json` on Windows and
+`$XDG_CONFIG_HOME/com.aerowave.radio/aerowave.json` on Linux, with `~/.config` as the
+Linux default when `XDG_CONFIG_HOME` is unset.
 
 `python tools/package.py --build` produces the portable zip the Scoop manifest points
 at, and prints its SHA-256.
@@ -384,11 +408,11 @@ at, and prints its SHA-256.
 ## Notes and limits
 
 - Closing the window hides it to the tray by default, so alarms keep working.
-  Turn that off in SETUP, or use QUIT AEROWAVE to really exit. Alarms only ring
+  Turn that off in Settings, or use Quit Aerowave to really exit. Alarms only ring
   while Aerowave is running.
-- The one thing a portable copy writes outside its own folder is the
-  "Start with Windows" registry entry, which is off by default and is removed
-  again when you turn it off.
+- "Start at login" is off by default. It creates a Windows registry entry or a
+  Linux desktop autostart entry outside a portable copy's own folder, and removes
+  that entry when turned off.
 - The window is undecorated with its own titlebar, to get the glass look. It is
   draggable by the titlebar and resizable from the edges.
 - The orb is a flat-shaded icosahedron with a 64-pixel texture stretched over
@@ -403,10 +427,13 @@ at, and prints its SHA-256.
 - The orb is decorative. It is not an audio analyser — routing a cross-origin
   stream through Web Audio taints it and Chromium outputs silence, so its motion
   is time-based on purpose.
-- Local files reach the webview through Tauri's asset protocol, whose scope starts
-  empty; each picked file is opened to it individually at the moment it is chosen.
-- Everything renders in stock Windows fonts (Bahnschrift, Cascadia Mono, Segoe
-  UI) — the webview loads no webfonts.
+- Each picked local file is granted individually. Windows plays it through
+  Tauri's asset protocol; Linux serves the granted file through the loopback
+  listener, with byte ranges for seeking, because WebKitGTK cannot reliably
+  play audio from a custom scheme. File URLs use opaque tokens, and the
+  listener never accepts filesystem paths from HTTP requests.
+- The interface uses native system fonts with local monospace fallbacks for
+  the clock and readouts; the webview loads no webfonts.
 
 ## Licence
 
