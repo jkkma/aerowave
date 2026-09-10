@@ -46,9 +46,22 @@ did not commit, release or validate the feature implementation.
 
 ## Migration coverage
 
-The project had no local agent instruction file, custom commands, skills, hooks,
+At the original handoff, this checkout had no local agent instruction file,
+custom commands, skills, hooks,
 MCP configuration or model/API dependency to translate. Its persistent window
 testing note has been incorporated into `docs/windows-testing.md`, updated to
 use the existing `Aw-Press` helper. The recent session's unfinished-work context
 is recorded above. Neither document requires access to the former agent's
 storage. Original session archives and computer-wide settings remain intact.
+
+The subsequent migration brought the native reviewers, explicit release and
+station-triage skills, and four hook scripts into this checkout from the later
+Codex migration. Their instructions match this branch's actual app: it has
+direct playback and `probe_stream`, with no relay or HLS implementation. The
+application history was not merged and the feature edits above were preserved.
+Read [checks.md](checks.md) for hook trust and standalone validation.
+
+The version check exposed an existing inconsistency: both root versions in
+`package-lock.json` were `0.1.0`, while the source manifests say `0.2.1`. The
+migration synchronized only those two metadata fields, preserving the dependency
+lock and all unfinished feature edits. The strict version check now passes.
