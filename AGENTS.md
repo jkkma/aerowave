@@ -2,7 +2,9 @@
 
 Read `README.md` for the product behavior, build prerequisites and repository map.
 Read `docs/development-handoff.md` when resuming unfinished work and
-`docs/windows-testing.md` before testing the native window.
+`docs/windows-testing.md` before testing the native window. Native Codex reviewers
+live in `.codex/agents/`, reusable workflows in `.agents/skills/`, and hook wiring
+in `.codex/hooks.json`. Read `docs/checks.md` for hook trust and manual checks.
 
 ## Working agreements
 
@@ -12,7 +14,9 @@ Read `docs/development-handoff.md` when resuming unfinished work and
   patches for edits. Follow `.gitattributes`: PowerShell files use CRLF; other
   text uses LF. Avoid unrelated formatting.
 - Scout inline first. Keep each workflow within 16 spawned agents, including
-  nested fan-out; calculate the maximum before delegating.
+  nested fan-out; calculate the maximum before delegating. The playback and
+  core-testability reviewers are optional for relevant changes; they do not
+  delegate further and inherit the current session model.
 - Deletions require a dry-run manifest of every path and total size, followed by
   user approval. Send approved deletions to the Recycle Bin and never empty it.
   This applies to deletion inside scripts too: `tools/package.py` currently
@@ -70,3 +74,23 @@ checks. Report checks actually run and any remaining limits.
 The helper scripts for window testing and portable packaging are documented in
 `README.md` and `docs/windows-testing.md`. A successful build does not establish
 audio decoding, alarm recovery, keyboard behavior or hardware wake support.
+
+## Native Codex workflows
+
+Use `$release` for an authorized release, including its Scoop manifest in the
+separate bucket linked from `README.md`. Use `$station-triage` to diagnose playback
+through this checkout's `probe_stream` command and native media engine. This
+checkout has no `relay.rs`, `hls.rs`, `browse.rs` or `relaycheck` example; do not
+import assumptions from newer application versions without reading the code.
+
+Review and trust the four hook definitions through `/hooks` before relying on
+automatic enforcement. The patch hooks protect vendored upstream files and run
+core tests for affected core paths. The Stop hooks check version consistency
+and literal IPC command registration. They do not cover arbitrary shell edits;
+use the standalone commands in `docs/checks.md` for those changes. An untrusted
+hook is not evidence that any check ran.
+
+The version checker includes both root fields in `package-lock.json`, the two
+Cargo manifests and `tauri.conf.json`; `--strict` also checks the workspace
+entries in `Cargo.lock`. Report pre-existing failures separately from migration
+validation and preserve unfinished feature work.
