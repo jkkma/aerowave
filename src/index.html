@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>AEROWAVE</title>
+<title>Aerowave</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -19,8 +19,8 @@
 <header class="titlebar" data-tauri-drag-region>
   <div class="brand" data-tauri-drag-region>
     <span class="badge" aria-hidden="true"></span>
-    <span class="wordmark">AEROWAVE</span>
-    <span class="sub" id="build-label">AERO&nbsp;CONSOLE</span>
+    <span class="wordmark">Aerowave</span>
+    <span class="sub" id="build-label">Radio &amp; alarms</span>
   </div>
   <div class="titleclock" data-tauri-drag-region>
     <span id="tb-clock">--:--:--</span>
@@ -50,20 +50,20 @@
     <div class="nowplaying">
       <div class="hud-label">
         <span class="lamp" id="lamp"></span>
-        <span id="statusline">STANDBY</span>
+        <span id="statusline">Stopped</span>
       </div>
-      <h1 class="station" id="np-station">NO CARRIER</h1>
-      <p class="track" id="np-track">Pick a station, choose a folder, or set an alarm.</p>
+      <h1 class="station" id="np-station">Ready to listen</h1>
+      <p class="track" id="np-track">Browse stations or play music from a folder.</p>
       <p class="meta" id="np-meta"></p>
     </div>
 
     <div class="transport">
-      <button class="gel big" id="btn-play" title="Play / stop (Space)">
+      <button class="gel big" id="btn-play" title="Play / stop (Space)" aria-label="Play / stop">
         <svg class="ic-play" viewBox="0 0 24 24"><path d="M8 5l12 7-12 7z"/></svg>
         <svg class="ic-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
       </button>
-      <button class="gel" id="btn-prev" title="Previous station"><svg viewBox="0 0 24 24"><path d="M6 6h2.5v12H6zM18.5 6l-8.5 6 8.5 6z"/></svg></button>
-      <button class="gel" id="btn-next" title="Next station"><svg viewBox="0 0 24 24"><path d="M15.5 6h2.5v12h-2.5zM5.5 6l8.5 6-8.5 6z"/></svg></button>
+      <button class="gel" id="btn-prev" title="Previous station" aria-label="Previous station"><svg viewBox="0 0 24 24"><path d="M6 6h2.5v12H6zM18.5 6l-8.5 6 8.5 6z"/></svg></button>
+      <button class="gel" id="btn-next" title="Next station" aria-label="Next station"><svg viewBox="0 0 24 24"><path d="M15.5 6h2.5v12h-2.5zM5.5 6l8.5 6-8.5 6z"/></svg></button>
 
       <div class="volwrap">
         <svg class="volic" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 010 7"/></svg>
@@ -73,9 +73,9 @@
     </div>
 
     <div class="sleeprow">
-      <span class="hud-mini">SLEEP TIMER</span>
+      <span class="hud-mini">Sleep timer</span>
       <div class="chips" id="sleep-chips">
-        <button class="chip on" data-mins="0">OFF</button>
+        <button class="chip on" data-mins="0">Off</button>
         <button class="chip" data-mins="15">15</button>
         <button class="chip" data-mins="30">30</button>
         <button class="chip" data-mins="45">45</button>
@@ -93,41 +93,41 @@
     <div class="corner bl"></div><div class="corner br"></div>
 
     <nav class="tabs" role="tablist">
-      <button class="tab on" id="tab-radio" data-pane="radio" role="tab" aria-selected="true" aria-controls="pane-radio">RADIO</button>
-      <button class="tab" id="tab-browse" data-pane="browse" role="tab" aria-selected="false" aria-controls="pane-browse">BROWSE</button>
-      <button class="tab" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms">ALARMS</button>
-      <button class="tab" id="tab-settings" data-pane="settings" role="tab" aria-selected="false" aria-controls="pane-settings">SETUP</button>
+      <button class="tab on" id="tab-radio" data-pane="radio" role="tab" aria-selected="true" aria-controls="pane-radio">Stations</button>
+      <button class="tab" id="tab-browse" data-pane="browse" role="tab" aria-selected="false" aria-controls="pane-browse">Browse</button>
+      <button class="tab" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms">Alarms</button>
+      <button class="tab" id="tab-settings" data-pane="settings" role="tab" aria-selected="false" aria-controls="pane-settings">Settings</button>
     </nav>
 
     <!-- ---------------------------- radio ---------------------------- -->
     <div class="pane on" id="pane-radio" role="tabpanel" aria-labelledby="tab-radio">
       <div class="paneheader">
         <input type="search" id="station-filter" class="field" placeholder="Filter stations">
-        <button class="gel wide" id="btn-add-station">+ STATION</button>
+        <button class="gel wide" id="btn-add-station">+ Add station</button>
       </div>
       <ul class="list" id="station-list"></ul>
 
       <form class="editor hidden" id="station-editor" autocomplete="off">
-        <div class="editor-title">STATION</div>
+        <div class="editor-title">Station</div>
         <label class="lbl">Name<input class="field" id="st-name" maxlength="60" required></label>
         <label class="lbl">Stream URL<input class="field" id="st-url" placeholder="https://…  (.pls and .m3u are followed)" required></label>
         <label class="lbl">Tag<input class="field" id="st-tag" maxlength="24" placeholder="ambient"></label>
         <div class="editor-actions">
-          <button type="button" class="gel" id="st-test">TEST</button>
+          <button type="button" class="gel" id="st-test">Test</button>
           <span class="flex"></span>
-          <button type="button" class="gel danger hidden" id="st-delete">DELETE</button>
-          <button type="button" class="gel" id="st-cancel">CANCEL</button>
-          <button type="submit" class="gel primary">SAVE</button>
+          <button type="button" class="gel danger hidden" id="st-delete">Delete</button>
+          <button type="button" class="gel" id="st-cancel">Cancel</button>
+          <button type="submit" class="gel primary">Save</button>
         </div>
         <p class="editor-note" id="st-note"></p>
       </form>
 
       <div class="folderbox">
-        <div class="hud-mini">SHUFFLE FOLDER</div>
+        <div class="hud-mini">Your music</div>
         <p class="folderpath" id="folder-path">No folder chosen</p>
         <div class="editor-actions">
-          <button class="gel" id="btn-pick-folder">CHOOSE FOLDER…</button>
-          <button class="gel" id="btn-play-folder">PLAY RANDOM</button>
+          <button class="gel" id="btn-pick-folder">Choose folder…</button>
+          <button class="gel" id="btn-play-folder">Shuffle</button>
         </div>
       </div>
     </div>
@@ -135,8 +135,8 @@
     <!-- ---------------------------- browse --------------------------- -->
     <div class="pane" id="pane-browse" role="tabpanel" aria-labelledby="tab-browse">
       <div class="paneheader">
-        <input type="search" id="browse-query" class="field" placeholder="Search the radio-browser directory">
-        <button class="gel wide" id="btn-browse">SEARCH</button>
+        <input type="search" id="browse-query" class="field" placeholder="Search stations">
+        <button class="gel wide" id="btn-browse">Search</button>
       </div>
       <div class="browsefilters">
         <select class="field" id="browse-country" aria-label="Country">
@@ -173,13 +173,13 @@
     <!-- ---------------------------- alarms --------------------------- -->
     <div class="pane" id="pane-alarms" role="tabpanel" aria-labelledby="tab-alarms">
       <div class="paneheader">
-        <div class="nextalarm" id="next-alarm">NO ALARM SET</div>
-        <button class="gel wide" id="btn-add-alarm">+ ALARM</button>
+        <div class="nextalarm" id="next-alarm">No alarm set</div>
+        <button class="gel wide" id="btn-add-alarm">+ Add alarm</button>
       </div>
       <ul class="list alarms" id="alarm-list"></ul>
 
       <form class="editor hidden" id="alarm-editor" autocomplete="off">
-        <div class="editor-title">ALARM</div>
+        <div class="editor-title">Alarm</div>
 
         <div class="timerow">
           <div class="timeset">
@@ -201,7 +201,7 @@
         </div>
 
         <div class="quickrow">
-          <span class="hud-mini">RING IN</span>
+          <span class="hud-mini">Ring in</span>
           <div class="chips" id="al-quick">
             <button type="button" class="chip" data-mins="15">15m</button>
             <button type="button" class="chip" data-mins="30">30m</button>
@@ -228,13 +228,13 @@
 
         <div class="sourcerow">
           <div class="chips" id="al-kind">
-            <button type="button" class="chip on" data-kind="station">STATION</button>
-            <button type="button" class="chip" data-kind="folder">FOLDER</button>
+            <button type="button" class="chip on" data-kind="station">Station</button>
+            <button type="button" class="chip" data-kind="folder">Folder</button>
           </div>
           <select class="field" id="al-station"></select>
           <div class="folderpick hidden" id="al-folderpick">
             <span class="folderpath" id="al-folderpath">No folder chosen</span>
-            <button type="button" class="gel" id="al-folderbtn">CHOOSE…</button>
+            <button type="button" class="gel" id="al-folderbtn">Choose…</button>
           </div>
           <p class="editor-note" id="al-sourcenote"></p>
         </div>
@@ -289,11 +289,11 @@
         </div>
 
         <div class="editor-actions">
-          <button type="button" class="gel" id="al-test">TEST</button>
+          <button type="button" class="gel" id="al-test">Test</button>
           <span class="flex"></span>
-          <button type="button" class="gel danger hidden" id="al-delete">DELETE</button>
-          <button type="button" class="gel" id="al-cancel">CANCEL</button>
-          <button type="submit" class="gel primary">SAVE</button>
+          <button type="button" class="gel danger hidden" id="al-delete">Delete</button>
+          <button type="button" class="gel" id="al-cancel">Cancel</button>
+          <button type="submit" class="gel primary">Save</button>
         </div>
       </form>
     </div>
@@ -301,31 +301,27 @@
     <!-- --------------------------- settings -------------------------- -->
     <div class="pane" id="pane-settings" role="tabpanel" aria-labelledby="tab-settings">
       <div class="folderbox backup">
-        <div class="hud-mini">BACKUP FOLDER</div>
-        <p class="editor-note">Played whenever an alarm's own source will not make a sound —
-          a station that 404s, a stream that will not start, a folder that has moved.</p>
+        <div class="hud-mini">Backup music</div>
+        <p class="editor-note">Choose music to play if a station or alarm source is unavailable.</p>
         <div class="folderpick">
           <span class="folderpath" id="backup-path">No folder chosen</span>
-          <button class="gel" id="btn-pick-backup">CHOOSE…</button>
+          <button class="gel" id="btn-pick-backup">Choose…</button>
         </div>
       </div>
       <ul class="list settings">
         <li class="row toggle" data-setting="clock24h"><span>24-hour clock</span><button class="sw" aria-pressed="true"></button></li>
-        <li class="row toggle" data-setting="showMetadata"><span>Read now-playing titles from the stream</span><button class="sw" aria-pressed="true"></button></li>
-        <li class="row toggle" data-setting="minimizeToTray"><span>Close button hides to the tray<em>so alarms keep working</em></span><button class="sw" aria-pressed="true"></button></li>
-        <li class="row toggle" data-setting="startWithWindows"><span>Start with Windows<em>opens hidden in the tray</em></span><button class="sw" aria-pressed="false"></button></li>
+        <li class="row toggle" data-setting="showMetadata"><span>Show song information</span><button class="sw" aria-pressed="true"></button></li>
+        <li class="row toggle" data-setting="minimizeToTray"><span>Keep running when closed<em>Alarms stay active in the tray</em></span><button class="sw" aria-pressed="true"></button></li>
+        <li class="row toggle" data-setting="startWithWindows"><span>Start at login<em>Start quietly in the tray</em></span><button class="sw" aria-pressed="false"></button></li>
       </ul>
       <div class="about">
-        <p class="hud-mini">AEROWAVE // INTERNET RADIO + ALARM CLOCK</p>
-        <p>Alarms are scheduled in the Rust backend, so they still ring while the
-           window is hidden or minimised. If a station 404s or will not start
-           within twelve seconds, a random track from the backup folder plays
-           instead — so set one.</p>
-        <p>The orb is decorative — it is not an audio analyser.</p>
+        <p class="hud-mini">Aerowave · Radio &amp; alarms</p>
+        <p>Keep Aerowave running for alarms to ring. You can hide it in the tray.
+           If a station cannot connect, your backup music takes over.</p>
         <p class="wherefrom" id="config-where"></p>
         <div class="editor-actions">
           <span class="flex"></span>
-          <button class="gel danger" id="btn-quit">QUIT AEROWAVE</button>
+          <button class="gel danger" id="btn-quit">Quit Aerowave</button>
         </div>
       </div>
     </div>
@@ -333,11 +329,11 @@
 </main>
 
 <!-- Announced to a screen reader; #status-msg cannot carry aria-live because
-     its six-second reset would announce "READY" over everything. -->
+     its six-second reset would announce "Ready" over everything. -->
 <div id="a11y-log" role="status" aria-live="polite" class="sr-only"></div>
 
 <footer class="statusbar">
-  <span class="hud-mini" id="status-msg">READY</span>
+  <span class="hud-mini" id="status-msg">Ready</span>
   <span class="flex"></span>
   <span class="hud-mini" id="status-next"></span>
 </footer>
@@ -348,14 +344,14 @@
     <div class="corner tl"></div><div class="corner tr"></div>
     <div class="corner bl"></div><div class="corner br"></div>
     <div class="ringpulse"></div>
-    <div class="hud-label"><span class="lamp on"></span><span id="ring-trigger">ALARM</span></div>
+    <div class="hud-label"><span class="lamp on"></span><span id="ring-trigger">Alarm</span></div>
     <div class="ringtime" id="ring-time">07:00</div>
     <div class="ringlabel" id="ring-label">Wake up</div>
     <div class="ringsource" id="ring-source"></div>
     <p class="editor-note" id="ring-note"></p>
     <div class="ringactions">
-      <button class="gel big-wide" id="ring-snooze">SNOOZE <em id="ring-snooze-mins">10 min</em></button>
-      <button class="gel big-wide primary" id="ring-dismiss">DISMISS</button>
+      <button class="gel big-wide" id="ring-snooze">Snooze <em id="ring-snooze-mins">10 min</em></button>
+      <button class="gel big-wide primary" id="ring-dismiss">Dismiss</button>
     </div>
   </div>
 </div>

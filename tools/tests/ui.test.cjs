@@ -123,7 +123,7 @@ for (const [action, command, verb] of [["snoozeRing", "snooze_alarm", "snooze"],
       assert.equal(h.el("#ringing").hidden, false);
       assert.equal(h.el("#ring-note").textContent, "");
       assert.equal(h.audios[0].paused, false);
-      assert.doesNotMatch(h.el("#status-msg").textContent, /SNOOZED|OLD ACTION FAILED/);
+      assert.doesNotMatch(h.el("#status-msg").textContent, /snoozed|old action failed/i);
     });
   }
 }

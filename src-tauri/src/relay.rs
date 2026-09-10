@@ -20,6 +20,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use aerowave_core::icy::MetaStrip;
+use aerowave_core::local_media;
 use futures_util::StreamExt;
 use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -38,6 +39,23 @@ pub struct Relay {
     pub port: u16,
     routes: Mutex<Routes>,
     on_title: TitleSink,
+    #[cfg(target_os = "linux")]
+    files: Mutex<FileRoutes>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct FileRoute {
+    file: Arc<std::fs::File>,
+    length: u64,
+    content_type: &'static str,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct FileRoutes {
+    by_token: HashMap<String, FileRoute>,
+    order: VecDeque<String>,
 }
 
 /// What to do with a title the stream has just announced, given the station
@@ -77,6 +95,8 @@ impl Relay {
             port,
             routes: Mutex::new(Routes::default()),
             on_title,
+            #[cfg(target_os = "linux")]
+            files: Mutex::new(FileRoutes::default()),
         });
         let accepting = relay.clone();
         tokio::spawn(async move {
@@ -129,11 +149,113 @@ impl Relay {
         self.routes.lock().unwrap().by_token.get(token).cloned()
     }
 
+    /// The caller must check the asset scope before registering a file. Keep
+    /// the opened handle so replacing its pathname cannot redirect a token.
+    #[cfg(target_os = "linux")]
+    pub fn route_file(&self, path: &std::path::Path) -> Result<String, String> {
+        let content_type = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(local_media::content_type)
+            .ok_or_else(|| "that file is not a supported audio format".to_string())?;
+        let file =
+            std::fs::File::open(path).map_err(|e| format!("could not open audio file: {e}"))?;
+        let metadata = file.metadata().map_err(|e| e.to_string())?;
+        if !metadata.is_file() {
+            return Err("the audio source is not a regular file".to_string());
+        }
+        let token = token();
+        let mut files = self.files.lock().unwrap();
+        files.by_token.insert(
+            token.clone(),
+            FileRoute {
+                file: Arc::new(file),
+                length: metadata.len(),
+                content_type,
+            },
+        );
+        files.order.push_back(token.clone());
+        // Each entry owns a descriptor. Recent retries and snoozes fit here,
+        // while old folder picks do not keep files open for the whole run.
+        while files.order.len() > 32 {
+            if let Some(stale) = files.order.pop_front() {
+                files.by_token.remove(&stale);
+            }
+        }
+        Ok(format!("http://127.0.0.1:{}/f/{token}", self.port))
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn serve_file(
+        &self,
+        socket: &mut TcpStream,
+        request: local_media::Request,
+    ) -> std::io::Result<()> {
+        use std::os::unix::fs::FileExt;
+        let source = self
+            .files
+            .lock()
+            .unwrap()
+            .by_token
+            .get(&request.token)
+            .cloned();
+        let Some(source) = source else {
+            return reply(socket, "404 Not Found").await;
+        };
+        let (status, mut offset, length, content_range) = match local_media::byte_range(
+            request.range.as_deref(),
+            source.length,
+        ) {
+            local_media::ByteRange::Full => ("200 OK", 0, source.length, String::new()),
+            local_media::ByteRange::Partial { start, end } => (
+                "206 Partial Content",
+                start,
+                end - start + 1,
+                format!("Content-Range: bytes {start}-{end}/{}\r\n", source.length),
+            ),
+            local_media::ByteRange::Unsatisfiable => {
+                let head = format!("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", source.length);
+                return socket.write_all(head.as_bytes()).await;
+            }
+        };
+        let head = format!("HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {length}\r\nAccept-Ranges: bytes\r\n{content_range}Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n", source.content_type);
+        socket.write_all(head.as_bytes()).await?;
+        let mut remaining = length;
+        while remaining > 0 {
+            let file = source.file.clone();
+            let count = remaining.min(64 * 1024) as usize;
+            // Positioned reads let simultaneous range requests share an open
+            // descriptor without sharing a cursor. Disk I/O stays off Tokio's
+            // worker threads and at most one small chunk is retained here.
+            let chunk = tokio::task::spawn_blocking(move || {
+                let mut chunk = vec![0; count];
+                let read = file.read_at(&mut chunk, offset)?;
+                chunk.truncate(read);
+                Ok::<_, std::io::Error>(chunk)
+            })
+            .await
+            .map_err(std::io::Error::other)??;
+            if chunk.is_empty() {
+                break;
+            }
+            tokio::time::timeout(RELAY_READ_TIMEOUT, socket.write_all(&chunk)).await??;
+            offset += chunk.len() as u64;
+            remaining -= chunk.len() as u64;
+        }
+        Ok(())
+    }
+
     async fn serve(&self, mut socket: TcpStream) -> std::io::Result<()> {
-        let Some(token) = read_request(&mut socket).await? else {
+        let Some(request) = read_request(&mut socket).await? else {
             return reply(&mut socket, "400 Bad Request").await;
         };
-        let Some(url) = self.upstream_for(&token) else {
+        if request.file {
+            #[cfg(target_os = "linux")]
+            return self.serve_file(&mut socket, request).await;
+            #[cfg(not(target_os = "linux"))]
+            return reply(&mut socket, "404 Not Found").await;
+        }
+        let Some(url) = self.upstream_for(&request.token) else {
             return reply(&mut socket, "404 Not Found").await;
         };
         let source = match open_for_relay(&url).await {
@@ -233,12 +355,12 @@ impl<'a> Pipe<'a> {
     }
 }
 
-/// Read the request head and return the token out of `GET /s/<token>`.
+/// Read the request head for an opaque station or local-file token.
 ///
 /// Deliberately strict: one method, one shape of path. A Host header that is
 /// not loopback is refused, so a name pointed at 127.0.0.1 cannot be used to
 /// reach this from a page the user never opened.
-async fn read_request(socket: &mut TcpStream) -> std::io::Result<Option<String>> {
+async fn read_request(socket: &mut TcpStream) -> std::io::Result<Option<local_media::Request>> {
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
     while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
         if buf.len() > MAX_HEAD_BYTES {
@@ -251,36 +373,12 @@ async fn read_request(socket: &mut TcpStream) -> std::io::Result<Option<String>>
         }
         buf.extend_from_slice(&chunk[..read]);
     }
-    let head = String::from_utf8_lossy(&buf);
-    let mut lines = head.lines();
-    let Some(request_line) = lines.next() else {
-        return Ok(None);
-    };
-    let mut parts = request_line.split_whitespace();
-    if parts.next() != Some("GET") {
+    if buf.len() > MAX_HEAD_BYTES {
         return Ok(None);
     }
-    let Some(path) = parts.next() else {
-        return Ok(None);
-    };
-    let host_ok = lines
-        .take_while(|line| !line.is_empty())
-        .filter_map(|line| line.split_once(':'))
-        .find(|(key, _)| key.eq_ignore_ascii_case("host"))
-        .map(|(_, value)| {
-            let value = value.trim();
-            let host = value.rsplit_once(':').map(|(h, _)| h).unwrap_or(value);
-            host == "127.0.0.1" || host == "localhost" || host == "[::1]"
-        })
-        .unwrap_or(false);
-    if !host_ok {
-        return Ok(None);
-    }
-    let token = path.strip_prefix("/s/").unwrap_or("");
-    if token.is_empty() || !token.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Ok(None);
-    }
-    Ok(Some(token.to_string()))
+    Ok(std::str::from_utf8(&buf)
+        .ok()
+        .and_then(local_media::request))
 }
 
 async fn reply(socket: &mut TcpStream, status: &str) -> std::io::Result<()> {

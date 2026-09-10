@@ -7,8 +7,10 @@
 //! from it will not load. Nothing here depends on any of that, so
 //! `cargo test` can actually run these.
 
+pub mod clock;
 pub mod directory;
 pub mod icy;
+pub mod local_media;
 pub mod network;
 pub mod ring;
 pub mod schedule;

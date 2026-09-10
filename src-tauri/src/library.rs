@@ -8,12 +8,6 @@ use rand::seq::SliceRandom;
 use serde::Serialize;
 use walkdir::WalkDir;
 
-/// Extensions WebView2 can actually decode. WMA and AIFF are deliberately
-/// absent - listing them would only produce alarms that stay silent.
-const AUDIO_EXT: &[&str] = &[
-    "mp3", "m4a", "m4b", "aac", "mp4", "flac", "ogg", "oga", "opus", "wav", "weba", "webm",
-];
-
 const MAX_DEPTH: usize = 8;
 const MAX_FILES: usize = 50_000;
 /// Directory entries looked at before giving up, audio or not. `MAX_FILES`
@@ -25,8 +19,8 @@ const MAX_ENTRIES: usize = 200_000;
 pub fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| AUDIO_EXT.contains(&e.to_ascii_lowercase().as_str()))
-        .unwrap_or(false)
+        .and_then(aerowave_core::local_media::content_type)
+        .is_some()
 }
 
 pub fn scan(dir: &Path) -> Vec<PathBuf> {

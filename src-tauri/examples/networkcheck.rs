@@ -212,8 +212,90 @@ async fn guarded_redirects() {
     println!("PASS: initial private targets, private redirects, chained redirects and private DNS are blocked; public cross-host redirects preserve byte ranges");
 }
 
+#[cfg(target_os = "linux")]
+async fn local_files() {
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/network-fixtures");
+    std::fs::create_dir_all(&fixture_dir).unwrap();
+    let path = fixture_dir.join("relay-bytes.wav");
+    let bytes: Vec<u8> = (0..256 * 1024).map(|n| (n % 251) as u8).collect();
+    std::fs::write(&path, &bytes).unwrap();
+    let relay = relay::Relay::start(Arc::new(|_, _| {})).await.unwrap();
+    let url = relay.route_file(&path).unwrap();
+    assert!(!url.contains("wav") && !url.contains("relay-bytes"));
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let response = client.get(&url).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "audio/wav");
+    assert_eq!(response.headers()["accept-ranges"], "bytes");
+    assert_eq!(
+        response.headers()["content-length"],
+        bytes.len().to_string()
+    );
+    assert_eq!(response.bytes().await.unwrap().as_ref(), &bytes);
+    let first = client.get(&url).header("Range", "bytes=2-70000").send();
+    let second = client.get(&url).header("Range", "bytes=-3").send();
+    let (first, second) = tokio::join!(first, second);
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(first.status(), 206);
+    assert_eq!(
+        first.headers()["content-range"],
+        format!("bytes 2-70000/{}", bytes.len())
+    );
+    let (first, second) = tokio::join!(first.bytes(), second.bytes());
+    assert_eq!(first.unwrap().as_ref(), &bytes[2..=70000]);
+    assert_eq!(second.unwrap().as_ref(), &bytes[bytes.len() - 3..]);
+    let response = client
+        .get(&url)
+        .header("Range", "bytes=262144-")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 416);
+    assert_eq!(response.headers()["content-range"], "bytes */262144");
+    assert!(response.bytes().await.unwrap().is_empty());
+    assert_eq!(
+        client
+            .get(&url)
+            .header("Host", "attacker.test")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(client.post(&url).send().await.unwrap().status(), 400);
+    let base = format!("http://127.0.0.1:{}", relay.port);
+    assert_eq!(
+        client
+            .get(format!("{base}/f/%2Fhome%2Fsecret.wav"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/f/00000000000000000000000000000000"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    for _ in 0..32 {
+        relay.route_file(&path).unwrap();
+    }
+    assert_eq!(client.get(&url).send().await.unwrap().status(), 404);
+    println!("PASS: local file relay streams full files and concurrent ranges, returns 416, conceals paths, rejects foreign hosts/methods/tokens, and bounds retained handles");
+}
+
 #[tokio::main]
 async fn main() {
+    #[cfg(target_os = "linux")]
+    local_files().await;
     large_interval().await;
     guarded_redirects().await;
     tokio::join!(raw_head_deadline(), raw_idle_deadline());
