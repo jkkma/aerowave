@@ -72,18 +72,29 @@
       </div>
     </div>
 
-    <div class="sleeprow">
-      <span class="hud-mini">Sleep timer</span>
-      <div class="chips" id="sleep-chips">
-        <button class="chip on" data-mins="0">Off</button>
-        <button class="chip" data-mins="15">15</button>
-        <button class="chip" data-mins="30">30</button>
-        <button class="chip" data-mins="45">45</button>
-        <button class="chip" data-mins="60">60</button>
-        <button class="chip" data-mins="90">90</button>
-        <button class="chip" data-mins="120">120</button>
+    <div class="sleepbox">
+      <div class="sleeprow">
+        <span class="hud-mini" id="sleep-caption">Sleep timer</span>
+        <div class="chips" id="sleep-chips" role="group" aria-labelledby="sleep-caption">
+          <button class="chip on" data-mins="0" aria-pressed="true">Off</button>
+          <button class="chip" data-mins="15" aria-pressed="false" aria-label="15 minutes">15</button>
+          <button class="chip" data-mins="30" aria-pressed="false" aria-label="30 minutes">30</button>
+          <button class="chip" data-mins="45" aria-pressed="false" aria-label="45 minutes">45</button>
+          <button class="chip" data-mins="60" aria-pressed="false" aria-label="60 minutes">60</button>
+          <button class="chip" data-mins="90" aria-pressed="false" aria-label="90 minutes">90</button>
+          <button class="chip" data-mins="120" aria-pressed="false" aria-label="120 minutes">120</button>
+        </div>
       </div>
-      <span class="hud-mini right" id="sleep-left"></span>
+      <div class="sleeprow sleep-action-row">
+        <label class="hud-mini" for="sleep-action">On finish</label>
+        <select class="field" id="sleep-action" aria-describedby="sleep-hint">
+          <option value="stop">Stop audio</option>
+          <option value="sleep">Sleep PC</option>
+          <option value="shutdown">Shut down PC</option>
+        </select>
+        <span class="hud-mini right" id="sleep-left"></span>
+      </div>
+      <p class="editor-note sleep-hint" id="sleep-hint">Choose what happens, then set the minutes.</p>
     </div>
   </section>
 
@@ -313,7 +324,12 @@
         <li class="row toggle" data-setting="showMetadata"><span>Show song information</span><button class="sw" aria-pressed="true"></button></li>
         <li class="row toggle" data-setting="minimizeToTray"><span>Keep running when closed<em>Alarms stay active in the tray</em></span><button class="sw" aria-pressed="true"></button></li>
         <li class="row toggle" data-setting="startWithWindows"><span>Start at login<em>Start quietly in the tray</em></span><button class="sw" aria-pressed="false"></button></li>
+        <li class="row toggle" data-setting="wakeForAlarms"><span>Wake this PC for alarms<em>Includes snoozed alarms</em></span><button class="sw" aria-pressed="true" aria-describedby="power-status power-help"></button></li>
       </ul>
+      <div class="power-info">
+        <p class="editor-note" id="power-status" role="status">Checking PC wake support…</p>
+        <p id="power-help">Keep Aerowave running, including in the tray. Waking requires compatible hardware and Windows wake timers to be allowed. Alarms cannot wake a shut-down PC.</p>
+      </div>
       <div class="about">
         <p class="hud-mini">Aerowave · Radio &amp; alarms</p>
         <p>Keep Aerowave running for alarms to ring. You can hide it in the tray.
@@ -339,6 +355,16 @@
 </footer>
 
 <!-- ============================ alarm overlay ========================= -->
+<dialog class="power-dialog panel bevel" id="power-countdown" aria-labelledby="power-title" aria-describedby="power-description">
+  <div class="hud-mini">Sleep timer finished</div>
+  <h2 id="power-title">PC power action</h2>
+  <div class="power-seconds" id="power-seconds" role="timer" aria-live="off"></div>
+  <p id="power-description">Audio has stopped. Cancel to keep this PC on.</p>
+  <button class="gel primary big-wide" id="power-cancel" autofocus>Cancel</button>
+  <p class="editor-note bad hidden" id="power-error" role="alert"></p>
+  <p class="editor-note">Escape also cancels.</p>
+</dialog>
+
 <div class="ringing" id="ringing" hidden role="alertdialog" aria-modal="true" aria-labelledby="ring-label" aria-describedby="ring-source">
   <div class="ringcard panel bevel" id="ringcard">
     <div class="corner tl"></div><div class="corner tr"></div>

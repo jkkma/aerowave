@@ -12,6 +12,13 @@ in [windows-testing.md](windows-testing.md).
 
 ## Preserved work from the older checkout
 
+The power feature has now been integrated with the 0.10.0 code for the 0.11.0
+release (2026-09-11); the list and resume steps below describe the older migration
+snapshot. Current behavior is documented in the README. Source validation and
+non-disruptive native checks do not establish actual suspend/wake reliability;
+that still needs the coordinated test window described in
+[windows-testing.md](windows-testing.md).
+
 The pending request is to let the sleep timer suspend or shut down the PC, and
 to wake a sleeping PC for alarms. The older local working tree contains:
 

@@ -121,6 +121,10 @@ fn default_auto_stop() -> u32 {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    #[serde(default)]
+    pub sleep_timer_action: aerowave_core::sleep::SleepAction,
+    #[serde(default = "yes")]
+    pub wake_for_alarms: bool,
     #[serde(default = "default_volume")]
     pub volume: f64,
     #[serde(default)]
@@ -148,6 +152,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            sleep_timer_action: aerowave_core::sleep::SleepAction::Stop,
+            wake_for_alarms: true,
             volume: 0.8,
             last_station: None,
             backup_folder: None,

@@ -3,7 +3,7 @@ members = ["core"]
 
 [package]
 name = "aerowave"
-version = "0.10.0"
+version = "0.11.0"
 description = "Internet radio player and alarm clock"
 authors = ["jkkma"]
 edition = "2021"
@@ -57,6 +57,7 @@ tauri-plugin-single-instance = "2"
 [target.'cfg(windows)'.dependencies]
 # auto-launch tells us one bit; the logon entry has more to say than that.
 winreg = "0.55"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Shutdown", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
 [profile.release]
 codegen-units = 1

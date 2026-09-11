@@ -7,6 +7,7 @@
 mod browse;
 mod hls;
 mod library;
+mod power;
 mod relay;
 mod scheduler;
 mod store;
@@ -23,6 +24,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 
+use aerowave_core::sleep::{SleepAction, SleepSnapshot};
 use library::{FolderInfo, RecentTracks};
 use scheduler::{FirePayload, NextAlarm};
 use store::{Alarm, AppData, Settings, Station, Store};
@@ -30,6 +32,9 @@ use store::{Alarm, AppData, Settings, Station, Store};
 pub struct AppState {
     pub store: Store,
     pub sched: Mutex<scheduler::SchedState>,
+    /// Serialize alarm/settings changes with the final wake refresh before
+    /// suspension, so a newly saved alarm cannot miss the native timer.
+    pub power_updates: Mutex<()>,
     pub recent: RecentTracks,
     /// None if the loopback listener would not bind. Playback then falls back
     /// to handing <audio> the station URL directly, which is what it did
@@ -102,6 +107,8 @@ fn save_stations(state: State<AppState>, stations: Vec<Station>) -> Result<(), S
 
 #[tauri::command]
 fn save_alarms(app: AppHandle, state: State<AppState>, alarms: Vec<Alarm>) -> Result<(), String> {
+    let _power_update = state.power_updates.lock().unwrap();
+    scheduler::ensure_power_idle(&app)?;
     state.store.update(|d| {
         let previous: Vec<_> = d.alarms.iter().map(|a| (a.id.as_str(), a.enabled)).collect();
         let current: Vec<_> = alarms.iter().map(|a| (a.id.as_str(), a.enabled)).collect();
@@ -112,6 +119,7 @@ fn save_alarms(app: AppHandle, state: State<AppState>, alarms: Vec<Alarm>) -> Re
         }
         d.alarms = alarms;
     })?;
+    scheduler::refresh(&app);
     let _ = app.emit("alarms-updated", ());
     Ok(())
 }
@@ -123,11 +131,14 @@ fn save_settings(
     mut settings: Settings,
     explicit_autostart: Option<bool>,
 ) -> Result<(), String> {
+    let _power_update = state.power_updates.lock().unwrap();
+    scheduler::ensure_power_idle(&app)?;
     if let Some(want) = explicit_autostart {
         settings.start_with_windows = want;
     }
     let want_autostart = settings.start_with_windows;
     state.store.update(|d| d.settings = settings)?;
+    scheduler::refresh(&app);
     // Never let this lose the rest of the settings - they are saved already.
     sync_autostart(&app, &state, want_autostart, explicit_autostart)
 }
@@ -542,6 +553,30 @@ fn next_alarm(app: AppHandle) -> Option<NextAlarm> {
     scheduler::next_alarm(&app)
 }
 
+#[tauri::command]
+fn set_sleep_timer(
+    app: AppHandle,
+    minutes: u32,
+    action: SleepAction,
+) -> Result<SleepSnapshot, String> {
+    scheduler::set_sleep_timer(&app, minutes, action)
+}
+
+#[tauri::command]
+fn cancel_sleep_timer(app: AppHandle) -> Result<SleepSnapshot, String> {
+    scheduler::cancel_sleep_timer(&app)
+}
+
+#[tauri::command]
+fn get_sleep_timer(state: State<AppState>) -> SleepSnapshot {
+    state.sched.lock().unwrap().sleep.clone()
+}
+
+#[tauri::command]
+fn power_status(app: AppHandle) -> scheduler::PowerStatus {
+    scheduler::power_status(&app)
+}
+
 /// Ring an alarm right now, to hear what it will sound like.
 ///
 /// Takes the alarm by value rather than by id deliberately. Looking it up
@@ -550,12 +585,20 @@ fn next_alarm(app: AppHandle) -> Option<NextAlarm> {
 /// the source from the passed alarm gives the same answer the real ring will
 /// get, without touching the stored copy.
 #[tauri::command]
-fn test_alarm(app: AppHandle, alarm: Alarm) -> FirePayload {
-    scheduler::resolve_source(&app, &alarm, "test")
+fn test_alarm(app: AppHandle, alarm: Alarm) -> Result<FirePayload, String> {
+    scheduler::test_alarm(&app, alarm)
+}
+
+#[tauri::command]
+fn dismiss_test_alarm(app: AppHandle, alarm_id: String) {
+    scheduler::dismiss_test(&app, &alarm_id);
 }
 
 #[tauri::command]
 fn snooze_alarm(app: AppHandle, alarm_id: String, minutes: u32) -> Result<i64, String> {
+    let state = app.state::<AppState>();
+    let _power_update = state.power_updates.lock().unwrap();
+    scheduler::ensure_power_idle(&app)?;
     scheduler::snooze(&app, &alarm_id, minutes)
 }
 
@@ -641,6 +684,10 @@ fn config_location(state: State<AppState>) -> ConfigLocation {
 /// otherwise only `dismiss` and `snooze` clear.
 #[tauri::command]
 fn pending_alarm(app: AppHandle, state: State<AppState>) -> Option<FirePayload> {
+    let preview = state.sched.lock().unwrap().preview_alarm.clone();
+    if let Some(alarm) = preview {
+        return Some(scheduler::resolve_source(&app, &alarm, "test"));
+    }
     let ringing = state.sched.lock().unwrap().ringing.clone();
     let Some(id) = ringing else {
         if let Some(w) = app.get_webview_window("main") {
@@ -721,6 +768,7 @@ pub fn run() {
             app.manage(AppState {
                 store,
                 sched: Mutex::new(scheduler::SchedState::default()),
+                power_updates: Mutex::new(()),
                 recent: RecentTracks::default(),
                 relay: Mutex::new(None),
                 hls: hls_state,
@@ -823,7 +871,12 @@ pub fn run() {
             browse_tags,
             browse_facets,
             next_alarm,
+            set_sleep_timer,
+            cancel_sleep_timer,
+            get_sleep_timer,
+            power_status,
             test_alarm,
+            dismiss_test_alarm,
             snooze_alarm,
             dismiss_alarm,
             hide_window,

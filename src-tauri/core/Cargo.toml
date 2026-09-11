@@ -1,13 +1,15 @@
 [package]
 name = "aerowave-core"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 license = "MIT"
 description = "Parsing and scheduling rules, with no GUI dependencies so they can be unit tested"
 
 [dependencies]
 chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 # Real DST transitions for the scheduling tests; FixedOffset cannot express one.
 chrono-tz = "0.10"
+serde_json = "1"

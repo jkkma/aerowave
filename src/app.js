@@ -1969,9 +1969,12 @@ function armRingWatchdog(quietMs, note, reason) {
 
 function onAlarmFire(payload) {
   ringing = payload;
-  // Otherwise a sleep timer set before bed calls stopPlayback() mid-ring and
-  // leaves the overlay up over silence.
+  // A native dialog occupies the top layer, above the alarm overlay. Close it
+  // before focusing the alarm, and undo the old fade before its sound starts.
+  closePowerCountdown(false);
+  endSleepFade();
   setSleep(0);
+  renderSleepTimer();
   clearInterval(ringWatchdog);
   clearTimeout(autoStopTimer);
   givingUp = false;
@@ -2112,6 +2115,7 @@ function closeRingUi() {
   givingUp = false;
   $("#ringing").hidden = true;
   ringing = null;
+  renderSleepTimer();
 }
 
 const pendingRingActions = new WeakSet();
@@ -2121,13 +2125,15 @@ async function dismissRing() {
   if (!ring || pendingRingActions.has(ring)) return;
   pendingRingActions.add(ring);
   try {
-    if (ring.trigger !== "test" && ring.alarmId) {
-      await invoke("dismiss_alarm", { alarmId: ring.alarmId });
+    if (ring.alarmId) {
+      if (ring.trigger === "test") await invoke("dismiss_test_alarm", { alarmId: ring.alarmId });
+      else await invoke("dismiss_alarm", { alarmId: ring.alarmId });
     }
     if (ringing !== ring) return;
     closeRingUi();
     stopPlayback();
     refreshNextAlarm();
+    refreshPowerStatus();
   } catch (e) {
     if (ringing !== ring) return;
     $("#ring-note").textContent = "Could not dismiss the alarm: " + e + ". Try again.";
@@ -2152,6 +2158,7 @@ async function snoozeRing(why) {
     stopPlayback();
     say((why ? why + " - " : "") + "snoozed for " + snoozeMins + " minutes", "good");
     refreshNextAlarm();
+    refreshPowerStatus();
   } catch (e) {
     if (ringing !== ring) return;
     $("#ring-note").textContent = "Could not snooze the alarm: " + e + ". Try again or dismiss it.";
@@ -2409,6 +2416,9 @@ function renderSettings() {
   $("#volume").value = vol;
   $("#volval").textContent = vol;
   $("#volume").style.setProperty("--fill", vol + "%");
+  $("#sleep-action").value = state.settings.sleepTimerAction || "stop";
+  renderSleepTimer();
+  renderPowerStatus();
 }
 
 // ------------------------------------------------------------ persisting ---
@@ -2416,7 +2426,7 @@ function renderSettings() {
 const saveStations = () => invoke("save_stations", { stations: state.stations }).catch((e) => say(String(e), "bad"));
 const saveAlarms = () =>
   invoke("save_alarms", { alarms: state.alarms })
-    .then(refreshNextAlarm)
+    .then(() => { refreshNextAlarm(); refreshPowerStatus(); })
     .catch((e) => say(String(e), "bad"));
 
 let settingsSaveTimer = null;
@@ -2428,10 +2438,10 @@ function saveSettings(explicitAutostart = null) {
     const explicitAutostart = settingsAutostartIntent;
     settingsAutostartIntent = null;
     if (explicitAutostart !== null) state.settings.startWithWindows = explicitAutostart;
-    invoke("save_settings", { settings: state.settings, explicitAutostart }).catch((e) => {
+    invoke("save_settings", { settings: state.settings, explicitAutostart }).then(refreshPowerStatus).catch((e) => {
       say(String(e), "bad");
       // start-with-Windows can fail on its own; reflect what actually stuck.
-      loadState();
+      loadState().catch((error) => say(String(error), "bad"));
     });
   }, 250);
 }
@@ -2443,6 +2453,7 @@ async function loadState() {
   renderSettings();
   refreshNextAlarm();
   refreshFolderLabels();
+  refreshPowerStatus();
 }
 
 // -------------------------------------------------------- station editor ---
@@ -2755,8 +2766,14 @@ function readAlarmEditor() {
 
 // --------------------------------------------------------- sleep timer ---
 
-let sleepUntil = 0;
+let sleepSnapshot = { revision: -1, timer: null, outcome: null, error: null };
 let sleepFading = false;
+let powerFocusBefore = null;
+let sleepRequest = 0;
+let powerStatus = null;
+let powerWakeTime = null;
+let powerStatusRequest = 0;
+const sleepActionLabel = (action) => ({ stop: "Stop audio", sleep: "Sleep PC", shutdown: "Shut down PC" }[action] || "Stop audio");
 /**
  * How long the sound takes to go. It is subtracted from the time left rather
  * than added to it: a thirty-minute timer should be silent at thirty minutes,
@@ -2773,39 +2790,140 @@ function endSleepFade() {
   if (player.playing) audio.volume = player.target;
 }
 
-function setSleep(mins) {
-  sleepUntil = mins > 0 ? Date.now() + mins * 60000 : 0;
-  // Changing the timer - or turning it off - undoes a fade in progress.
-  endSleepFade();
-  $$("#sleep-chips .chip").forEach((c) => c.classList.toggle("on", +c.dataset.mins === mins));
-  $("#sleep-left").textContent = "";
-  if (mins > 0) say("sleep timer set for " + mins + " minutes", "good");
+function closePowerCountdown(restoreFocus = true) {
+  const dialog = $("#power-countdown");
+  if (!dialog.open) return;
+  dialog.close();
+  if (restoreFocus && !ringing && powerFocusBefore?.isConnected) powerFocusBefore.focus();
+  powerFocusBefore = null;
 }
 
-setInterval(() => {
-  if (!sleepUntil) return;
-  const left = sleepUntil - Date.now();
-  if (left <= 0) {
-    sleepUntil = 0;
-    sleepFading = false;
-    $$("#sleep-chips .chip").forEach((c) => c.classList.toggle("on", c.dataset.mins === "0"));
+function renderSleepTimer() {
+  const timer = sleepSnapshot.timer;
+  const pending = timer?.executeAtMs != null;
+  $$("#sleep-chips .chip").forEach((chip) => {
+    const on = +chip.dataset.mins === (timer?.minutes || 0);
+    chip.classList.toggle("on", on);
+    chip.setAttribute("aria-pressed", String(on));
+    chip.disabled = !!ringing && +chip.dataset.mins > 0;
+  });
+  $("#sleep-hint").textContent = timer
+    ? "This timer: " + sleepActionLabel(timer.action) + ". Choose minutes again to restart with the selected action."
+    : "Choose what happens, then set the minutes.";
+  if (!timer) {
     $("#sleep-left").textContent = "";
-    // Covers the timer set *while* an alarm rings, which onAlarmFire cannot:
-    // let it lapse, but never take the alarm's audio with it.
-    if (ringing) return;
-    stopPlayback();
-    say("sleep timer — goodnight");
+    closePowerCountdown();
     return;
   }
+  if (pending) {
+    const left = Math.max(0, Math.ceil((timer.executeAtMs - Date.now()) / 1000));
+    $("#sleep-left").textContent = sleepActionLabel(timer.action) + " · " + left + "s";
+    $("#power-title").textContent = timer.action === "shutdown" ? "This PC will shut down" : "This PC will sleep";
+    $("#power-seconds").textContent = left + "s";
+    const dialog = $("#power-countdown");
+    if (!ringing && !dialog.open) {
+      powerFocusBefore = document.activeElement;
+      $("#power-error").textContent = "";
+      $("#power-error").classList.add("hidden");
+      dialog.showModal();
+      $("#power-cancel").focus();
+      say(sleepActionLabel(timer.action) + " in " + left + " seconds. Cancel or press Escape to keep this PC on.");
+    }
+    return;
+  }
+  closePowerCountdown();
+  const left = timer.endsAtMs - Date.now();
+  $("#sleep-left").textContent = left > 0 ? fmtDuration(left / 1000) + " left" : "Finishing…";
   // Fade out over whatever is actually left rather than a fixed twenty
   // seconds, so a tick that arrives late - the window was hidden, and
   // WebView2 throttles timers there - still lands on silence at zero.
-  if (!sleepFading && !ringing && player.playing && left <= SLEEP_FADE_SECS * 1000) {
+  if (!sleepFading && !ringing && player.playing && left > 0 && left <= SLEEP_FADE_SECS * 1000) {
     sleepFading = true;
     fadeOut(Math.max(1, left / 1000));
   }
-  $("#sleep-left").textContent = fmtDuration(left / 1000) + " left";
-}, 1000);
+}
+
+function applySleepSnapshot(snapshot) {
+  // Events and command replies may cross in flight. Only Rust advances the
+  // timer, and an older reply must never bring a cancelled power action back.
+  if (snapshot.revision <= sleepSnapshot.revision) return;
+  const previous = sleepSnapshot.timer;
+  sleepSnapshot = snapshot;
+  const timer = snapshot.timer;
+  if (!timer || previous?.endsAtMs !== timer.endsAtMs || previous?.action !== timer.action) endSleepFade();
+  if (!ringing && ((timer?.executeAtMs != null && previous?.executeAtMs == null) || snapshot.outcome === "finished")) {
+    sleepFading = false;
+    stopPlayback();
+  }
+  renderSleepTimer();
+  if (snapshot.error) say(snapshot.error, "bad", true);
+  else if (snapshot.outcome === "finished" && !ringing) say("sleep timer — goodnight");
+}
+
+async function setSleep(minutes) {
+  if (minutes > 0 && ringing) {
+    say("Dismiss or snooze the alarm before setting a sleep timer.");
+    return;
+  }
+  const request = ++sleepRequest;
+  const action = $("#sleep-action").value;
+  try {
+    const snapshot = minutes > 0
+      ? await invoke("set_sleep_timer", { minutes, action })
+      : await invoke("cancel_sleep_timer");
+    applySleepSnapshot(snapshot);
+    if (request === sleepRequest && snapshot.revision === sleepSnapshot.revision && !ringing) {
+      say(minutes > 0 ? sleepActionLabel(action) + " in " + minutes + " minutes" : "sleep timer cancelled", "good");
+    }
+  } catch (error) {
+    if (minutes === 0 && $("#power-countdown").open) {
+      $("#power-error").textContent = "Could not cancel: " + String(error);
+      $("#power-error").classList.remove("hidden");
+    }
+    say(String(error), "bad", true);
+  }
+}
+
+function renderPowerStatus() {
+  if (!powerStatus) return;
+  $("#sleep-action option[value='sleep']").disabled = !powerStatus.sleepSupported;
+  $("#sleep-action option[value='shutdown']").disabled = !powerStatus.shutdownSupported;
+  const wake = $("[data-setting='wakeForAlarms'] .sw");
+  wake.disabled = !powerStatus.wakeSupported;
+  const details = [];
+  if (state.settings.wakeForAlarms === false) details.push("Wake for alarms is off.");
+  if (powerStatus.message) details.push(powerStatus.message);
+  if (powerStatus.armedAtMs != null && powerWakeTime && state.settings.wakeForAlarms !== false) {
+    const when = powerWakeTime;
+    const day = new Date(Date.UTC(when.year, when.month - 1, when.day))
+      .toLocaleDateString(undefined, { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
+    details.push("Wake timer armed for " + day + ", " + fmtClock(when, false) + ".");
+  }
+  if (powerStatus.error) details.push(powerStatus.error);
+  const line = $("#power-status");
+  line.textContent = details.join(" ") || "Wake status is unavailable.";
+  line.classList.toggle("bad", !!powerStatus.error || (state.settings.wakeForAlarms !== false && (!powerStatus.wakeSupported || powerStatus.wakeAllowed === false)));
+}
+
+async function refreshPowerStatus() {
+  const request = ++powerStatusRequest;
+  try {
+    const status = await invoke("power_status");
+    if (request !== powerStatusRequest) return;
+    // The wake deadline needs the same OS timezone rules as the alarm clock.
+    const wakeTime = status?.armedAtMs != null ? await invoke("local_time", { atMs: status.armedAtMs }) : null;
+    if (request !== powerStatusRequest) return;
+    powerStatus = status;
+    powerWakeTime = wakeTime;
+    renderPowerStatus();
+  } catch (error) {
+    if (request !== powerStatusRequest) return;
+    $("#power-status").textContent = "Could not check PC wake support: " + String(error);
+    $("#power-status").classList.add("bad");
+  }
+}
+
+setInterval(renderSleepTimer, 1000);
 
 // ---------------------------------------------------------------- wiring ---
 
@@ -2840,6 +2958,22 @@ function wire() {
   $$("#sleep-chips .chip").forEach((chip) =>
     chip.addEventListener("click", () => setSleep(+chip.dataset.mins))
   );
+  $("#sleep-action").addEventListener("change", () => {
+    state.settings.sleepTimerAction = $("#sleep-action").value;
+    saveSettings();
+    renderSleepTimer();
+  });
+  $("#power-cancel").addEventListener("click", () => setSleep(0));
+  $("#power-countdown").addEventListener("cancel", (event) => {
+    event.preventDefault();
+    setSleep(0);
+  });
+  $("#power-countdown").addEventListener("keydown", (event) => {
+    if (event.key === "Tab") {
+      event.preventDefault();
+      $("#power-cancel").focus();
+    }
+  });
 
   // tabs
   $$(".tab").forEach((tab) =>
@@ -2851,6 +2985,7 @@ function wire() {
       $$(".pane").forEach((p) => p.classList.toggle("on", p.id === "pane-" + tab.dataset.pane));
       if (tab.dataset.pane === "alarms") refreshNextAlarm();
       if (tab.dataset.pane === "browse") browseFirstLook();
+      if (tab.dataset.pane === "settings") refreshPowerStatus();
     })
   );
 
@@ -3144,6 +3279,7 @@ function wire() {
   wireMediaKeys();
 
   document.addEventListener("keydown", (e) => {
+    if (!ringing && $("#power-countdown").open) return;
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
     // Space belongs to whichever control has focus. The exception is a ringing
     // alarm: a field left focused overnight must not swallow the dismiss.
@@ -3207,11 +3343,16 @@ async function boot() {
 
   await listen("alarm-fire", (event) => onAlarmFire(event.payload));
   // Windows can turn autostart off behind our back; the backend says when.
-  await listen("settings-updated", () => loadState());
+  await listen("settings-updated", () => loadState().catch((e) => say(String(e), "bad")));
   await listen("alarms-updated", async () => {
-    state.alarms = (await invoke("get_state")).alarms;
-    renderAlarms();
-    refreshNextAlarm();
+    try {
+      state.alarms = (await invoke("get_state")).alarms;
+      renderAlarms();
+      refreshNextAlarm();
+      refreshPowerStatus();
+    } catch (e) {
+      say(String(e), "bad");
+    }
   });
   await listen("icy-title", (event) => onStreamTitle(event.payload));
   await listen("tray-stop", () => {
@@ -3232,6 +3373,13 @@ async function boot() {
   showBuildLabel();
   showConfigLocation();
   say("Ready to listen", "good");
+
+  await listen("sleep-timer-updated", (event) => applySleepSnapshot(event.payload));
+  try {
+    applySleepSnapshot(await invoke("get_sleep_timer"));
+  } catch (e) {
+    say("Could not read the sleep timer: " + String(e), "bad", true);
+  }
 }
 
 boot().catch((e) => {
