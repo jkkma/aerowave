@@ -89,7 +89,9 @@ class Element {
     }
     return null;
   }
-  focus() {}
+  focus() { if (this.ownerDocument) this.ownerDocument.activeElement = this; }
+  showModal() { this.open = true; }
+  close() { this.open = false; }
   select() {}
   scrollIntoView() {}
 }
@@ -101,17 +103,25 @@ function createHarness(options = {}) {
   const audios = [];
   const hlsInstances = [];
   const timers = new Map();
+  const listeners = new Map();
+  let sleepSnapshot = { revision: 0, timer: null, outcome: null, error: null };
   let timerId = 0;
   const el = (selector) => {
-    if (!elements.has(selector)) elements.set(selector, new Element());
+    if (!elements.has(selector)) {
+      const element = new Element();
+      element.ownerDocument = document;
+      element.isConnected = true;
+      elements.set(selector, element);
+    }
     return elements.get(selector);
   };
   const document = new Element("document");
   document.body = new Element("body");
   document.activeElement = document.body;
-  document.createElement = (tag) => new Element(tag);
+  document.createElement = (tag) => Object.assign(new Element(tag), { ownerDocument: document });
   document.querySelector = (selector) => selector.startsWith("#") ? el(selector) : (queries.get(selector)?.[0] || null);
   document.querySelectorAll = (selector) => queries.get(selector) || [];
+  queries.set("[data-setting='wakeForAlarms'] .sw", [el("#wake-switch")]);
   class Audio extends Element {
     constructor() {
       super("audio");
@@ -151,6 +161,20 @@ function createHarness(options = {}) {
     if (command === "relay_url") return "http://127.0.0.1/relay/" + encodeURIComponent(args.url);
     if (command === "probe_stream") return { url: args.url, hls: false };
     if (command === "hls_session") return "http://hls.localhost/session";
+    if (command === "get_sleep_timer") return sleepSnapshot;
+    if (command === "cancel_sleep_timer" || command === "set_sleep_timer") {
+      sleepSnapshot = {
+        revision: sleepSnapshot.revision + 1,
+        timer: command === "set_sleep_timer" ? { ...args, endsAtMs: Date.now() + args.minutes * 60000, executeAtMs: null } : null,
+        outcome: command === "cancel_sleep_timer" ? "cancelled" : null,
+        error: null,
+      };
+      return sleepSnapshot;
+    }
+    if (command === "power_status") return {
+      sleepSupported: true, shutdownSupported: true, wakeSupported: true,
+      wakeAllowed: true, onBattery: false, message: "Wake timers allowed.", armedAtMs: null, error: null,
+    };
     return null;
   };
   const setTimer = (fn, ms, interval) => {
@@ -164,7 +188,10 @@ function createHarness(options = {}) {
     navigator: {},
     window: { __TAURI__: {
       core: { invoke, convertFileSrc: (file) => "asset://" + file },
-      event: { listen: async () => {} },
+      event: { listen: async (name, handler) => {
+        if (!listeners.has(name)) listeners.set(name, []);
+        listeners.get(name).push(handler);
+      } },
       window: { getCurrentWindow: () => ({}) },
     } },
     setTimeout: (fn, ms) => setTimer(fn, ms, false), clearTimeout: (id) => timers.delete(id),
@@ -176,7 +203,10 @@ function createHarness(options = {}) {
   vm.runInContext(source.slice(0, bootAt), context, { filename: "app.js" });
   const evaluate = (code) => vm.runInContext(code, context);
   return {
-    context, evaluate, el, elements, queries, document, calls, audios, hlsInstances, timers, Element,
+    context, evaluate, el, elements, queries, document, calls, audios, hlsInstances, timers, listeners, Element,
+    async emit(name, payload) {
+      await Promise.all((listeners.get(name) || []).map(handler => handler({ payload })));
+    },
     async fireTimer(id) {
       const timer = timers.get(id);
       if (!timer) throw new Error("No timer " + id);

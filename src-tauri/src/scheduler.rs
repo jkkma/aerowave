@@ -11,11 +11,15 @@ use std::time::Duration;
 
 use aerowave_core::ring::RingHolds;
 use aerowave_core::schedule;
+use aerowave_core::sleep::{
+    power_clock_interrupted, wake_plan, SleepAction, SleepEffect, SleepOutcome, SleepSnapshot,
+};
 use chrono::Local;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::library;
+use crate::power;
 use crate::store::{Alarm, AlarmSource};
 use crate::AppState;
 
@@ -28,10 +32,128 @@ pub struct SchedState {
     snoozed: HashMap<String, schedule::Snooze>,
     /// Whatever is ringing right now.
     pub ringing: Option<String>,
+    pub preview_alarm: Option<Alarm>,
     /// The track each folder alarm's current occurrence is playing, held so
     /// that the snoozes after it come back with the same one.
     holds: RingHolds,
     last_tick: i64,
+    pub sleep: SleepSnapshot,
+    thread: Option<std::thread::Thread>,
+    wake_at_ms: Option<i64>,
+    wake_error: Option<String>,
+    power_committed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PowerStatus {
+    #[serde(flatten)]
+    capabilities: power::PowerCapabilities,
+    armed_at_ms: Option<i64>,
+    error: Option<String>,
+}
+
+pub fn power_status(app: &AppHandle) -> PowerStatus {
+    let capabilities = power::capabilities();
+    let state = app.state::<AppState>();
+    let sched = state.sched.lock().unwrap();
+    PowerStatus {
+        capabilities,
+        armed_at_ms: sched.wake_at_ms,
+        error: sched.wake_error.clone(),
+    }
+}
+
+/// Changes to alarms, snoozes and settings should update Windows' timer
+/// immediately, including when the next clock tick has not arrived yet.
+pub fn refresh(app: &AppHandle) {
+    if let Some(thread) = &app.state::<AppState>().sched.lock().unwrap().thread {
+        thread.unpark();
+    }
+}
+
+pub fn ensure_power_idle(app: &AppHandle) -> Result<(), String> {
+    if app
+        .state::<AppState>()
+        .sched
+        .lock()
+        .unwrap()
+        .power_committed
+    {
+        Err("Windows is already starting the power action".into())
+    } else {
+        Ok(())
+    }
+}
+
+pub fn set_sleep_timer(
+    app: &AppHandle,
+    minutes: u32,
+    action: SleepAction,
+) -> Result<SleepSnapshot, String> {
+    if minutes == 0 {
+        return cancel_sleep_timer(app);
+    }
+    if action != SleepAction::Stop {
+        let caps = power::capabilities();
+        if (action == SleepAction::Sleep && !caps.sleep_supported)
+            || (action == SleepAction::Shutdown && !caps.shutdown_supported)
+        {
+            return Err(caps.message);
+        }
+    }
+    let snapshot = {
+        let state = app.state::<AppState>();
+        let mut sched = state.sched.lock().unwrap();
+        if sched.power_committed {
+            return Err("Windows is already starting the power action".into());
+        }
+        if sched.ringing.is_some() {
+            return Err("Dismiss or snooze the alarm before setting a sleep timer".into());
+        }
+        sched
+            .sleep
+            .start(Local::now().timestamp_millis(), minutes, action)?;
+        sched.sleep.clone()
+    };
+    let _ = app.emit("sleep-timer-updated", &snapshot);
+    refresh(app);
+    Ok(snapshot)
+}
+
+pub fn cancel_sleep_timer(app: &AppHandle) -> Result<SleepSnapshot, String> {
+    let snapshot = {
+        let state = app.state::<AppState>();
+        let mut sched = state.sched.lock().unwrap();
+        if sched.power_committed {
+            return Err("Windows is already starting the power action".into());
+        }
+        sched.sleep.cancel(SleepOutcome::Cancelled);
+        sched.sleep.clone()
+    };
+    let _ = app.emit("sleep-timer-updated", &snapshot);
+    refresh(app);
+    Ok(snapshot)
+}
+
+pub fn test_alarm(app: &AppHandle, alarm: Alarm) -> Result<FirePayload, String> {
+    let snapshot = {
+        let state = app.state::<AppState>();
+        let mut sched = state.sched.lock().unwrap();
+        if sched.power_committed {
+            return Err("Windows is already starting the power action".into());
+        }
+        if sched.ringing.is_some() {
+            return Err("Dismiss the ringing alarm before testing another one".into());
+        }
+        sched.ringing = Some(alarm.id.clone());
+        sched.preview_alarm = Some(alarm.clone());
+        sched.sleep.cancel(SleepOutcome::Alarm);
+        sched.sleep.clone()
+    };
+    let _ = app.emit("sleep-timer-updated", snapshot);
+    refresh(app);
+    Ok(resolve_source(app, &alarm, "test"))
 }
 
 impl SchedState {
@@ -260,7 +382,7 @@ fn surface_window(app: &AppHandle) {
 pub fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str) -> bool {
     let payload = resolve_source(app, alarm, trigger);
     let state = app.state::<AppState>();
-    let one_shot = {
+    let (one_shot, sleep) = {
         // Edits take these locks in the same order. Recheck after disk/network
         // source work so a cancelled snooze cannot publish an obsolete ring.
         let mut data = state.store.data.lock().unwrap();
@@ -270,20 +392,28 @@ pub fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str) -> bool {
         };
         let now = Local::now();
         if !schedule::alarm_may_fire(
-            trigger == "snooze", current.enabled, sched.snoozed.get(&alarm.id).copied(),
-            now.timestamp(), sched.ringing.is_some(),
+            trigger == "snooze",
+            current.enabled,
+            sched.snoozed.get(&alarm.id).copied(),
+            now.timestamp(),
+            sched.ringing.is_some(),
         ) {
             return false;
         }
         sched.ringing = Some(alarm.id.clone());
+        sched.preview_alarm = None;
         sched.snoozed.remove(&alarm.id);
-        sched.fired.insert(alarm.id.clone(), now.format("%Y-%m-%d %H:%M").to_string());
+        sched
+            .fired
+            .insert(alarm.id.clone(), now.format("%Y-%m-%d %H:%M").to_string());
         let one_shot = current.days.is_empty();
         if one_shot {
             current.enabled = false;
         }
-        one_shot
+        sched.sleep.cancel(SleepOutcome::Alarm);
+        (one_shot, sched.sleep.clone())
     };
+    let _ = app.emit("sleep-timer-updated", sleep);
     surface_window(app);
     let _ = app.emit("alarm-fire", payload);
 
@@ -293,6 +423,30 @@ pub fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str) -> bool {
         let _ = app.emit("alarms-updated", ());
     }
     true
+}
+
+/// A preview shares the display with real alarms but must not dismiss their
+/// occurrences or discard a saved snooze, even when it uses the same alarm id.
+pub fn dismiss_test(app: &AppHandle, alarm_id: &str) {
+    let state = app.state::<AppState>();
+    {
+        let mut sched = state.sched.lock().unwrap();
+        if sched.preview_alarm.as_ref().map(|a| a.id.as_str()) != Some(alarm_id) {
+            return;
+        }
+        sched.preview_alarm = None;
+        if sched.ringing.as_deref() == Some(alarm_id) {
+            sched.ringing = None;
+        }
+        // Keep the decision and the window change together so a newly claimed
+        // real ring cannot lose its always-on-top grab to this old preview.
+        if sched.ringing.is_none() {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_always_on_top(false);
+            }
+        }
+    }
+    refresh(app);
 }
 
 /// Stop the ringing: drop the always-on-top grab and clear the snooze.
@@ -305,8 +459,10 @@ pub fn dismiss(app: &AppHandle, alarm_id: &str) {
     sched.holds.release(alarm_id);
     if sched.ringing.as_deref() == Some(alarm_id) {
         sched.ringing = None;
+        sched.preview_alarm = None;
     }
     drop(sched);
+    refresh(app);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_always_on_top(false);
     }
@@ -324,7 +480,16 @@ pub fn snooze(app: &AppHandle, alarm_id: &str, minutes: u32) -> Result<i64, Stri
         if sched.ringing.as_deref() != Some(alarm_id) {
             return Err("that alarm is no longer ringing".into());
         }
-        sched.snoozed.insert(alarm_id.to_string(), schedule::Snooze::new(at));
+        if sched
+            .preview_alarm
+            .as_ref()
+            .is_some_and(|a| a.id == alarm_id)
+        {
+            return Err("A test alarm cannot schedule a snooze".into());
+        }
+        sched
+            .snoozed
+            .insert(alarm_id.to_string(), schedule::Snooze::new(at));
         if sched.ringing.as_deref() == Some(alarm_id) {
             sched.ringing = None;
         }
@@ -333,6 +498,7 @@ pub fn snooze(app: &AppHandle, alarm_id: &str, minutes: u32) -> Result<i64, Stri
         let _ = w.set_always_on_top(false);
     }
     let _ = app.emit("alarms-updated", ());
+    refresh(app);
     Ok(at * 1000)
 }
 
@@ -372,7 +538,7 @@ pub fn next_alarm(app: &AppHandle) -> Option<NextAlarm> {
 
 /// One pass of the clock. Split out from the thread so the logic stays
 /// readable and the borrow of the store stays short.
-fn tick(app: &AppHandle) {
+fn tick(app: &AppHandle, power: &mut power::PowerManager) {
     let now = Local::now();
     let now_secs = now.timestamp();
     let key = now.format("%Y-%m-%d %H:%M").to_string();
@@ -405,6 +571,7 @@ fn tick(app: &AppHandle) {
 
     if let Some(id) = due_snooze {
         if let Some(alarm) = alarms.iter().find(|a| a.id == id) {
+            power.keep_awake(true);
             fired_this_pass = fire(app, alarm, "snooze");
         }
     }
@@ -437,6 +604,7 @@ fn tick(app: &AppHandle) {
         if busy || fired_this_pass {
             continue;
         }
+        power.keep_awake(true);
         fired_this_pass = fire(app, alarm, if missed { "catchup" } else { "scheduled" });
     }
 }
@@ -444,13 +612,134 @@ fn tick(app: &AppHandle) {
 /// Start the once-a-second clock. Runs for the life of the process.
 pub fn spawn(app: AppHandle) {
     std::thread::spawn(move || {
+        let mut power = power::PowerManager::new();
         {
             let state = app.state::<AppState>();
-            state.sched.lock().unwrap().last_tick = Local::now().timestamp();
+            let mut sched = state.sched.lock().unwrap();
+            sched.last_tick = Local::now().timestamp();
+            sched.thread = Some(std::thread::current());
         }
         loop {
-            std::thread::sleep(Duration::from_secs(1));
-            tick(&app);
+            let last_tick = app.state::<AppState>().sched.lock().unwrap().last_tick;
+            // Alarms get first refusal, including a timer expiring on the
+            // very same tick. tick holds Windows awake before any due
+            // alarm enters source resolution, which can involve folder I/O.
+            update_power(&app, &mut power);
+            tick(&app, &mut power);
+            update_power(&app, &mut power);
+            tick_sleep(&app, &mut power, last_tick);
+            std::thread::park_timeout(Duration::from_secs(1));
         }
     });
+}
+
+fn update_power(app: &AppHandle, power: &mut power::PowerManager) {
+    let state = app.state::<AppState>();
+    let enabled = state.store.data.lock().unwrap().settings.wake_for_alarms;
+    let next = if enabled {
+        next_alarm(app).map(|a| a.at_ms)
+    } else {
+        None
+    };
+    let (ringing, sleep_active) = {
+        let sched = state.sched.lock().unwrap();
+        (sched.ringing.is_some(), sched.sleep.timer.is_some())
+    };
+    let plan = wake_plan(Local::now().timestamp_millis(), next, ringing);
+    power.keep_awake(plan.keep_awake || sleep_active);
+    let result = power.sync_wake(plan.arm_at_ms);
+    let mut sched = state.sched.lock().unwrap();
+    match result {
+        Ok(()) => {
+            sched.wake_at_ms = plan.arm_at_ms;
+            sched.wake_error = None;
+        }
+        Err(error) => {
+            sched.wake_at_ms = None;
+            sched.wake_error = Some(error);
+        }
+    }
+}
+
+fn tick_sleep(app: &AppHandle, power: &mut power::PowerManager, last_tick: i64) {
+    let now_ms = Local::now().timestamp_millis();
+    let next = next_alarm(app).map(|a| a.at_ms);
+    let state = app.state::<AppState>();
+    let (effect, snapshot) = {
+        let mut sched = state.sched.lock().unwrap();
+        let priority = wake_plan(now_ms, next, sched.ringing.is_some()).keep_awake;
+        let resumed = power_clock_interrupted(last_tick * 1000, now_ms);
+        let effect = sched.sleep.advance(now_ms, priority, resumed);
+        (effect, sched.sleep.clone())
+    };
+    if effect == SleepEffect::None {
+        return;
+    }
+    if effect == SleepEffect::Countdown {
+        // Do not take the alarm's always-on-top grab for a timer prompt.
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.unminimize();
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+    }
+    if let SleepEffect::Execute(action) = effect {
+        if action == SleepAction::Stop {
+            let _ = app.emit("sleep-timer-updated", &snapshot);
+            return;
+        }
+        let committed = {
+            // Alarm/settings writers use this gate too. Refresh Windows from
+            // their latest saved state before committing suspension, then
+            // refuse later writes until the OS call has returned.
+            let _power_update = state.power_updates.lock().unwrap();
+            update_power(app, power);
+            let now_ms = Local::now().timestamp_millis();
+            let next = next_alarm(app).map(|a| a.at_ms);
+            let mut sched = state.sched.lock().unwrap();
+            if sched.sleep.revision != snapshot.revision {
+                return;
+            }
+            let alarm_priority = wake_plan(now_ms, next, sched.ringing.is_some()).keep_awake;
+            // A settings write may have held the gate while the PC slept or
+            // its storage stalled. Recheck clock continuity at dispatch too.
+            if alarm_priority || power_clock_interrupted(last_tick * 1000, now_ms) {
+                sched.sleep.cancel(if alarm_priority {
+                    SleepOutcome::Alarm
+                } else {
+                    SleepOutcome::Cancelled
+                });
+                let cancelled = sched.sleep.clone();
+                drop(sched);
+                let _ = app.emit("sleep-timer-updated", cancelled);
+                return;
+            }
+            if !sched.sleep.commit_power(snapshot.revision) {
+                return;
+            }
+            // This lock is the cancellation boundary. Commands arriving
+            // afterwards report that Windows is starting the action, rather
+            // than reporting success for a cancellation they cannot honor.
+            sched.power_committed = true;
+            sched.sleep.clone()
+        };
+        let _ = app.emit("sleep-timer-updated", &committed);
+        // Do not hold the scheduler lock across SetSuspendState: it returns
+        // only after resume, while the webview may be processing cancellation.
+        power.keep_awake(false);
+        let result = power::execute(action);
+        let failed = {
+            let mut sched = state.sched.lock().unwrap();
+            sched.power_committed = false;
+            result
+                .err()
+                .filter(|error| sched.sleep.fail(committed.revision, error.clone()))
+                .map(|_| sched.sleep.clone())
+        };
+        if let Some(failed) = failed {
+            let _ = app.emit("sleep-timer-updated", failed);
+        }
+    } else {
+        let _ = app.emit("sleep-timer-updated", &snapshot);
+    }
 }

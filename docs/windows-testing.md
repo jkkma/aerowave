@@ -81,3 +81,32 @@ Sleep and shutdown checks can interrupt the entire computer. Start with the
 stop-playing action and cancellation behavior; arrange an explicit user-approved
 test window before actually suspending or shutting down the machine. Preserve
 test evidence and follow the Recycle Bin rule when cleaning up test files.
+
+## Power timer checks
+
+`cargo run --manifest-path src-tauri/Cargo.toml --example powercheck` reads the
+current Windows capabilities and active AC/battery wake policy, briefly arms a
+wake timer for tomorrow, then cancels it. It also acquires/releases the system
+keep-awake request. It never requests sleep or shutdown. Timer acceptance alone
+does not establish that hardware and the active policy will resume the PC.
+
+The core suite covers timer expiry, the cancellable power countdown, replacement
+and cancellation before dispatch, alarm precedence, short interrupted clock
+gaps, and waking both before an alarm and at its actual deadline. A power timer
+whose deadline passed during a clock gap longer than five seconds is cancelled;
+this deliberately favors staying on when a suspend or a stalled scheduler made
+its countdown unreliable. The separate 90-second alarm catch-up rule is unchanged.
+
+With disposable portable settings, check Stop audio expiry and recovery after
+page reload. Check Sleep PC and Shut down PC selection and cancellation with a
+long duration. The countdown is a modal dialog: focus starts on Cancel, Tab stays
+there, Escape requests cancellation, and a rejected cancellation remains visible.
+A scheduled or TEST alarm closes it and cancels the timer. Do not let a real
+power countdown expire outside the approved test window.
+
+For an actual wake test, use a near-future alarm and a known playable local file.
+Record the power source, wake policy and sleep state before suspending. Check an
+ordinary wake, a snooze, and sleeping again during the 45-second early-wake window.
+Repeat on battery only when its wake policy permits it. Modern Standby suspends
+desktop applications differently from traditional sleep; report its measured
+result separately rather than treating a successfully armed timer as proof.

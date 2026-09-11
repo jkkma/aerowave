@@ -141,9 +141,16 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   say ON AIR, orb still turning, over silence.
 - Sleep timer: 15 / 30 / 45 / 60 / 90 / 120 minutes, fading out over the last
   twenty seconds so it arrives at silence as the countdown reaches zero rather
-  than starting to go quiet there. Turning it off mid-fade puts the volume back. It never touches
-  a ringing alarm: an alarm cancels the timer when it fires, and a timer that
-  lapses mid-ring lapses quietly.
+  than starting to go quiet there. Choose **Stop audio**, **Sleep PC**, or
+  **Shut down PC** before choosing the duration. The selected action is remembered
+  for the next timer; choosing another duration replaces an active timer.
+  Rust owns the deadline, including while the window is hidden or reloading.
+  Turning it off mid-fade puts the volume back. Sleep and shutdown stop the audio,
+  then show a 30-second countdown that can be cancelled with its button or Escape.
+  Shutdown lets other applications with unsaved work block it. A ringing alarm
+  cancels the timer, and an alarm due within 45 seconds takes priority over power
+  actions. An overdue power action is cancelled after a long suspend, so waking
+  the PC does not immediately put it back to sleep or shut it down.
 
 **Browsing**
 
@@ -272,6 +279,21 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   four reconnects, the backup folder takes over.
 - Missed alarms are caught up: if the machine was asleep through the alarm minute,
   it rings on wake as long as it is less than 15 minutes late.
+- **Wake PC for alarms** in Settings is enabled by default on Windows. Aerowave
+  requests a wake timer 45 seconds before the next alarm or snooze, giving the
+  network and audio device time to resume, and keeps Windows awake through the
+  ring. Editing, disabling or deleting an alarm updates the wake request.
+  Keep Aerowave running, including in the tray: quitting cancels its timers.
+  Wake support depends on the PC and its current AC/battery power plan. Settings
+  reports the current policy; if blocked, enable **Sleep > Allow wake timers**
+  in Windows' advanced power settings. Aerowave does not change that system setting.
+  Modern Standby may suspend desktop applications, so automatic waking there is
+  not guaranteed. Alarms cannot turn on a shut-down PC. The native adapter uses
+  [Windows resume-capable waitable timers](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-setwaitabletimer);
+  Microsoft's [Modern Standby guidance](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/integrating-apps-with-modern-standby)
+  explains the desktop-app limitation.
+  PC sleep, shutdown and wake actions are available on Windows; Linux retains
+  the audio sleep timer and reports that PC power controls are unavailable.
 - Ringing raises the window over whatever else is on screen.
 
 ## Installing it

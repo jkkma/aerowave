@@ -238,9 +238,10 @@ main {
 .stage {
   display: grid;
   grid-template-rows: 1fr auto auto auto;
-  gap: 14px;
+  gap: 12px;
   place-items: center;
   padding-top: 22px;
+  overflow-y: auto;
 }
 
 .console { display: grid; grid-template-rows: auto 1fr; gap: 12px; min-height: 0; overflow: hidden; }
@@ -252,7 +253,7 @@ main {
   display: grid;
   place-items: center;
   width: 100%;
-  min-height: 268px;
+  min-height: 230px;
 }
 
 .orb {
@@ -529,7 +530,12 @@ body.playing .gel.big { box-shadow: 0 0 22px rgba(120, 236, 255, .45), 0 5px 16p
   box-shadow: 0 2px 5px rgba(0, 0, 0, .55);
 }
 
+.sleepbox { display: grid; gap: 9px; width: 100%; min-width: 0; }
 .sleeprow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; width: 100%; }
+#sleep-chips { flex-wrap: wrap; }
+.sleep-action-row .field { width: 146px; }
+.sleep-hint { font-size: 11px; line-height: 1.45; }
+#sleep-left { max-width: 100%; line-height: 1.5; }
 .hud-mini {
   font-family: var(--hud);
   font-weight: 500;
@@ -553,6 +559,7 @@ body.playing .gel.big { box-shadow: 0 0 22px rgba(120, 236, 255, .45), 0 5px 16p
   cursor: pointer;
 }
 .chip:hover { border-color: rgba(190, 240, 255, .55); }
+.chip:disabled { opacity: .5; cursor: not-allowed; }
 .chip.on {
   background: linear-gradient(180deg, #c8f2f7, #83d2dd);
   border-color: rgba(224, 254, 255, .6);
@@ -589,7 +596,7 @@ body.playing .gel.big { box-shadow: 0 0 22px rgba(120, 236, 255, .45), 0 5px 16p
 .pane.on { display: grid; }
 /* Settings form one scrollable page; a long about section must not squeeze
    the switches into a second, tiny scrolling area. */
-#pane-settings.on { grid-template-rows: repeat(3, max-content); align-content: start; }
+#pane-settings.on { grid-template-rows: repeat(4, max-content); align-content: start; }
 #pane-settings .settings { overflow: visible; }
 #pane-browse.on { grid-template-rows: auto auto 1fr auto; }
 /* The directory filters, two to a row and evenly split. */
@@ -752,6 +759,10 @@ body.playing .gel.big { box-shadow: 0 0 22px rgba(120, 236, 255, .45), 0 5px 16p
 .settings .row:hover { background: none; border-color: transparent; box-shadow: none; }
 .settings .row span { flex: 1; min-width: 0; font-size: 14px; }
 .settings .row em { display: block; margin-top: 3px; font-style: normal; font-size: 11px; color: #b7d7e4; }
+.power-info { padding: 0 8px; font-size: 12px; line-height: 1.5; color: #c2e2f2; }
+.power-info p { margin: 6px 0; }
+.power-info .editor-note { font-size: 11px; }
+.sw:disabled { opacity: .5; cursor: not-allowed; }
 
 .about { min-width: 0; overflow-wrap: anywhere; padding: 12px 6px 2px; font-size: 12.5px; line-height: 1.5; color: rgba(206, 236, 248, .78); }
 .about p { margin: 8px 0; }
@@ -952,6 +963,13 @@ select.field option { background: #062434; color: var(--foam); }
 }
 
 /* ----------------------------------------------------- alarm overlay --- */
+
+.power-dialog { width: min(440px, 88vw); padding: 30px; text-align: center; color: var(--foam); border: 1px solid rgba(170, 226, 244, .6); background-color: #073047; }
+.power-dialog::backdrop { background: rgba(1, 8, 13, .82); backdrop-filter: blur(9px); }
+.power-dialog h2 { margin: 12px 0 4px; font-size: 24px; color: var(--amber-hi); }
+.power-dialog p { font-size: 13px; line-height: 1.5; }
+.power-dialog .editor-note { margin-top: 12px; font-size: 11px; }
+.power-seconds { font-family: var(--hud); font-size: 64px; font-variant-numeric: tabular-nums; color: var(--amber); }
 
 .ringing {
   position: fixed;
