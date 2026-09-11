@@ -263,6 +263,11 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   it does reads as a different alarm rather than the one you set. Dismissing it
   ends the hold, so the next day draws again — as does pointing the alarm at
   another folder, or the held file going missing between snoozes.
+- After giving up, the previous radio station or local music resumes at its
+  previous volume, including between automatic snoozes. Local music continues
+  from the interrupted position with its shuffle history intact; previously
+  paused music stays paused. With nothing playing before the alarm, it returns
+  to silence. Manually dismissing or snoozing a ring still stops playback.
 - Due snoozes wait their turn while another alarm rings. Turning an alarm off
   cancels its pending snooze; a test ring can be dismissed but cannot schedule
   a real snooze.

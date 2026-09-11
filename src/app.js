@@ -142,6 +142,7 @@ const player = {
   triedDirect: false, // ...and have we already fallen back off it?
   hls: false,         // is hls.js driving the element instead?
   paused: false,      // held, with the source still on the element, so it can resume
+  pendingPosition: null, // local position until its media URL has arrived
   get playing() {
     return !!this.source;
   },
@@ -177,6 +178,7 @@ function stopPlayback(quiet) {
   audio.load();
   player.retries = 0;
   player.paused = false;
+  player.pendingPosition = null;
   player.resolved = null;
   player.probed = false;
   player.relayed = false;
@@ -627,7 +629,8 @@ async function playable(source, url) {
 
 /**
  * Start a source. `opts.fadeSecs` ramps the volume in, `opts.volume`
- * overrides the master volume (alarms have their own). `source.meta` is what
+ * overrides the master volume (alarms have their own). `opts.startTime`
+ * resumes a local file at its interrupted position. `source.meta` is what
  * to show on the third line until the stream itself says otherwise - some
  * servers never will.
  */
@@ -639,6 +642,12 @@ async function play(source, opts = {}) {
   player.retries = 0;
   player.streamTitle = false;
   const volume = opts.volume !== undefined ? opts.volume : state.settings.volume ?? 0.8;
+  // A second alarm can interrupt this connection before the media URL arrives.
+  // Keep the intended volume and position available for its snapshot too.
+  player.target = volume;
+  player.pendingPosition = source.kind === "folder"
+    ? (Number.isFinite(opts.startTime) && opts.startTime > 0 ? opts.startTime : 0)
+    : null;
 
   showNowPlaying(source.title, source.subtitle || "", source.meta || "");
   setOrbArt(source);
@@ -700,8 +709,13 @@ async function play(source, opts = {}) {
   // A ringing alarm plays its one file over and over rather than moving on to
   // another; anything else is heard once and then the `ended` handler decides.
   audio.loop = !!source.loop;
+  if (player.pendingPosition > 0) {
+    // Before metadata arrives this sets the element's default start position,
+    // so an interrupted song does not play its opening again while seeking.
+    audio.currentTime = player.pendingPosition;
+  }
+  player.pendingPosition = null;
   audio.volume = opts.fadeSecs > 0 ? 0.02 : volume;
-  player.target = volume;
   if (player.paused || givingUp) return;
   try {
     await audio.play();
@@ -1858,6 +1872,7 @@ function browseFirstLook() {
 // --------------------------------------------------------------- alarms ---
 
 let ringing = null;
+let interruptedPlayback = null;
 let ringWatchdog = null;
 let autoStopTimer = null;
 /** Set from the moment the give-up timeout fires until the ring is over. */
@@ -1968,6 +1983,17 @@ function armRingWatchdog(quietMs, note, reason) {
 }
 
 function onAlarmFire(payload) {
+  // A replacement ring still interrupts the same listening session. Capture
+  // it only once, before the alarm's source and volume replace the player's.
+  if (!ringing) {
+    interruptedPlayback = player.source ? {
+      source: { ...player.source },
+      position: player.source.kind === "folder" ? player.pendingPosition ?? audio.currentTime : 0,
+      volume: player.target,
+      paused: player.paused,
+      history: [...folderHistory],
+    } : null;
+  }
   ringing = payload;
   // A native dialog occupies the top layer, above the alarm overlay. Close it
   // before focusing the alarm, and undo the old fade before its sound starts.
@@ -2061,7 +2087,7 @@ function onAlarmFire(payload) {
 /**
  * The give-up timeout has run out. Let the sound recede rather than cutting
  * it dead mid-bar - the last thing a room hears from an alarm nobody
- * answered should not be a click - and then stop, or hand it to a snooze.
+ * answered should not be a click - and then end the ring, or hand it to a snooze.
  */
 function giveUp() {
   if (!ringing || givingUp) return;
@@ -2092,7 +2118,7 @@ function autoSnoozeDue() {
   return ringing.trigger !== "test";
 }
 
-/** The fade is over, or there was nothing to fade: snooze, or stop. */
+/** The fade is over: end this ring and return to the interrupted playback. */
 function endGiveUp() {
   if (!ringing) return;
   clearTimeout(autoStopTimer);
@@ -2101,14 +2127,16 @@ function endGiveUp() {
   const mins = ringing.autoStopMins;
   if (autoSnoozeDue()) {
     autoSnoozed.set(ringing.alarmId, (autoSnoozed.get(ringing.alarmId) || 0) + 1);
-    snoozeRing("gave up after " + mins + " min");
+    snoozeRing("gave up after " + mins + " min", { resumePrevious: true });
     return;
   }
   say("alarm gave up after " + mins + " minutes");
-  dismissRing();
+  dismissRing({ resumePrevious: true });
 }
 
-function closeRingUi() {
+function finishRing(resumePrevious) {
+  const previous = resumePrevious ? interruptedPlayback : null;
+  interruptedPlayback = null;
   clearInterval(ringWatchdog);
   clearTimeout(autoStopTimer);
   ringWatchdog = autoStopTimer = null;
@@ -2116,22 +2144,42 @@ function closeRingUi() {
   $("#ringing").hidden = true;
   ringing = null;
   renderSleepTimer();
+  if (previous) {
+    folderHistory = previous.history;
+    play(previous.source, { volume: previous.volume, startTime: previous.position });
+    if (previous.paused) pausePlayback();
+  } else {
+    stopPlayback();
+  }
 }
 
-const pendingRingActions = new WeakSet();
+const pendingRingActions = new WeakMap();
 
-async function dismissRing() {
+function beginRingAction(ring, resumePrevious) {
+  const pending = pendingRingActions.get(ring);
+  if (pending) {
+    // A manual press still means stop when the automatic dismissal or snooze
+    // has already reached Rust. Keep one request, but cancel its audio resume.
+    if (!resumePrevious) pending.resumePrevious = false;
+    return null;
+  }
+  const action = { resumePrevious };
+  pendingRingActions.set(ring, action);
+  return action;
+}
+
+async function dismissRing({ resumePrevious = false } = {}) {
   const ring = ringing;
-  if (!ring || pendingRingActions.has(ring)) return;
-  pendingRingActions.add(ring);
+  if (!ring) return;
+  const action = beginRingAction(ring, resumePrevious);
+  if (!action) return;
   try {
     if (ring.alarmId) {
       if (ring.trigger === "test") await invoke("dismiss_test_alarm", { alarmId: ring.alarmId });
       else await invoke("dismiss_alarm", { alarmId: ring.alarmId });
     }
     if (ringing !== ring) return;
-    closeRingUi();
-    stopPlayback();
+    finishRing(action.resumePrevious);
     refreshNextAlarm();
     refreshPowerStatus();
   } catch (e) {
@@ -2144,18 +2192,18 @@ async function dismissRing() {
 }
 
 /** `why` is set when the alarm snoozed itself rather than being asked to. */
-async function snoozeRing(why) {
+async function snoozeRing(why, { resumePrevious = false } = {}) {
   const ring = ringing;
-  if (!ring || ring.trigger === "test" || pendingRingActions.has(ring)) return;
+  if (!ring || ring.trigger === "test") return;
+  const action = beginRingAction(ring, resumePrevious);
+  if (!action) return;
   const { alarmId, snoozeMins } = ring;
-  pendingRingActions.add(ring);
   try {
     await invoke("snooze_alarm", { alarmId, minutes: snoozeMins });
     // A later alarm can arrive while IPC is pending. Its card and audio belong
     // to that occurrence, even if both occurrences have the same alarm id.
     if (ringing !== ring) return;
-    closeRingUi();
-    stopPlayback();
+    finishRing(action.resumePrevious);
     say((why ? why + " - " : "") + "snoozed for " + snoozeMins + " minutes", "good");
     refreshNextAlarm();
     refreshPowerStatus();
