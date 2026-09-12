@@ -7,8 +7,8 @@ pub const POWER_COUNTDOWN_MS: i64 = 30_000;
 pub const WAKE_LEAD_MS: i64 = 45_000;
 
 /// A power countdown must have recent clock ticks before it can dispatch.
-/// This is deliberately tighter than the missed-alarm catch-up threshold:
-/// even a brief suspend must not resume into an overdue shutdown.
+/// Even a brief suspend must not resume into an overdue shutdown; alarm
+/// catch-up separately allows an occurrence to ring up to 15 minutes late.
 pub fn power_clock_interrupted(last_tick_ms: i64, now_ms: i64) -> bool {
     now_ms.saturating_sub(last_tick_ms) > 5_000
 }
@@ -160,29 +160,36 @@ impl SleepSnapshot {
 pub struct WakePlan {
     pub arm_at_ms: Option<i64>,
     pub keep_awake: bool,
+    pub keep_display_awake: bool,
 }
 
 /// Wake early enough for the audio device and network to resume, then keep
-/// Windows awake until the alarm rings. Snoozes use the same deadline rule.
+/// Windows and its display awake until the alarm rings. An unattended wake
+/// leaves the display off unless requested; the alarm must surface on it.
+/// Snoozes use the same deadline rule.
 pub fn wake_plan(now_ms: i64, next_alarm_ms: Option<i64>, ringing: bool) -> WakePlan {
     match next_alarm_ms {
         Some(at) if at > now_ms + WAKE_LEAD_MS => WakePlan {
             arm_at_ms: Some(at - WAKE_LEAD_MS),
             keep_awake: ringing,
+            keep_display_awake: ringing,
         },
         Some(at) if at > now_ms => WakePlan {
             // Keep a second wake request at the alarm itself: a lid close or
             // explicit Sleep overrides the keep-awake request after early wake.
             arm_at_ms: Some(at),
             keep_awake: true,
+            keep_display_awake: true,
         },
         Some(_) => WakePlan {
             arm_at_ms: None,
             keep_awake: true,
+            keep_display_awake: true,
         },
         None => WakePlan {
             arm_at_ms: None,
             keep_awake: ringing,
+            keep_display_awake: ringing,
         },
     }
 }
@@ -330,14 +337,16 @@ mod tests {
             wake_plan(0, Some(300_000), false),
             WakePlan {
                 arm_at_ms: Some(255_000),
-                keep_awake: false
+                keep_awake: false,
+                keep_display_awake: false
             }
         );
         assert_eq!(
             wake_plan(255_000, Some(300_000), false),
             WakePlan {
                 arm_at_ms: Some(300_000),
-                keep_awake: true
+                keep_awake: true,
+                keep_display_awake: true
             }
         );
         assert_eq!(
@@ -348,22 +357,47 @@ mod tests {
             wake_plan(300_001, Some(300_000), false),
             WakePlan {
                 arm_at_ms: None,
-                keep_awake: true
+                keep_awake: true,
+                keep_display_awake: true
             }
         );
         assert_eq!(
             wake_plan(0, None, false),
             WakePlan {
                 arm_at_ms: None,
-                keep_awake: false
+                keep_awake: false,
+                keep_display_awake: false
             }
         );
         assert_eq!(
             wake_plan(0, None, true),
             WakePlan {
                 arm_at_ms: None,
-                keep_awake: true
+                keep_awake: true,
+                keep_display_awake: true
             }
         );
+    }
+
+    #[test]
+    fn only_alarm_preparation_and_ringing_request_the_display() {
+        for (now_ms, next_alarm_ms, ringing, expected) in [
+            (0, None, false, false),
+            (0, Some(WAKE_LEAD_MS + 1), false, false),
+            (0, Some(WAKE_LEAD_MS), false, true),
+            (0, Some(1), false, true),
+            (0, Some(0), false, true),
+            (0, Some(-1), false, true),
+            (0, None, true, true),
+            (0, Some(WAKE_LEAD_MS + 1), true, true),
+        ] {
+            let plan = wake_plan(now_ms, next_alarm_ms, ringing);
+            assert_eq!(plan.keep_display_awake, expected);
+        }
+        // Snoozing or dismissing releases the screen even when a separate
+        // sleep timer still needs to hold the system awake until its deadline.
+        let snoozed = wake_plan(0, Some(9 * 60_000), false);
+        assert!(!snoozed.keep_display_awake);
+        assert!(!wake_plan(0, None, false).keep_display_awake);
     }
 }

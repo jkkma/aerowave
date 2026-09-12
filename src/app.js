@@ -120,6 +120,7 @@ audio.preload = "none";
  * fallback, which aborts the first fallback, and so on until it gives up.
  */
 let playGeneration = 0;
+let lastMediaTime = 0;
 
 /** Did something newer take over since this attempt started? */
 function superseded(generation) {
@@ -176,6 +177,7 @@ function stopPlayback(quiet) {
   // Load-bearing: without this an alarm firing while the radio is already
   // playing inherits a fresh timestamp and its watchdog never trips.
   player.lastProgress = 0;
+  lastMediaTime = 0;
   clearTimers();
   // Drop the source first: tearing down the element fires events that would
   // otherwise look like a stream failure and start a reconnect.
@@ -1047,17 +1049,17 @@ audio.addEventListener("playing", () => {
   player.retries = 0;
   setStatus(player.source.kind === "folder" ? "Playing your music" : "Live radio", "on");
 });
-// The only event that means audio is genuinely coming out, rather than that
-// something was asked to start.
-let lastMediaTime = 0;
+// Media events also arrive during seeks, stalls and device recovery. Only a
+// ready, playing element whose playhead advances can reassure the watchdog.
+// This checks decoding progress; it cannot establish that speakers are audible.
 audio.addEventListener("timeupdate", () => {
   if (!player.source) return;
   const now = audio.currentTime;
-  // Under HLS the element is fed by hls.js, which writes currentTime itself to
-  // step over gaps - and every write fires this. Only forward motion counts as
-  // audio having arrived, or the alarm watchdog would be reassured by a stream
-  // that had stopped.
-  if (!player.hls || now > lastMediaTime) player.lastProgress = Date.now();
+  if (!audio.paused && !audio.seeking && audio.readyState >= 3 && now > lastMediaTime) {
+    player.lastProgress = Date.now();
+  }
+  // Keep the baseline through seeks and loop wraps so the next real movement
+  // counts from the new position, instead of waiting to pass the old one.
   lastMediaTime = now;
 
   if (!hlsTitles.length) return;
