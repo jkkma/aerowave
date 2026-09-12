@@ -137,7 +137,16 @@ fn save_settings(
         settings.start_with_windows = want;
     }
     let want_autostart = settings.start_with_windows;
-    state.store.update(|d| d.settings = settings)?;
+    state.store.update(|d| {
+        // Record an explicit OFF even if another save enables wake again
+        // before the scheduler next observes the settings.
+        state
+            .sched
+            .lock()
+            .unwrap()
+            .set_wake_enabled(settings.wake_for_alarms);
+        d.settings = settings;
+    })?;
     scheduler::refresh(&app);
     // Never let this lose the rest of the settings - they are saved already.
     sync_autostart(&app, &state, want_autostart, explicit_autostart)

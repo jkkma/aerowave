@@ -12,7 +12,8 @@ use std::time::Duration;
 use aerowave_core::ring::RingHolds;
 use aerowave_core::schedule;
 use aerowave_core::sleep::{
-    power_clock_interrupted, wake_plan, SleepAction, SleepEffect, SleepOutcome, SleepSnapshot,
+    power_clock_interrupted, wake_plan, AlarmWakeHold, SleepAction, SleepEffect, SleepOutcome,
+    SleepSnapshot,
 };
 use chrono::Local;
 use serde::Serialize;
@@ -41,6 +42,7 @@ pub struct SchedState {
     thread: Option<std::thread::Thread>,
     wake_at_ms: Option<i64>,
     wake_error: Option<String>,
+    wake_hold: AlarmWakeHold,
     power_committed: bool,
 }
 
@@ -50,16 +52,19 @@ pub struct PowerStatus {
     #[serde(flatten)]
     capabilities: power::PowerCapabilities,
     armed_at_ms: Option<i64>,
+    staying_awake: bool,
     error: Option<String>,
 }
 
 pub fn power_status(app: &AppHandle) -> PowerStatus {
     let capabilities = power::capabilities();
     let state = app.state::<AppState>();
+    let wake_enabled = state.store.data.lock().unwrap().settings.wake_for_alarms;
     let sched = state.sched.lock().unwrap();
     PowerStatus {
         capabilities,
         armed_at_ms: sched.wake_at_ms,
+        staying_awake: wake_enabled && sched.wake_hold.active(),
         error: sched.wake_error.clone(),
     }
 }
@@ -157,6 +162,10 @@ pub fn test_alarm(app: &AppHandle, alarm: Alarm) -> Result<FirePayload, String> 
 }
 
 impl SchedState {
+    pub fn set_wake_enabled(&mut self, enabled: bool) {
+        self.wake_hold.set_enabled(enabled);
+    }
+
     pub fn cancel_pending(&mut self, alarm_id: &str) {
         self.snoozed.remove(alarm_id);
         self.holds.release(alarm_id);
@@ -387,6 +396,7 @@ pub fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str) -> bool {
         // source work so a cancelled snooze cannot publish an obsolete ring.
         let mut data = state.store.data.lock().unwrap();
         let mut sched = state.sched.lock().unwrap();
+        let wake_enabled = cfg!(windows) && data.settings.wake_for_alarms;
         let Some(current) = data.alarms.iter_mut().find(|a| a.id == alarm.id) else {
             return false;
         };
@@ -410,6 +420,9 @@ pub fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str) -> bool {
         if one_shot {
             current.enabled = false;
         }
+        // Ending the sound must not send an unattended alarm wake back to
+        // sleep. Preview alarms use a separate path and never claim this hold.
+        sched.wake_hold.alarm_fired(wake_enabled);
         sched.sleep.cancel(SleepOutcome::Alarm);
         (one_shot, sched.sleep.clone())
     };
@@ -641,11 +654,14 @@ fn update_power(app: &AppHandle, power: &mut power::PowerManager) {
     } else {
         None
     };
-    let (ringing, sleep_active) = {
-        let sched = state.sched.lock().unwrap();
-        (sched.ringing.is_some(), sched.sleep.timer.is_some())
+    let (plan, sleep_active) = {
+        let mut sched = state.sched.lock().unwrap();
+        let ringing = sched.ringing.is_some();
+        let plan = sched
+            .wake_hold
+            .plan(Local::now().timestamp_millis(), next, ringing, enabled);
+        (plan, sched.sleep.timer.is_some())
     };
-    let plan = wake_plan(Local::now().timestamp_millis(), next, ringing);
     let awake_result = power.keep_awake(plan.keep_awake || sleep_active, plan.keep_display_awake);
     let result = power.sync_wake(plan.arm_at_ms);
     let mut sched = state.sched.lock().unwrap();
@@ -688,7 +704,7 @@ fn tick_sleep(app: &AppHandle, power: &mut power::PowerManager, last_tick: i64) 
             let _ = app.emit("sleep-timer-updated", &snapshot);
             return;
         }
-        let committed = {
+        let (committed, wake_hold) = {
             // Alarm/settings writers use this gate too. Refresh Windows from
             // their latest saved state before committing suspension, then
             // refuse later writes until the OS call has returned.
@@ -721,7 +737,10 @@ fn tick_sleep(app: &AppHandle, power: &mut power::PowerManager, last_tick: i64) 
             // afterwards report that Windows is starting the action, rather
             // than reporting success for a cancellation they cannot honor.
             sched.power_committed = true;
-            sched.sleep.clone()
+            // A later, explicit power timer is still allowed. Release only
+            // at dispatch, so selecting or cancelling one cannot lose the hold.
+            let wake_hold = std::mem::take(&mut sched.wake_hold);
+            (sched.sleep.clone(), wake_hold)
         };
         let _ = app.emit("sleep-timer-updated", &committed);
         // Do not hold the scheduler lock across SetSuspendState: it returns
@@ -731,6 +750,9 @@ fn tick_sleep(app: &AppHandle, power: &mut power::PowerManager, last_tick: i64) 
         let failed = {
             let mut sched = state.sched.lock().unwrap();
             sched.power_committed = false;
+            sched
+                .wake_hold
+                .finish_power_action(wake_hold, action, result.is_ok());
             result
                 .err()
                 .filter(|error| sched.sleep.fail(committed.revision, error.clone()))

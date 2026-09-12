@@ -183,6 +183,22 @@ test("the wake switch saves the preference without changing startup intent", asy
   assert.match(h.el("#power-status").textContent, /Wake for alarms is off/);
 });
 
+test("persistent alarm wake status clears with the preference and does not claim a failed request succeeded", async () => {
+  let error = null;
+  const h = powerHarness({ invoke: command => command === "power_status"
+    ? { ...capabilities, stayingAwake: true, error } : undefined });
+  await h.evaluate("refreshPowerStatus()");
+  assert.match(h.el("#power-status").textContent, /Keeping this PC awake after an alarm/);
+  error = "Windows refused the keep-awake request";
+  await h.evaluate("refreshPowerStatus()");
+  assert.doesNotMatch(h.el("#power-status").textContent, /Keeping this PC awake/);
+  assert.match(h.el("#power-status").textContent, /Windows refused/);
+  error = null;
+  h.evaluate("state.settings.wakeForAlarms = false");
+  await h.evaluate("refreshPowerStatus()");
+  assert.doesNotMatch(h.el("#power-status").textContent, /Keeping this PC awake/);
+});
+
 test("wake status formats the armed deadline using OS timezone rules", async () => {
   const h = powerHarness({ invoke: command => {
     if (command === "power_status") return { ...capabilities, armedAtMs: 1789019005000 };

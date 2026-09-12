@@ -118,6 +118,16 @@ then an unavailable station with a valid backup folder. Record the media clock,
 readiness, volume and Windows audio-session output; an advancing media clock alone
 does not prove that the speakers made sound. The display request must release on
 dismissal and snooze, and a sleep timer by itself must not hold the display on.
+With Wake PC for alarms enabled, a real alarm also starts a system keep-awake
+hold that survives dismissal, snooze and automatic stopping. Verify it with a
+scheduled alarm, including one with no usable audio source; TEST must not start
+it. Check Settings reports the hold, disabling wake-for-alarms releases it, and
+re-enabling the setting alone does not restore it. A subsequently selected and
+cancelled PC power timer must leave the hold intact. Successful Sleep clears it;
+a failed Windows call restores it. Shut down retains the hold until process exit
+because another application or the user can cancel an accepted shutdown. Perform
+actual power transitions only within an approved test window. The hold must not
+be treated as a ringing alarm that cancels every subsequent power timer.
 Repeat on battery only when its wake policy permits it. Modern Standby suspends
 desktop applications differently from traditional sleep; report its measured
 result separately rather than treating a successfully armed timer as proof.

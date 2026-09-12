@@ -2950,6 +2950,9 @@ function renderPowerStatus() {
   wake.disabled = !powerStatus.wakeSupported;
   const details = [];
   if (state.settings.wakeForAlarms === false) details.push("Wake for alarms is off.");
+  if (powerStatus.stayingAwake && state.settings.wakeForAlarms !== false && !powerStatus.error) {
+    details.push("Keeping this PC awake after an alarm. You can still put it to sleep manually.");
+  }
   if (powerStatus.message) details.push(powerStatus.message);
   if (powerStatus.armedAtMs != null && powerWakeTime && state.settings.wakeForAlarms !== false) {
     const when = powerWakeTime;

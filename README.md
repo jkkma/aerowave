@@ -290,8 +290,15 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   network and audio device time to resume, and requests both the system and
   display stay awake through the ring. A timer wake otherwise leaves the display
   off; showing the alarm window alone does not request display power. The display
-  request ends when the alarm is dismissed or snoozed. Editing, disabling or
-  deleting an alarm updates the wake request.
+  request ends when the alarm is dismissed or snoozed. After any real alarm
+  fires with this setting on, the system stays awake for the rest of the app
+  session, including through snoozes, automatic stopping and dismissal. This
+  also applies when the PC was already awake; TEST does not start this hold.
+  The screen can turn off normally after ringing. Turning this setting off or
+  quitting restores automatic sleep. Manual Sleep and Shut down still work,
+  as does a subsequently requested PC power timer; a failed power action keeps
+  the hold. Editing, disabling or deleting an alarm updates the next wake timer
+  without releasing the hold from an alarm that already fired.
   Keep Aerowave running, including in the tray: quitting cancels its timers.
   Wake support depends on the PC and its current AC/battery power plan. Settings
   reports the current policy; if blocked, enable **Sleep > Allow wake timers**
