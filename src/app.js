@@ -11,6 +11,14 @@ const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 const appWindow = window.__TAURI__.window.getCurrentWindow();
 
+// WebKitGTK repaints large filtered layers and a changing WebGL canvas on the
+// CPU on this path. The class lets CSS use a precomposed backdrop there while
+// Windows keeps the original layered animation.
+const IS_LINUX_WEBVIEW = /\bLinux\b/i.test(
+  `${navigator.platform || ""} ${navigator.userAgent || ""}`
+);
+document.body.classList.toggle("linux", IS_LINUX_WEBVIEW);
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const pad2 = (n) => String(n).padStart(2, "0");
