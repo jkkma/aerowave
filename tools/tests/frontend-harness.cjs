@@ -185,7 +185,7 @@ function createHarness(options = {}) {
   const context = vm.createContext({
     document, Audio, Hls, URL, TextEncoder, TextDecoder, AbortController, console,
     btoa: (str) => Buffer.from(str, "binary").toString("base64"),
-    navigator: {},
+    navigator: options.navigator || {},
     window: { __TAURI__: {
       core: { invoke, convertFileSrc: (file) => "asset://" + file },
       event: { listen: async (name, handler) => {

@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const { createHarness, deferred, flush, Element } = require("./frontend-harness.cjs");
 
@@ -8,6 +10,29 @@ function option(value, label) {
   el.textContent = label;
   return el;
 }
+
+test("only Linux webviews receive the reduced-compositing class", () => {
+  const linux = createHarness({ navigator: {
+    platform: "Linux x86_64",
+    userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15",
+  } });
+  const windows = createHarness({ navigator: {
+    platform: "Win32",
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+  } });
+
+  assert.equal(linux.document.body.classList.contains("linux"), true);
+  assert.equal(windows.document.body.classList.contains("linux"), false);
+});
+
+test("the Linux reduced-compositing backdrop is present and referenced", () => {
+  const root = path.resolve(__dirname, "../..");
+  const styles = fs.readFileSync(path.join(root, "src/styles.css"), "utf8");
+  const backdrop = fs.readFileSync(path.join(root, "src/linux-backdrop.png"));
+
+  assert.match(styles, /body\.linux \.sky \{[^}]*linux-backdrop\.png/s);
+  assert.equal(backdrop.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+});
 
 test("clearing a country invalidates its pending dynamic and fixed facet responses", async () => {
   const facets = deferred();

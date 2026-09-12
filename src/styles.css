@@ -135,6 +135,19 @@ body {
 @keyframes drift   { to { transform: translateX(96px); } }
 @keyframes spin    { to { transform: rotate(360deg); } }
 
+/* WebKitGTK repaints these filtered, viewport-sized layers whenever anything
+   changes, including the clock and the small WebGL orb. At high display scales
+   that consumes a whole content-process core. This is the same backdrop held
+   at the animations' midpoint and precomposed into one cacheable surface; the
+   interactive glass and orb stay live, and Windows keeps every original layer. */
+body.linux .sky {
+  background: url("linux-backdrop.png") center / cover no-repeat;
+}
+body.linux .sky > *,
+body.linux .vignette {
+  display: none;
+}
+
 /* ---------------------------------------------------------- titlebar --- */
 
 .titlebar {
