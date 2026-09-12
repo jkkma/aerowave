@@ -86,16 +86,20 @@ test evidence and follow the Recycle Bin rule when cleaning up test files.
 
 `cargo run --manifest-path src-tauri/Cargo.toml --example powercheck` reads the
 current Windows capabilities and active AC/battery wake policy, briefly arms a
-wake timer for tomorrow, then cancels it. It also acquires/releases the system
-keep-awake request. It never requests sleep or shutdown. Timer acceptance alone
-does not establish that hardware and the active policy will resume the PC.
+wake timer for tomorrow, then cancels it. It also acquires/releases the
+system and display keep-awake requests, including a change of display state
+while the system request remains active. It never requests sleep or shutdown.
+Timer acceptance alone does not establish that hardware and the active policy
+will resume the PC.
 
 The core suite covers timer expiry, the cancellable power countdown, replacement
 and cancellation before dispatch, alarm precedence, short interrupted clock
 gaps, and waking both before an alarm and at its actual deadline. A power timer
 whose deadline passed during a clock gap longer than five seconds is cancelled;
 this deliberately favors staying on when a suspend or a stalled scheduler made
-its countdown unreliable. The separate 90-second alarm catch-up rule is unchanged.
+its countdown unreliable. Alarm catch-up instead checks whether an occurrence
+crossed between ticks, including short sleeps that span the whole alarm minute,
+and retains the 15-minute grace period.
 
 With disposable portable settings, check Stop audio expiry and recovery after
 page reload. Check Sleep PC and Shut down PC selection and cancellation with a
@@ -107,6 +111,13 @@ power countdown expire outside the approved test window.
 For an actual wake test, use a near-future alarm and a known playable local file.
 Record the power source, wake policy and sleep state before suspending. Check an
 ordinary wake, a snooze, and sleeping again during the 45-second early-wake window.
+Leave the mouse and keyboard alone until the alarm sounds: user input turns an
+unattended timer wake into a different wake path. Check that the display comes on
+during the early-wake window and stays on through ringing. Check radio playback,
+then an unavailable station with a valid backup folder. Record the media clock,
+readiness, volume and Windows audio-session output; an advancing media clock alone
+does not prove that the speakers made sound. The display request must release on
+dismissal and snooze, and a sleep timer by itself must not hold the display on.
 Repeat on battery only when its wake policy permits it. Modern Standby suspends
 desktop applications differently from traditional sleep; report its measured
 result separately rather than treating a successfully armed timer as proof.

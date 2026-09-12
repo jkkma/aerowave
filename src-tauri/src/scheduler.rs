@@ -571,7 +571,7 @@ fn tick(app: &AppHandle, power: &mut power::PowerManager) {
 
     if let Some(id) = due_snooze {
         if let Some(alarm) = alarms.iter().find(|a| a.id == id) {
-            power.keep_awake(true);
+            let _ = power.keep_awake(true, true);
             fired_this_pass = fire(app, alarm, "snooze");
         }
     }
@@ -604,8 +604,8 @@ fn tick(app: &AppHandle, power: &mut power::PowerManager) {
         if busy || fired_this_pass {
             continue;
         }
-        power.keep_awake(true);
-        fired_this_pass = fire(app, alarm, if missed { "catchup" } else { "scheduled" });
+        let _ = power.keep_awake(true, true);
+        fired_this_pass = fire(app, alarm, if on_time { "scheduled" } else { "catchup" });
     }
 }
 
@@ -646,13 +646,13 @@ fn update_power(app: &AppHandle, power: &mut power::PowerManager) {
         (sched.ringing.is_some(), sched.sleep.timer.is_some())
     };
     let plan = wake_plan(Local::now().timestamp_millis(), next, ringing);
-    power.keep_awake(plan.keep_awake || sleep_active);
+    let awake_result = power.keep_awake(plan.keep_awake || sleep_active, plan.keep_display_awake);
     let result = power.sync_wake(plan.arm_at_ms);
     let mut sched = state.sched.lock().unwrap();
     match result {
         Ok(()) => {
             sched.wake_at_ms = plan.arm_at_ms;
-            sched.wake_error = None;
+            sched.wake_error = awake_result.err();
         }
         Err(error) => {
             sched.wake_at_ms = None;
@@ -726,7 +726,7 @@ fn tick_sleep(app: &AppHandle, power: &mut power::PowerManager, last_tick: i64) 
         let _ = app.emit("sleep-timer-updated", &committed);
         // Do not hold the scheduler lock across SetSuspendState: it returns
         // only after resume, while the webview may be processing cancellation.
-        power.keep_awake(false);
+        let _ = power.keep_awake(false, false);
         let result = power::execute(action);
         let failed = {
             let mut sched = state.sched.lock().unwrap();

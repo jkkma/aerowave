@@ -46,6 +46,63 @@ async function expireAlarm(h) {
   await flush();
 }
 
+for (const hls of [false, true]) {
+  for (const unavailable of ["stalled", "paused", "seeking", "not ready"]) {
+    test(`${hls ? "HLS" : "ordinary"} alarm falls back when ${unavailable} media keeps emitting timeupdate`, async () => {
+      const h = harness({ invoke: (command, args) => {
+        if (command === "probe_stream") return { url: args.url, hls };
+        if (command === "backup_track") return { path: "/backup/rescue.mp3", name: "Rescue.mp3", total: 1 };
+      } });
+      h.context.now = 1000;
+      h.evaluate("Date.now = () => now");
+      await ring(h, { kind: "station", url: "https://radio.test/listen", autoStopMins: 0 });
+      const audio = h.audios[0];
+      audio.readyState = unavailable === "not ready" ? 2 : 3;
+      audio.paused = unavailable === "paused";
+      audio.seeking = unavailable === "seeking";
+      for (let tick = 1; tick <= 13; tick++) {
+        h.context.now = 1000 + tick * 1000;
+        audio.currentTime = unavailable === "stalled" ? 0 : tick;
+        await audio.dispatch("timeupdate");
+        await h.fireTimer(h.evaluate("ringWatchdog"));
+        await flush();
+      }
+      assert.equal(h.calls.filter(({ command }) => command === "backup_track").length, 1);
+      assert.equal(h.evaluate("player.source?.path"), "/backup/rescue.mp3");
+      assert.equal(audio.volume, 0.9);
+    });
+  }
+}
+
+test("a replacement alarm measures its own progress and keeps working after its file loops", async () => {
+  const h = harness();
+  h.context.now = 1000;
+  h.evaluate("Date.now = () => now");
+  await playMusic(h);
+  const audio = h.audios[0];
+  audio.readyState = 3;
+  audio.currentTime = 180;
+  await audio.dispatch("timeupdate");
+  await ring(h, { autoStopMins: 0 });
+  audio.readyState = 3;
+  h.context.now = 2000;
+  audio.currentTime = 0.25;
+  await audio.dispatch("timeupdate");
+  assert.equal(h.evaluate("player.lastProgress"), 2000);
+  h.context.now = 3000;
+  audio.currentTime = 200;
+  await audio.dispatch("timeupdate");
+  h.context.now = 4000;
+  audio.currentTime = 0;
+  await audio.dispatch("timeupdate");
+  assert.equal(h.evaluate("player.lastProgress"), 3000);
+  h.context.now = 5000;
+  audio.currentTime = 0.25;
+  await audio.dispatch("timeupdate");
+  assert.equal(h.evaluate("player.lastProgress"), 5000);
+  assert.equal(h.calls.some(({ command }) => command === "backup_track"), false);
+});
+
 test("an alarm that gives up resumes the interrupted radio at its previous volume", async () => {
   const h = harness();
   await playRadio(h);

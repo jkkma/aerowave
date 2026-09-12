@@ -29,7 +29,8 @@ mod platform {
         GetPwrCapabilities, GetSystemPowerStatus, PowerGetActiveScheme, PowerReadACValueIndex,
         PowerReadDCValueIndex, PowerSystemHibernate, PowerSystemShutdown, PowerSystemSleeping1,
         PowerSystemSleeping2, PowerSystemSleeping3, SetSuspendState, SetThreadExecutionState,
-        ES_CONTINUOUS, ES_SYSTEM_REQUIRED, SYSTEM_POWER_CAPABILITIES, SYSTEM_POWER_STATUS,
+        ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SYSTEM_POWER_CAPABILITIES,
+        SYSTEM_POWER_STATUS,
     };
     use windows_sys::Win32::System::Shutdown::{
         ExitWindowsEx, EWX_POWEROFF, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_APPLICATION,
@@ -61,6 +62,7 @@ mod platform {
         armed_at_ms: Option<i64>,
         last_failure: Option<(i64, Instant, String)>,
         awake: bool,
+        display_awake: bool,
         awake_request_failed: bool,
     }
 
@@ -71,6 +73,7 @@ mod platform {
                 armed_at_ms: None,
                 last_failure: None,
                 awake: false,
+                display_awake: false,
                 awake_request_failed: false,
             }
         }
@@ -137,17 +140,34 @@ mod platform {
             self.armed_at_ms = None;
         }
 
-        pub fn keep_awake(&mut self, awake: bool) {
-            if self.awake == awake {
-                return;
+        pub fn keep_awake(&mut self, awake: bool, display_awake: bool) -> Result<(), String> {
+            let awake = awake || display_awake;
+            if self.awake == awake && self.display_awake == display_awake {
+                return Ok(());
             }
-            let flags = ES_CONTINUOUS | if awake { ES_SYSTEM_REQUIRED } else { 0 };
+            // Timer wakes leave the display off. Alarm preparation and ringing
+            // need it on; an ordinary sleep countdown only requires the system.
+            let flags = ES_CONTINUOUS
+                | if awake { ES_SYSTEM_REQUIRED } else { 0 }
+                | if display_awake {
+                    ES_DISPLAY_REQUIRED
+                } else {
+                    0
+                };
             if unsafe { SetThreadExecutionState(flags) } != 0 {
                 self.awake = awake;
+                self.display_awake = display_awake;
                 self.awake_request_failed = false;
-            } else if !self.awake_request_failed {
-                eprintln!("Windows refused the alarm's keep-awake request (requested: {awake}).");
-                self.awake_request_failed = true;
+                Ok(())
+            } else {
+                let error = format!(
+                    "Windows refused the keep-awake request (system: {awake}, display: {display_awake})."
+                );
+                if !self.awake_request_failed {
+                    eprintln!("{error}");
+                    self.awake_request_failed = true;
+                }
+                Err(error)
             }
         }
     }
@@ -155,7 +175,7 @@ mod platform {
     impl Drop for PowerManager {
         fn drop(&mut self) {
             self.cancel();
-            self.keep_awake(false);
+            let _ = self.keep_awake(false, false);
         }
     }
 
@@ -352,7 +372,9 @@ impl PowerManager {
             Ok(())
         }
     }
-    pub fn keep_awake(&mut self, _awake: bool) {}
+    pub fn keep_awake(&mut self, _awake: bool, _display_awake: bool) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[cfg(not(windows))]

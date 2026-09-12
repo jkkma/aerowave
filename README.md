@@ -276,18 +276,22 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - Fade-in ramps the volume over up to 90 s.
 - **Everything falls back to the backup folder.** Set one in Settings and it stands in
   whenever an alarm's own source will not make a sound: a station that 404s, a
-  stream that has not started within twelve seconds, a station you deleted, a
-  folder that has moved, a file that will not decode. If even the backup folder
+  stream whose playback clock has not advanced within twelve seconds, a station
+  you deleted, a folder that has moved, a file that will not decode. If even the backup folder
   is unusable the alarm still fires — the window comes up in red and says why.
   There is no synthesised fallback tone.
 - The same rule applies to ordinary listening: when a station gives up after its
   four reconnects, the backup folder takes over.
 - Missed alarms are caught up: if the machine was asleep through the alarm minute,
-  it rings on wake as long as it is less than 15 minutes late.
+  it rings on wake as long as it is no more than 15 minutes late. Short sleeps
+  that skip the whole alarm minute are caught up too.
 - **Wake PC for alarms** in Settings is enabled by default on Windows. Aerowave
   requests a wake timer 45 seconds before the next alarm or snooze, giving the
-  network and audio device time to resume, and keeps Windows awake through the
-  ring. Editing, disabling or deleting an alarm updates the wake request.
+  network and audio device time to resume, and requests both the system and
+  display stay awake through the ring. A timer wake otherwise leaves the display
+  off; showing the alarm window alone does not request display power. The display
+  request ends when the alarm is dismissed or snoozed. Editing, disabling or
+  deleting an alarm updates the wake request.
   Keep Aerowave running, including in the tray: quitting cancels its timers.
   Wake support depends on the PC and its current AC/battery power plan. Settings
   reports the current policy; if blocked, enable **Sleep > Allow wake timers**

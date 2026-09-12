@@ -11,9 +11,6 @@ use std::collections::HashMap;
 /// sleep. Later than this and ringing would only be confusing.
 pub const CATCHUP_GRACE_SECS: i64 = 15 * 60;
 
-/// A gap between ticks longer than this means the machine was asleep.
-pub const SLEEP_GAP_SECS: i64 = 90;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Snooze {
     pub at: i64,
@@ -169,7 +166,9 @@ pub fn missed_while_asleep<Tz: TimeZone>(
     last_tick: i64,
 ) -> bool {
     let now_secs = now.timestamp();
-    if last_tick <= 0 || now_secs - last_tick <= SLEEP_GAP_SECS {
+    // Even a short suspension can skip the whole alarm minute. Crossing an
+    // unobserved occurrence, rather than the gap's length, proves it was missed.
+    if last_tick <= 0 || now_secs <= last_tick {
         return false;
     }
     match last_occurrence_before(hour, minute, days, now) {
@@ -335,6 +334,15 @@ mod tests {
     }
 
     #[test]
+    fn a_short_suspend_that_skips_the_alarm_minute_is_caught_up() {
+        let now = at(7, 7, 31);
+        for seconds_asleep in [61, 75, 90] {
+            let last_tick = now.timestamp() - seconds_asleep;
+            assert!(missed_while_asleep(7, 30, &[], &now, last_tick));
+        }
+    }
+
+    #[test]
     fn an_alarm_missed_by_hours_is_left_alone() {
         let now = at(7, 12, 0);
         let last_tick = at(7, 6, 0).timestamp();
@@ -342,10 +350,34 @@ mod tests {
     }
 
     #[test]
-    fn a_short_gap_is_not_treated_as_sleep() {
+    fn an_alarm_observed_before_a_gap_is_not_replayed() {
         let now = at(7, 7, 31);
-        let last_tick = at(7, 7, 30).timestamp() + 15;
-        assert!(!missed_while_asleep(7, 30, &[], &now, last_tick));
+        for seconds_after_alarm in [0, 15] {
+            let last_tick = at(7, 7, 30).timestamp() + seconds_after_alarm;
+            assert!(!missed_while_asleep(7, 30, &[], &now, last_tick));
+        }
+    }
+
+    #[test]
+    fn catchup_requires_a_previous_tick_and_forward_clock_progress() {
+        let now = at(7, 7, 31);
+        for last_tick in [0, now.timestamp(), now.timestamp() + 60] {
+            assert!(!missed_while_asleep(7, 30, &[], &now, last_tick));
+        }
+    }
+
+    #[test]
+    fn catchup_stops_at_the_grace_boundary() {
+        let last_tick = at(7, 7, 29).timestamp();
+        let boundary = at(7, 7, 45);
+        assert!(missed_while_asleep(7, 30, &[], &boundary, last_tick));
+        assert!(!missed_while_asleep(
+            7,
+            30,
+            &[],
+            &(boundary + Duration::seconds(1)),
+            last_tick
+        ));
     }
 
     /// Europe/Paris springs forward on the last Sunday in March: 02:00 local
