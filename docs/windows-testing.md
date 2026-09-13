@@ -88,7 +88,10 @@ test evidence and follow the Recycle Bin rule when cleaning up test files.
 current Windows capabilities and active AC/battery wake policy, briefly arms a
 wake timer for tomorrow, then cancels it. It also acquires/releases the
 system and display keep-awake requests, including a change of display state
-while the system request remains active. It never requests sleep or shutdown.
+while the system request remains active. It clears the native request without
+changing the adapter's desired state, then verifies that unchanged active flags
+restore it. This models a request lost on resume or a power-source change without
+actually making either transition. It never requests sleep or shutdown.
 Timer acceptance alone does not establish that hardware and the active policy
 will resume the PC.
 
@@ -107,6 +110,10 @@ long duration. The countdown is a modal dialog: focus starts on Cancel, Tab stay
 there, Escape requests cancellation, and a rejected cancellation remains visible.
 A scheduled or TEST alarm closes it and cancels the timer. Do not let a real
 power countdown expire outside the approved test window.
+
+Keep Settings open while changing an alarm and the Windows wake policy. The wake
+status should reflect a completed timer update immediately and an external policy
+change within twenty seconds while the page is active, or on returning to the app.
 
 For an actual wake test, use a near-future alarm and a known playable local file.
 Record the power source, wake policy and sleep state before suspending. Check an

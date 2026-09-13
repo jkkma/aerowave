@@ -32,6 +32,17 @@ fn verify_execution_state(_system: bool, _display: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn simulate_cleared_execution_state() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS};
+        if unsafe { SetThreadExecutionState(ES_CONTINUOUS) } == 0 {
+            return Err("Could not clear the execution-state request for the resume check.".into());
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     println!(
         "{}",
@@ -44,6 +55,17 @@ fn main() -> Result<(), String> {
     verify_execution_state(true, true)?;
     manager.keep_awake(true, false)?;
     verify_execution_state(true, false)?;
+    manager.keep_awake(false, false)?;
+    verify_execution_state(false, false)?;
+    // Model Windows dropping a request on resume or a power-source change.
+    // The adapter must recover even though the desired flags did not change.
+    for display in [false, true] {
+        manager.keep_awake(true, display)?;
+        simulate_cleared_execution_state()?;
+        verify_execution_state(false, false)?;
+        manager.keep_awake(true, display)?;
+        verify_execution_state(true, display)?;
+    }
     manager.keep_awake(false, false)?;
     verify_execution_state(false, false)?;
     let mut hold = aerowave_core::sleep::AlarmWakeHold::default();
@@ -82,6 +104,7 @@ fn main() -> Result<(), String> {
     verify_execution_state(false, false)?;
     power::execute(aerowave_core::sleep::SleepAction::Stop)?;
     println!("System-only and alarm display requests verified, including display release while the system remains awake and cleanup on drop.");
+    println!("Unchanged active requests restored after a simulated Windows execution-state reset; no actual suspend or power-source transition performed.");
     println!("Persistent alarm hold verified through snooze and dismissal, including release for explicit power actions and restoration after failure.");
     println!("Wake timer armed, unchanged deadline retained, and canceled. No sleep or shutdown requested.");
     Ok(())

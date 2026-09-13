@@ -89,11 +89,17 @@ impl SleepSnapshot {
 
     /// A resume must not turn an overdue power timer into an immediate second
     /// suspension or a shutdown. Stop-audio timers can safely finish late.
-    pub fn advance(&mut self, now_ms: i64, alarm_priority: bool, resumed: bool) -> SleepEffect {
+    pub fn advance(
+        &mut self,
+        now_ms: i64,
+        ringing: bool,
+        alarm_imminent: bool,
+        resumed: bool,
+    ) -> SleepEffect {
         let Some(timer) = self.timer.as_ref() else {
             return SleepEffect::None;
         };
-        if alarm_priority {
+        if ringing || (alarm_imminent && timer.action != SleepAction::Stop) {
             self.cancel(SleepOutcome::Alarm);
             return SleepEffect::Changed;
         }
@@ -256,42 +262,45 @@ mod tests {
     #[test]
     fn stopping_finishes_once_at_the_deadline() {
         let mut s = timer(SleepAction::Stop);
-        assert_eq!(s.advance(60_999, false, false), SleepEffect::None);
+        assert_eq!(s.advance(60_999, false, false, false), SleepEffect::None);
         assert_eq!(
-            s.advance(61_000, false, false),
+            s.advance(61_000, false, false, false),
             SleepEffect::Execute(SleepAction::Stop)
         );
         assert!(s.timer.is_none());
-        assert_eq!(s.advance(62_000, false, false), SleepEffect::None);
+        assert_eq!(s.advance(62_000, false, false, false), SleepEffect::None);
     }
 
     #[test]
     fn both_power_actions_get_a_full_countdown_even_if_the_tick_is_late() {
         for action in [SleepAction::Sleep, SleepAction::Shutdown] {
             let mut s = timer(action);
-            assert_eq!(s.advance(80_000, false, false), SleepEffect::Countdown);
-            assert_eq!(s.timer.as_ref().unwrap().execute_at_ms, Some(110_000));
-            assert_eq!(s.advance(109_999, false, false), SleepEffect::None);
             assert_eq!(
-                s.advance(110_000, false, false),
+                s.advance(80_000, false, false, false),
+                SleepEffect::Countdown
+            );
+            assert_eq!(s.timer.as_ref().unwrap().execute_at_ms, Some(110_000));
+            assert_eq!(s.advance(109_999, false, false, false), SleepEffect::None);
+            assert_eq!(
+                s.advance(110_000, false, false, false),
                 SleepEffect::Execute(action)
             );
             assert!(s.commit_power(s.revision));
             assert!(s.timer.is_none());
-            assert_eq!(s.advance(111_000, false, false), SleepEffect::None);
+            assert_eq!(s.advance(111_000, false, false, false), SleepEffect::None);
         }
     }
 
     #[test]
     fn off_and_replacement_cancel_the_old_pending_action() {
         let mut s = timer(SleepAction::Shutdown);
-        s.advance(61_000, false, false);
+        s.advance(61_000, false, false, false);
         let old = s.clone();
         assert!(s.cancel(SleepOutcome::Cancelled));
-        assert_eq!(s.advance(100_000, false, false), SleepEffect::None);
+        assert_eq!(s.advance(100_000, false, false, false), SleepEffect::None);
         s.start(62_000, 2, SleepAction::Stop).unwrap();
         assert!(s.revision > old.revision);
-        assert_eq!(s.advance(100_000, false, false), SleepEffect::None);
+        assert_eq!(s.advance(100_000, false, false, false), SleepEffect::None);
         assert!(!s.fail(old.revision, "late failure".into()));
         assert_eq!(s.timer.unwrap().action, SleepAction::Stop);
     }
@@ -302,9 +311,50 @@ mod tests {
             for action in [SleepAction::Stop, SleepAction::Sleep, SleepAction::Shutdown] {
                 let mut s = timer(action);
                 if pending && action != SleepAction::Stop {
-                    s.advance(61_000, false, false);
+                    s.advance(61_000, false, false, false);
                 }
-                assert_eq!(s.advance(91_000, true, false), SleepEffect::Changed);
+                assert_eq!(s.advance(91_000, true, false, false), SleepEffect::Changed);
+                assert_eq!(s.outcome, Some(SleepOutcome::Alarm));
+                assert!(s.timer.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn alarm_preparation_preserves_stop_audio_until_its_deadline() {
+        let mut s = timer(SleepAction::Stop);
+        let alarm_at = 91_000;
+        let prepare_at = alarm_at - WAKE_LEAD_MS;
+        assert!(wake_plan(prepare_at, Some(alarm_at), false).keep_awake);
+        let before = s.clone();
+        assert_eq!(s.advance(prepare_at, false, true, false), SleepEffect::None);
+        assert_eq!(s, before);
+        assert_eq!(
+            s.advance(61_000, false, true, false),
+            SleepEffect::Execute(SleepAction::Stop)
+        );
+        assert_eq!(s.outcome, Some(SleepOutcome::Finished));
+        assert!(s.timer.is_none());
+    }
+
+    #[test]
+    fn alarm_preparation_cancels_both_power_actions_before_and_during_countdown() {
+        for action in [SleepAction::Sleep, SleepAction::Shutdown] {
+            for pending in [false, true] {
+                let mut s = timer(action);
+                let prepare_at = if pending {
+                    assert_eq!(
+                        s.advance(61_000, false, false, false),
+                        SleepEffect::Countdown
+                    );
+                    91_000
+                } else {
+                    46_000
+                };
+                assert_eq!(
+                    s.advance(prepare_at, false, true, false),
+                    SleepEffect::Changed
+                );
                 assert_eq!(s.outcome, Some(SleepOutcome::Alarm));
                 assert!(s.timer.is_none());
             }
@@ -316,14 +366,14 @@ mod tests {
         for pending in [false, true] {
             let mut s = timer(SleepAction::Sleep);
             if pending {
-                s.advance(61_000, false, false);
+                s.advance(61_000, false, false, false);
             }
-            assert_eq!(s.advance(300_000, false, true), SleepEffect::Changed);
+            assert_eq!(s.advance(300_000, false, false, true), SleepEffect::Changed);
             assert_eq!(s.outcome, Some(SleepOutcome::Cancelled));
         }
         let mut s = timer(SleepAction::Stop);
         assert_eq!(
-            s.advance(300_000, false, true),
+            s.advance(300_000, false, false, true),
             SleepEffect::Execute(SleepAction::Stop)
         );
     }
@@ -331,10 +381,15 @@ mod tests {
     #[test]
     fn a_short_suspend_across_the_countdown_cancels_the_power_action() {
         let mut s = timer(SleepAction::Shutdown);
-        s.advance(61_000, false, false);
+        s.advance(61_000, false, false, false);
         assert!(!power_clock_interrupted(61_000, 62_000));
         assert_eq!(
-            s.advance(101_000, false, power_clock_interrupted(62_000, 101_000)),
+            s.advance(
+                101_000,
+                false,
+                false,
+                power_clock_interrupted(62_000, 101_000)
+            ),
             SleepEffect::Changed
         );
         assert_eq!(s.outcome, Some(SleepOutcome::Cancelled));
@@ -354,10 +409,10 @@ mod tests {
     fn cancellation_and_replacement_win_until_dispatch_is_committed() {
         for replace in [false, true] {
             let mut s = timer(SleepAction::Shutdown);
-            s.advance(61_000, false, false);
+            s.advance(61_000, false, false, false);
             let revision = s.revision;
             assert_eq!(
-                s.advance(91_000, false, false),
+                s.advance(91_000, false, false, false),
                 SleepEffect::Execute(SleepAction::Shutdown)
             );
             if replace {
@@ -372,7 +427,7 @@ mod tests {
     #[test]
     fn snapshots_survive_page_reload_with_deadline_and_captured_action() {
         let mut s = timer(SleepAction::Shutdown);
-        s.advance(61_000, false, false);
+        s.advance(61_000, false, false, false);
         let value = serde_json::to_value(&s).unwrap();
         assert_eq!(value["timer"]["endsAtMs"], 61_000);
         assert_eq!(value["timer"]["executeAtMs"], 91_000);
@@ -526,15 +581,15 @@ mod tests {
             hold.alarm_fired(true);
             assert!(hold.plan(0, None, false, true).keep_awake);
             let mut s = timer(action);
-            let alarm_priority = wake_plan(61_000, None, false).keep_awake;
-            assert!(!alarm_priority);
+            let alarm_imminent = wake_plan(61_000, None, false).keep_awake;
+            assert!(!alarm_imminent);
             assert_eq!(
-                s.advance(61_000, alarm_priority, false),
+                s.advance(61_000, false, alarm_imminent, false),
                 SleepEffect::Countdown
             );
             assert!(hold.active());
             assert_eq!(
-                s.advance(91_000, false, false),
+                s.advance(91_000, false, false, false),
                 SleepEffect::Execute(action)
             );
             assert!(s.commit_power(s.revision));
@@ -574,7 +629,7 @@ mod tests {
         assert!(hold.plan(2_000, None, false, true).keep_awake);
         s.start(2_000, 1, SleepAction::Stop).unwrap();
         assert_eq!(
-            s.advance(62_000, false, false),
+            s.advance(62_000, false, false, false),
             SleepEffect::Execute(SleepAction::Stop)
         );
         assert!(hold.plan(62_000, None, false, true).keep_awake);

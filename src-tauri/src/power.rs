@@ -142,7 +142,10 @@ mod platform {
 
         pub fn keep_awake(&mut self, awake: bool, display_awake: bool) -> Result<(), String> {
             let awake = awake || display_awake;
-            if self.awake == awake && self.display_awake == display_awake {
+            // Windows can drop execution-state requests on resume or a power-
+            // source change. Reassert active requests on the owning scheduler
+            // thread; only an already cleared request is safe to cache.
+            if !awake && !self.awake && !self.display_awake {
                 return Ok(());
             }
             // Timer wakes leave the display off. Alarm preparation and ringing
