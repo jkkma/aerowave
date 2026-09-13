@@ -186,14 +186,14 @@ function createHarness(options = {}) {
     document, Audio, Hls, URL, TextEncoder, TextDecoder, AbortController, console,
     btoa: (str) => Buffer.from(str, "binary").toString("base64"),
     navigator: options.navigator || {},
-    window: { __TAURI__: {
+    window: Object.assign(new Element("window"), { __TAURI__: {
       core: { invoke, convertFileSrc: (file) => "asset://" + file },
       event: { listen: async (name, handler) => {
         if (!listeners.has(name)) listeners.set(name, []);
         listeners.get(name).push(handler);
       } },
       window: { getCurrentWindow: () => ({}) },
-    } },
+    } }),
     setTimeout: (fn, ms) => setTimer(fn, ms, false), clearTimeout: (id) => timers.delete(id),
     setInterval: (fn, ms) => setTimer(fn, ms, true), clearInterval: (id) => timers.delete(id),
   });

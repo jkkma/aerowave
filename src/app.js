@@ -2989,6 +2989,11 @@ setInterval(renderSleepTimer, 1000);
 // ---------------------------------------------------------------- wiring ---
 
 function wire() {
+  window.addEventListener("focus", refreshPowerStatus);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refreshPowerStatus();
+  });
+
   // window controls
   $("#btn-min").addEventListener("click", () => appWindow.minimize());
   $("#btn-max").addEventListener("click", () => appWindow.toggleMaximize());
@@ -3396,9 +3401,14 @@ async function showConfigLocation() {
 
 async function boot() {
   await tickClock();
+  // Saving an alarm can return before Windows finishes updating its timer.
+  // Subscribe before the initial query so that completion cannot leave it stale.
+  await listen("power-status-updated", () => refreshPowerStatus());
   wire();
   setInterval(tickClock, 1000);
   setInterval(refreshNextAlarm, 20000);
+  // AC/battery and Windows power-policy changes do not edit our saved settings.
+  setInterval(refreshPowerStatus, 20000);
 
   await loadState();
 

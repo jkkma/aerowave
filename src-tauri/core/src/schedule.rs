@@ -106,7 +106,9 @@ pub fn next_occurrence<Tz: TimeZone>(
     from: &DateTime<Tz>,
 ) -> Option<i64> {
     let tz = from.timezone();
-    for ahead in 0..8 {
+    // Include a second weekly occurrence when the first falls in a missing
+    // local hour. Today may already have passed, so include day fourteen too.
+    for ahead in 0..15 {
         // Calendar days, not 86_400-second ones: adding a fixed span to an
         // instant skips or repeats a local date across a DST transition, and
         // the skipped date is the one an alarm would have rung on.
@@ -327,6 +329,13 @@ mod tests {
     }
 
     #[test]
+    fn a_weekly_alarm_after_its_time_recurs_the_following_week() {
+        let now = at(7, 9, 0); // Monday
+        let next = next_occurrence(7, 30, &[0], &now).unwrap();
+        assert_eq!(next, at(14, 7, 30).timestamp());
+    }
+
+    #[test]
     fn a_missed_alarm_inside_the_grace_window_is_caught_up() {
         let now = at(7, 7, 35); // woke at 07:35
         let last_tick = at(7, 7, 20).timestamp(); // asleep since 07:20
@@ -419,6 +428,54 @@ mod tests {
         assert_eq!(
             next_local_date(&Paris, next),
             NaiveDate::from_ymd_opt(2026, 3, 30).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_weekly_alarm_skips_a_vanished_hour_to_the_next_matching_day() {
+        use chrono_tz::Europe::Paris;
+        let expected = Paris.with_ymd_and_hms(2026, 4, 5, 2, 30, 0).unwrap();
+        for from in [
+            // The next eligible Sunday is missing its alarm hour, even when
+            // searching immediately after the previous week's occurrence.
+            Paris.with_ymd_and_hms(2026, 3, 22, 2, 30, 0).unwrap(),
+            Paris.with_ymd_and_hms(2026, 3, 28, 23, 30, 0).unwrap(),
+            Paris.with_ymd_and_hms(2026, 3, 29, 1, 30, 0).unwrap(),
+        ] {
+            assert_eq!(
+                next_occurrence(2, 30, &[6], &from),
+                Some(expected.timestamp())
+            );
+        }
+    }
+
+    #[test]
+    fn a_vanished_alarm_hour_still_uses_the_first_valid_selected_day() {
+        use chrono_tz::Europe::Paris;
+        let from = Paris.with_ymd_and_hms(2026, 3, 28, 23, 30, 0).unwrap();
+        let monday = Paris.with_ymd_and_hms(2026, 3, 30, 2, 30, 0).unwrap();
+        assert_eq!(
+            next_occurrence(2, 30, &[0, 6], &from),
+            Some(monday.timestamp())
+        );
+    }
+
+    #[test]
+    fn a_weekly_alarm_in_a_repeated_hour_uses_only_the_earlier_instant() {
+        use chrono_tz::Europe::Paris;
+        let repeated = Paris.with_ymd_and_hms(2026, 10, 25, 2, 30, 0);
+        let earlier = repeated.earliest().unwrap();
+        let later = repeated.latest().unwrap();
+        assert!(earlier < later);
+        let saturday = Paris.with_ymd_and_hms(2026, 10, 24, 23, 30, 0).unwrap();
+        assert_eq!(
+            next_occurrence(2, 30, &[6], &saturday),
+            Some(earlier.timestamp())
+        );
+        let following = Paris.with_ymd_and_hms(2026, 11, 1, 2, 30, 0).unwrap();
+        assert_eq!(
+            next_occurrence(2, 30, &[6], &earlier),
+            Some(following.timestamp())
         );
     }
 

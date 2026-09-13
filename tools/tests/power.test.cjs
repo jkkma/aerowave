@@ -199,6 +199,70 @@ test("persistent alarm wake status clears with the preference and does not claim
   assert.doesNotMatch(h.el("#power-status").textContent, /Keeping this PC awake/);
 });
 
+test("a completed scheduler update replaces a previously successful wake status", async () => {
+  let status = { ...capabilities, armedAtMs: 1789019005000 };
+  let h;
+  h = powerHarness({ invoke: command => {
+    if (command === "local_time") return wallTime;
+    if (command === "get_state") {
+      assert.equal(h.listeners.get("power-status-updated").length, 1);
+      return { stations: [], alarms: [], settings: {} };
+    }
+    if (command === "power_status") return status;
+  } });
+  await h.evaluate("boot()");
+  await flush();
+  assert.match(h.el("#power-status").textContent, /Wake timer armed for/);
+
+  status = { ...capabilities, error: "Windows refused the wake timer" };
+  await h.emit("power-status-updated", null);
+  assert.doesNotMatch(h.el("#power-status").textContent, /Wake timer armed for/);
+  assert.match(h.el("#power-status").textContent, /Windows refused the wake timer/);
+  assert.equal(h.el("#power-status").classList.contains("bad"), true);
+});
+
+test("wake capabilities refresh periodically when Windows power policy changes", async () => {
+  let status = capabilities;
+  const h = powerHarness({ invoke: command => {
+    if (command === "local_time") return wallTime;
+    if (command === "get_state") return { stations: [], alarms: [], settings: {} };
+    if (command === "power_status") return status;
+  } });
+  await h.evaluate("boot()");
+  await flush();
+  assert.equal(h.el("#power-status").classList.contains("bad"), false);
+
+  status = { ...capabilities, onBattery: true, wakeAllowed: false, message: "Wake timers are blocked on battery." };
+  const periodic = [...h.timers].find(([, timer]) => timer.interval && timer.fn === h.evaluate("refreshPowerStatus"));
+  assert.ok(periodic, "boot installs periodic power capability refresh");
+  assert.equal(periodic[1].ms, 20000);
+  await h.fireTimer(periodic[0]);
+  assert.match(h.el("#power-status").textContent, /blocked on battery/);
+  assert.equal(h.el("#power-status").classList.contains("bad"), true);
+  assert.equal(h.evaluate("powerStatus.onBattery"), true);
+});
+
+test("focus and becoming visible refresh power status after returning to the app", async () => {
+  let status = capabilities;
+  const h = powerHarness({ invoke: command => command === "power_status" ? status : undefined });
+  h.evaluate("wire()");
+  await h.evaluate("refreshPowerStatus()");
+  status = { ...capabilities, wakeAllowed: false, message: "Wake timers are blocked." };
+  await h.context.window.dispatch("focus");
+  assert.match(h.el("#power-status").textContent, /Wake timers are blocked/);
+
+  status = capabilities;
+  const before = h.calls.filter(call => call.command === "power_status").length;
+  h.document.hidden = true;
+  await h.document.dispatch("visibilitychange");
+  assert.equal(h.calls.filter(call => call.command === "power_status").length, before);
+  h.document.hidden = false;
+  await h.document.dispatch("visibilitychange");
+  await flush();
+  assert.match(h.el("#power-status").textContent, /Wake timers allowed/);
+  assert.equal(h.el("#power-status").classList.contains("bad"), false);
+});
+
 test("wake status formats the armed deadline using OS timezone rules", async () => {
   const h = powerHarness({ invoke: command => {
     if (command === "power_status") return { ...capabilities, armedAtMs: 1789019005000 };

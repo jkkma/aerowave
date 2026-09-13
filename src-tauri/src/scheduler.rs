@@ -43,6 +43,7 @@ pub struct SchedState {
     wake_at_ms: Option<i64>,
     wake_error: Option<String>,
     wake_hold: AlarmWakeHold,
+    reported_wake_hold: bool,
     power_committed: bool,
 }
 
@@ -654,26 +655,34 @@ fn update_power(app: &AppHandle, power: &mut power::PowerManager) {
     } else {
         None
     };
-    let (plan, sleep_active) = {
+    let (plan, sleep_active, wake_hold) = {
         let mut sched = state.sched.lock().unwrap();
         let ringing = sched.ringing.is_some();
         let plan = sched
             .wake_hold
             .plan(Local::now().timestamp_millis(), next, ringing, enabled);
-        (plan, sched.sleep.timer.is_some())
+        (plan, sched.sleep.timer.is_some(), sched.wake_hold.active())
     };
     let awake_result = power.keep_awake(plan.keep_awake || sleep_active, plan.keep_display_awake);
     let result = power.sync_wake(plan.arm_at_ms);
-    let mut sched = state.sched.lock().unwrap();
-    match result {
-        Ok(()) => {
-            sched.wake_at_ms = plan.arm_at_ms;
-            sched.wake_error = awake_result.err();
-        }
-        Err(error) => {
-            sched.wake_at_ms = None;
-            sched.wake_error = Some(error);
-        }
+    let (wake_at_ms, wake_error) = match result {
+        Ok(()) => (plan.arm_at_ms, awake_result.err()),
+        Err(error) => (None, Some(error)),
+    };
+    let changed = {
+        let mut sched = state.sched.lock().unwrap();
+        let changed = sched.wake_at_ms != wake_at_ms
+            || sched.wake_error != wake_error
+            || sched.reported_wake_hold != wake_hold;
+        sched.wake_at_ms = wake_at_ms;
+        sched.wake_error = wake_error;
+        sched.reported_wake_hold = wake_hold;
+        changed
+    };
+    // Saving only unparks this thread. Notify after the Windows calls finish
+    // so a frontend query made before them cannot leave stale success visible.
+    if changed {
+        let _ = app.emit("power-status-updated", ());
     }
 }
 
@@ -683,9 +692,10 @@ fn tick_sleep(app: &AppHandle, power: &mut power::PowerManager, last_tick: i64) 
     let state = app.state::<AppState>();
     let (effect, snapshot) = {
         let mut sched = state.sched.lock().unwrap();
-        let priority = wake_plan(now_ms, next, sched.ringing.is_some()).keep_awake;
+        let ringing = sched.ringing.is_some();
+        let imminent = wake_plan(now_ms, next, false).keep_awake;
         let resumed = power_clock_interrupted(last_tick * 1000, now_ms);
-        let effect = sched.sleep.advance(now_ms, priority, resumed);
+        let effect = sched.sleep.advance(now_ms, ringing, imminent, resumed);
         (effect, sched.sleep.clone())
     };
     if effect == SleepEffect::None {
