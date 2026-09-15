@@ -95,6 +95,12 @@ actually making either transition. It never requests sleep or shutdown.
 Timer acceptance alone does not establish that hardware and the active policy
 will resume the PC.
 
+The probe also holds a substitute power call open on the production worker while
+the caller prepares an alarm, verifies its native system/display requests and
+checks the alarm deadline. It checks delivery of successful and failed results.
+This covers a blocked power call without an actual suspend; it does not establish
+unattended wake or speaker output on this PC.
+
 The core suite covers timer expiry, the cancellable power countdown, replacement
 and cancellation before dispatch, alarm precedence, short interrupted clock
 gaps, and waking both before an alarm and at its actual deadline. A power timer
@@ -118,6 +124,9 @@ change within twenty seconds while the page is active, or on returning to the ap
 For an actual wake test, use a near-future alarm and a known playable local file.
 Record the power source, wake policy and sleep state before suspending. Check an
 ordinary wake, a snooze, and sleeping again during the 45-second early-wake window.
+Repeat with Aerowave's Sleep PC timer initiating sleep: manual Windows sleep
+does not exercise the application's pending power call. Verify that the alarm
+overlay appears at its deadline and that snooze works after the call completes.
 Leave the mouse and keyboard alone until the alarm sounds: user input turns an
 unattended timer wake into a different wake path. Check that the display comes on
 during the early-wake window and stays on through ringing. Check radio playback,

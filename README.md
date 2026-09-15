@@ -151,6 +151,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   cancels the timer, and an alarm due within 45 seconds takes priority over power
   actions. An overdue power action is cancelled after a long suspend, so waking
   the PC does not immediately put it back to sleep or shut it down.
+  The Windows sleep call runs separately from the alarm clock, so an automatic
+  wake can prepare and ring the alarm even while that call is still returning.
 
 **Browsing**
 

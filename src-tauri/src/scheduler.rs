@@ -627,6 +627,7 @@ fn tick(app: &AppHandle, power: &mut power::PowerManager) {
 pub fn spawn(app: AppHandle) {
     std::thread::spawn(move || {
         let mut power = power::PowerManager::new();
+        let mut pending_power = None;
         {
             let state = app.state::<AppState>();
             let mut sched = state.sched.lock().unwrap();
@@ -634,6 +635,7 @@ pub fn spawn(app: AppHandle) {
             sched.thread = Some(std::thread::current());
         }
         loop {
+            poll_power_action(&app, &mut pending_power);
             let last_tick = app.state::<AppState>().sched.lock().unwrap().last_tick;
             // Alarms get first refusal, including a timer expiring on the
             // very same tick. tick holds Windows awake before any due
@@ -641,7 +643,7 @@ pub fn spawn(app: AppHandle) {
             update_power(&app, &mut power);
             tick(&app, &mut power);
             update_power(&app, &mut power);
-            tick_sleep(&app, &mut power, last_tick);
+            tick_sleep(&app, &mut power, last_tick, &mut pending_power);
             std::thread::park_timeout(Duration::from_secs(1));
         }
     });
@@ -686,7 +688,57 @@ fn update_power(app: &AppHandle, power: &mut power::PowerManager) {
     }
 }
 
-fn tick_sleep(app: &AppHandle, power: &mut power::PowerManager, last_tick: i64) {
+struct PendingPowerAction {
+    task: power::PendingAction,
+    action: SleepAction,
+    revision: u64,
+    wake_hold: AlarmWakeHold,
+}
+
+fn finish_power_action(
+    app: &AppHandle,
+    action: SleepAction,
+    revision: u64,
+    wake_hold: AlarmWakeHold,
+    result: Result<(), String>,
+) {
+    let state = app.state::<AppState>();
+    let failed = {
+        let mut sched = state.sched.lock().unwrap();
+        sched.power_committed = false;
+        sched
+            .wake_hold
+            .finish_power_action(wake_hold, action, result.is_ok());
+        result
+            .err()
+            .filter(|error| sched.sleep.fail(revision, error.clone()))
+            .map(|_| sched.sleep.clone())
+    };
+    if let Some(failed) = failed {
+        let _ = app.emit("sleep-timer-updated", failed);
+    }
+}
+
+fn poll_power_action(app: &AppHandle, pending: &mut Option<PendingPowerAction>) {
+    let Some(result) = pending.as_ref().and_then(|p| p.task.try_result()) else {
+        return;
+    };
+    let completed = pending.take().unwrap();
+    finish_power_action(
+        app,
+        completed.action,
+        completed.revision,
+        completed.wake_hold,
+        result,
+    );
+}
+
+fn tick_sleep(
+    app: &AppHandle,
+    power: &mut power::PowerManager,
+    last_tick: i64,
+    pending_power: &mut Option<PendingPowerAction>,
+) {
     let now_ms = Local::now().timestamp_millis();
     let next = next_alarm(app).map(|a| a.at_ms);
     let state = app.state::<AppState>();
@@ -753,23 +805,22 @@ fn tick_sleep(app: &AppHandle, power: &mut power::PowerManager, last_tick: i64) 
             (sched.sleep.clone(), wake_hold)
         };
         let _ = app.emit("sleep-timer-updated", &committed);
-        // Do not hold the scheduler lock across SetSuspendState: it returns
-        // only after resume, while the webview may be processing cancellation.
+        // SetSuspendState must not occupy the clock thread. An automatic wake
+        // needs this thread to restore power requests and fire the alarm even
+        // while the Windows call is still pending on the worker.
         let _ = power.keep_awake(false, false);
-        let result = power::execute(action);
-        let failed = {
-            let mut sched = state.sched.lock().unwrap();
-            sched.power_committed = false;
-            sched
-                .wake_hold
-                .finish_power_action(wake_hold, action, result.is_ok());
-            result
-                .err()
-                .filter(|error| sched.sleep.fail(committed.revision, error.clone()))
-                .map(|_| sched.sleep.clone())
-        };
-        if let Some(failed) = failed {
-            let _ = app.emit("sleep-timer-updated", failed);
+        match power::PendingAction::spawn(action, power::execute) {
+            Ok(task) => {
+                *pending_power = Some(PendingPowerAction {
+                    task,
+                    action,
+                    revision: committed.revision,
+                    wake_hold,
+                });
+            }
+            Err(error) => {
+                finish_power_action(app, action, committed.revision, wake_hold, Err(error));
+            }
         }
     } else {
         let _ = app.emit("sleep-timer-updated", &snapshot);

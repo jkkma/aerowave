@@ -1,9 +1,44 @@
 //! Windows owns the actual power transitions and wake request. The scheduler
-//! owns this adapter on one thread, since execution-state requests belong to
-//! the thread that made them.
+//! owns wake timers and execution-state requests on one thread, since those
+//! requests belong to their caller. Blocking power transitions run separately.
 
 pub use aerowave_core::power::PowerCapabilities;
 use aerowave_core::sleep::SleepAction;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+
+/// Keep the clock running even if Windows has not returned from suspension.
+/// The scheduler retains its own wake timer and execution-state requests.
+pub struct PendingAction {
+    result: Receiver<Result<(), String>>,
+}
+
+impl PendingAction {
+    pub fn spawn(
+        action: SleepAction,
+        execute: impl FnOnce(SleepAction) -> Result<(), String> + Send + 'static,
+    ) -> Result<Self, String> {
+        let (send, result) = mpsc::channel();
+        let scheduler = std::thread::current();
+        std::thread::Builder::new()
+            .name("aerowave-power".into())
+            .spawn(move || {
+                let _ = send.send(execute(action));
+                scheduler.unpark();
+            })
+            .map_err(|error| format!("Could not start the sleep timer power action: {error}"))?;
+        Ok(Self { result })
+    }
+
+    pub fn try_result(&self) -> Option<Result<(), String>> {
+        match self.result.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err(
+                "The sleep timer power action ended unexpectedly.".into(),
+            )),
+        }
+    }
+}
 
 #[cfg(windows)]
 pub use platform::{capabilities, execute, PowerManager};
