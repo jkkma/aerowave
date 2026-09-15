@@ -43,12 +43,70 @@ fn simulate_cleared_execution_state() -> Result<(), String> {
     Ok(())
 }
 
+fn verify_pending_power_action(manager: &mut power::PowerManager) -> Result<(), String> {
+    use aerowave_core::sleep::{wake_plan, SleepAction};
+    use chrono::{TimeZone, Utc};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    for expected in [Ok(()), Err("simulated sleep failure".to_string())] {
+        let (entered, started) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let completion = expected.clone();
+        let task = power::PendingAction::spawn(SleepAction::Sleep, move |action| {
+            assert_eq!(action, SleepAction::Sleep);
+            let _ = entered.send(());
+            wait.recv_timeout(Duration::from_secs(5))
+                .map_err(|error| error.to_string())?;
+            completion
+        })?;
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        assert!(task.try_result().is_none());
+
+        // Hold the OS-call substitute open while the clock reaches preparation
+        // and ringing. These requests still belong to this scheduler thread.
+        let alarm = Utc.with_ymd_and_hms(2026, 1, 1, 7, 30, 0).unwrap();
+        let plan = wake_plan(
+            alarm.timestamp_millis() - 45_000,
+            Some(alarm.timestamp_millis()),
+            false,
+        );
+        assert!(plan.keep_awake && plan.keep_display_awake);
+        manager.keep_awake(plan.keep_awake, plan.keep_display_awake)?;
+        verify_execution_state(true, true)?;
+        assert!(aerowave_core::schedule::due_now(7, 30, &[], &alarm));
+        assert!(
+            task.try_result().is_none(),
+            "alarm work waited for the power action"
+        );
+
+        release.send(()).map_err(|error| error.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let actual = loop {
+            if let Some(result) = task.try_result() {
+                break result;
+            }
+            if Instant::now() >= deadline {
+                return Err("The power action did not report completion.".into());
+            }
+            std::thread::park_timeout(Duration::from_millis(10));
+        };
+        assert_eq!(actual, expected);
+        manager.keep_awake(false, false)?;
+    }
+    println!("A blocked power action leaves alarm preparation and due checks runnable; both success and failure completions delivered. No sleep requested.");
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     println!(
         "{}",
         serde_json::to_string_pretty(&power::capabilities()).unwrap()
     );
     let mut manager = power::PowerManager::new();
+    verify_pending_power_action(&mut manager)?;
     manager.keep_awake(true, false)?;
     verify_execution_state(true, false)?;
     manager.keep_awake(true, true)?;

@@ -117,6 +117,52 @@ test("an alarm closes power UI, refuses another timer, and survives a late finis
   assert.equal(h.audios[0].paused, false);
 });
 
+test("a wake alarm replaces the sleep fade and keeps its own fade through delayed timer updates", async () => {
+  const cancellation = deferred();
+  const h = powerHarness({ invoke: command => command === "cancel_sleep_timer"
+    ? cancellation.promise : undefined });
+  h.context.now = 100000;
+  h.evaluate(`Date.now = () => now;
+    player.source = { kind: "folder", title: "Bedtime music" };
+    player.target = 0.55;
+    audio.volume = 0.55`);
+  const timer = { minutes: 15, action: "sleep", endsAtMs: 110000, executeAtMs: null };
+
+  snapshot(h, 1, timer);
+  const sleepFade = h.evaluate("player.fadeTimer");
+  assert.equal(h.evaluate("sleepFading"), true);
+  h.audios[0].volume = 0.1;
+
+  snapshot(h, 2, { ...timer, executeAtMs: 140000 });
+  assert.equal(h.evaluate("player.source"), null);
+  assert.equal(h.evaluate("sleepFading"), false);
+  assert.equal(h.timers.has(sleepFade), false);
+
+  h.evaluate(`onAlarmFire({
+    alarmId: "wake", trigger: "scheduled", kind: "folder", path: "wake.mp3", folder: "music",
+    title: "Wake", snoozeMins: 10, hour: 7, minute: 0, volume: 0.9, fadeSecs: 20,
+    autoStopMins: 0
+  })`);
+  await flush();
+  const alarmFade = h.evaluate("player.fadeTimer");
+  assert.notEqual(alarmFade, sleepFade);
+  assert.equal(h.audios[0].volume, 0.02);
+  assert.equal(h.evaluate("player.target"), 0.9);
+
+  snapshot(h, 3, null, "finished");
+  assert.equal(h.evaluate("player.source.title"), "Wake");
+  assert.equal(h.evaluate("player.fadeTimer"), alarmFade);
+  assert.equal(h.audios[0].paused, false);
+
+  cancellation.resolve({ revision: 4, timer: null, outcome: "cancelled", error: null });
+  await flush();
+  assert.equal(h.evaluate("player.source.title"), "Wake");
+  assert.equal(h.evaluate("player.fadeTimer"), alarmFade);
+  h.context.now = 110000;
+  await h.fireTimer(alarmFade);
+  assert.ok(h.audios[0].volume > 0.02 && h.audios[0].volume < 0.9);
+});
+
 test("dismissing a test releases only the backend preview", async () => {
   const h = powerHarness();
   h.evaluate('onAlarmFire({alarmId:"saved",trigger:"test",kind:"none",snoozeMins:10,hour:7,minute:0})');

@@ -1,6 +1,6 @@
 {
   "name": "aerowave",
-  "version": "0.11.4",
+  "version": "0.11.5",
   "description": "Internet radio player and alarm clock with a Frutiger Aero face",
   "license": "MIT",
   "private": true,

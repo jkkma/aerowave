@@ -620,6 +620,20 @@ mod tests {
     }
 
     #[test]
+    fn an_alarm_that_fires_before_sleep_returns_keeps_its_new_wake_hold() {
+        for previously_held in [false, true] {
+            for succeeded in [false, true] {
+                let mut hold = AlarmWakeHold::default();
+                hold.alarm_fired(previously_held);
+                let before_sleep = std::mem::take(&mut hold);
+                hold.alarm_fired(true);
+                hold.finish_power_action(before_sleep, SleepAction::Sleep, succeeded);
+                assert!(hold.plan(300_000, None, false, true).keep_awake);
+            }
+        }
+    }
+
+    #[test]
     fn selecting_cancelling_or_finishing_stop_timers_preserves_the_hold() {
         let mut hold = AlarmWakeHold::default();
         hold.alarm_fired(true);
