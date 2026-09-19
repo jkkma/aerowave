@@ -3,7 +3,9 @@ use tauri::{
     AppHandle, Runtime,
 };
 
-use crate::models::{PlayPayload, PlaybackState, VolumePayload};
+use crate::models::{
+    PlayPayload, PlaybackState, SleepTimerPayload, SleepTimerSnapshot, VolumePayload,
+};
 
 const PLUGIN_IDENTIFIER: &str = "com.aerowave.audio";
 
@@ -52,6 +54,27 @@ impl<R: Runtime> AndroidAudio<R> {
     pub fn set_volume(&self, payload: VolumePayload) -> Result<PlaybackState, String> {
         self.0
             .run_mobile_plugin("setVolume", payload)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn set_sleep_timer(
+        &self,
+        payload: SleepTimerPayload,
+    ) -> Result<SleepTimerSnapshot, String> {
+        self.0
+            .run_mobile_plugin("setSleepTimer", payload)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn cancel_sleep_timer(&self) -> Result<SleepTimerSnapshot, String> {
+        self.0
+            .run_mobile_plugin("cancelSleepTimer", ())
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn get_sleep_timer(&self) -> Result<SleepTimerSnapshot, String> {
+        self.0
+            .run_mobile_plugin("getSleepTimer", ())
             .map_err(|error| error.to_string())
     }
 }

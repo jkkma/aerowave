@@ -498,7 +498,8 @@ test("Android rebuilds a restored paused station when the user resumes after pro
   await flush();
 
   assert.equal(h.calls.some(({ command }) => command === "plugin:android-audio|resume"), false);
-  assert.equal(h.calls.filter(({ command }) => command === "plugin:android-audio|stop").length, 1);
+  assert.equal(h.calls.filter(({ command }) => command === "plugin:android-audio|pause").length, 1);
+  assert.equal(h.calls.some(({ command }) => command === "plugin:android-audio|stop"), false);
   assert.equal(h.calls.find(({ command }) => command === "probe_stream").args.url, "https://radio.test/original");
   assert.equal(h.calls.find(({ command }) => command === "relay_url").args.url, "https://radio.test/fresh-upstream");
   const replay = h.calls.find(({ command }) => command === "plugin:android-audio|play");

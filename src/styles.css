@@ -1128,6 +1128,8 @@ body.android {
 .android #btn-next { width: 48px; height: 48px; }
 .android .volwrap { flex: 1 0 100%; justify-content: center; margin: 0; }
 .android .slider { width: min(210px, calc(100vw - 132px)); height: 32px; }
+.android #sleep-chips .chip { min-width: 44px; min-height: 44px; }
+.android .sleep-hint { font-size: 12px; }
 .android .android-preview-note {
   display: block;
   width: 100%;
@@ -1172,7 +1174,7 @@ body.android {
   .android .stage {
     min-height: 0;
     grid-template-columns: 88px minmax(0, 1fr);
-    grid-template-rows: minmax(70px, 1fr) auto auto;
+    grid-template-rows: minmax(70px, 1fr) auto auto auto;
     gap: 5px 9px;
     overflow-y: auto;
   }
@@ -1186,6 +1188,7 @@ body.android {
   .android .volwrap { flex-basis: 100%; }
   .android .slider { width: clamp(92px, 18vw, 150px); }
   .android .android-preview-note { grid-column: 2; grid-row: 3; padding: 6px 8px; font-size: 10.5px; }
+  .android .sleepbox { grid-column: 1 / -1; grid-row: 4; }
   .android .console { min-height: 0; height: auto; }
   .android .row { min-height: 46px; }
 }

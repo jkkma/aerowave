@@ -323,7 +323,8 @@ playback. Android's Media3 service owns playback and media controls; ordinary
 streams still use the Rust relay, while HLS goes directly through Media3 with
 public-address validation. The desktop playback paths above remain unchanged.
 
-Alarms, sleep timers and local music folders are not available in this preview.
+The sleep timer runs in the Android media service, including its final fade.
+Alarms and local music folders are not available in this preview.
 See the [Android build and testing guide](docs/android.md) for the APK build,
 installation steps and remaining work.
 

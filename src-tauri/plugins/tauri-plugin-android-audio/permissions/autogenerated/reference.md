@@ -10,6 +10,9 @@ Allows Aerowave to control its Android background radio player.
 - `allow-stop`
 - `allow-get-state`
 - `allow-set-volume`
+- `allow-set-sleep-timer`
+- `allow-cancel-sleep-timer`
+- `allow-get-sleep-timer`
 
 ## Permission Table
 
@@ -19,6 +22,58 @@ Allows Aerowave to control its Android background radio player.
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`android-audio:allow-cancel-sleep-timer`
+
+</td>
+<td>
+
+Enables the cancel_sleep_timer command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-cancel-sleep-timer`
+
+</td>
+<td>
+
+Denies the cancel_sleep_timer command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-get-sleep-timer`
+
+</td>
+<td>
+
+Enables the get_sleep_timer command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-get-sleep-timer`
+
+</td>
+<td>
+
+Denies the get_sleep_timer command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>
@@ -120,6 +175,32 @@ Enables the resume command without any pre-configured scope.
 <td>
 
 Denies the resume command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-set-sleep-timer`
+
+</td>
+<td>
+
+Enables the set_sleep_timer command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-set-sleep-timer`
+
+</td>
+<td>
+
+Denies the set_sleep_timer command without any pre-configured scope.
 
 </td>
 </tr>

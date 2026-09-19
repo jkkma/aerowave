@@ -2,7 +2,9 @@ use std::marker::PhantomData;
 
 use tauri::{plugin::PluginApi, AppHandle, Runtime};
 
-use crate::models::{PlayPayload, PlaybackState, VolumePayload};
+use crate::models::{
+    PlayPayload, PlaybackState, SleepTimerPayload, SleepTimerSnapshot, VolumePayload,
+};
 
 pub struct AndroidAudio<R: Runtime>(PhantomData<fn() -> R>);
 
@@ -36,5 +38,20 @@ impl<R: Runtime> AndroidAudio<R> {
 
     pub fn set_volume(&self, _payload: VolumePayload) -> Result<PlaybackState, String> {
         Ok(PlaybackState::default())
+    }
+
+    pub fn set_sleep_timer(
+        &self,
+        _payload: SleepTimerPayload,
+    ) -> Result<SleepTimerSnapshot, String> {
+        Err("Android background audio is only available on Android".into())
+    }
+
+    pub fn cancel_sleep_timer(&self) -> Result<SleepTimerSnapshot, String> {
+        Ok(SleepTimerSnapshot::default())
+    }
+
+    pub fn get_sleep_timer(&self) -> Result<SleepTimerSnapshot, String> {
+        Ok(SleepTimerSnapshot::default())
     }
 }

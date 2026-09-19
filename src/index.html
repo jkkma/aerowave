@@ -73,9 +73,9 @@
       </div>
     </div>
 
-    <p class="android-preview-note" role="note">This Android preview plays radio in the background. Alarms, music folders, and sleep timers are coming later.</p>
+    <p class="android-preview-note" role="note">This Android preview plays radio in the background, with a sleep timer. Alarms and music folders are coming later.</p>
 
-    <div class="sleepbox android-unavailable">
+    <div class="sleepbox">
       <div class="sleeprow">
         <span class="hud-mini" id="sleep-caption">Sleep timer</span>
         <div class="chips" id="sleep-chips" role="group" aria-labelledby="sleep-caption">
@@ -89,8 +89,8 @@
         </div>
       </div>
       <div class="sleeprow sleep-action-row">
-        <label class="hud-mini" for="sleep-action">On finish</label>
-        <select class="field" id="sleep-action" aria-describedby="sleep-hint">
+        <label class="hud-mini desktop-only" for="sleep-action">On finish</label>
+        <select class="field desktop-only" id="sleep-action" aria-describedby="sleep-hint">
           <option value="stop">Stop audio</option>
           <option value="sleep">Sleep PC</option>
           <option value="shutdown">Shut down PC</option>

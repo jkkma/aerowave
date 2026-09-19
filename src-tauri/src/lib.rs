@@ -86,7 +86,7 @@ struct LocalTime {
 // desktop features can make the same promises while the activity is asleep.
 fn require_desktop_feature() -> Result<(), String> {
     if cfg!(mobile) {
-        Err("Alarms, sleep timers and local folders are not available in the Android preview yet".into())
+        Err("This desktop command is unavailable on Android. Alarms and local folders are coming later; the sleep timer uses Android playback.".into())
     } else {
         Ok(())
     }
