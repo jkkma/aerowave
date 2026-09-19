@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/mobile-schema.json",
   "identifier": "android",
-  "description": "Radio playback and settings on Android",
+  "description": "Native playback, alarms, selected music folders and settings on Android",
   "platforms": ["android"],
   "windows": ["main"],
   "permissions": [

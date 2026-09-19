@@ -11,7 +11,10 @@ use desktop::AndroidAudio;
 use mobile::AndroidAudio;
 
 pub use models::{
-    PlayPayload, PlaybackState, SleepTimer, SleepTimerPayload, SleepTimerSnapshot, VolumePayload,
+    AlarmDefinition, AlarmIdPayload, AlarmSettingsPayload, AlarmSource, AlarmState, AlarmStation,
+    FolderInfo, FolderPathPayload, PlayPayload, PlaybackState, RandomTrackPayload, SleepTimer,
+    SleepTimerPayload, SleepTimerSnapshot, SyncAlarmsPayload, TestAlarmPayload, TrackPick,
+    VolumePayload,
 };
 
 use tauri::{
@@ -70,6 +73,64 @@ fn get_sleep_timer<R: Runtime>(app: AppHandle<R>) -> Result<SleepTimerSnapshot, 
     app.state::<AndroidAudio<R>>().get_sleep_timer()
 }
 
+#[tauri::command]
+fn sync_alarms<R: Runtime>(
+    app: AppHandle<R>,
+    payload: SyncAlarmsPayload,
+) -> Result<AlarmState, String> {
+    app.state::<AndroidAudio<R>>().sync_alarms(payload)
+}
+#[tauri::command]
+fn get_alarm_state<R: Runtime>(app: AppHandle<R>) -> Result<AlarmState, String> {
+    app.state::<AndroidAudio<R>>().get_alarm_state()
+}
+#[tauri::command]
+fn snooze_alarm<R: Runtime>(
+    app: AppHandle<R>,
+    payload: AlarmIdPayload,
+) -> Result<AlarmState, String> {
+    app.state::<AndroidAudio<R>>().snooze_alarm(payload)
+}
+#[tauri::command]
+fn dismiss_alarm<R: Runtime>(
+    app: AppHandle<R>,
+    payload: AlarmIdPayload,
+) -> Result<AlarmState, String> {
+    app.state::<AndroidAudio<R>>().dismiss_alarm(payload)
+}
+#[tauri::command]
+fn test_alarm<R: Runtime>(
+    app: AppHandle<R>,
+    payload: TestAlarmPayload,
+) -> Result<AlarmState, String> {
+    app.state::<AndroidAudio<R>>().test_alarm(payload)
+}
+#[tauri::command]
+fn open_alarm_settings<R: Runtime>(
+    app: AppHandle<R>,
+    payload: AlarmSettingsPayload,
+) -> Result<AlarmState, String> {
+    app.state::<AndroidAudio<R>>().open_alarm_settings(payload)
+}
+#[tauri::command]
+fn pick_folder<R: Runtime>(app: AppHandle<R>) -> Result<Option<FolderInfo>, String> {
+    app.state::<AndroidAudio<R>>().pick_folder()
+}
+#[tauri::command]
+fn folder_info<R: Runtime>(
+    app: AppHandle<R>,
+    payload: FolderPathPayload,
+) -> Result<FolderInfo, String> {
+    app.state::<AndroidAudio<R>>().folder_info(payload)
+}
+#[tauri::command]
+fn random_track<R: Runtime>(
+    app: AppHandle<R>,
+    payload: RandomTrackPayload,
+) -> Result<TrackPick, String> {
+    app.state::<AndroidAudio<R>>().random_track(payload)
+}
+
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("android-audio")
         .invoke_handler(tauri::generate_handler![
@@ -81,7 +142,16 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             set_volume,
             set_sleep_timer,
             cancel_sleep_timer,
-            get_sleep_timer
+            get_sleep_timer,
+            sync_alarms,
+            get_alarm_state,
+            snooze_alarm,
+            dismiss_alarm,
+            test_alarm,
+            open_alarm_settings,
+            pick_folder,
+            folder_info,
+            random_track
         ])
         .setup(|app, api| {
             #[cfg(target_os = "android")]

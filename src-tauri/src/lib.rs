@@ -82,11 +82,11 @@ struct LocalTime {
 
 // ---------------------------------------------------------------- commands
 
-// Android needs native alarm delivery and document access before these
-// desktop features can make the same promises while the activity is asleep.
+// Android alarm delivery and document access use the Android plugin rather
+// than the desktop scheduler or filesystem commands.
 fn require_desktop_feature() -> Result<(), String> {
     if cfg!(mobile) {
-        Err("This desktop command is unavailable on Android. Alarms and local folders are coming later; the sleep timer uses Android playback.".into())
+        Err("This desktop command is unavailable on Android. Use the native Android alarm, folder or playback command.".into())
     } else {
         Ok(())
     }

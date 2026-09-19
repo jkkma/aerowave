@@ -8,7 +8,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        minSdk = 24
+        minSdk = 26
         consumerProguardFiles("consumer-rules.pro")
     }
 
@@ -27,6 +27,7 @@ dependencies {
 
     implementation(project(":tauri-android"))
     implementation("androidx.core:core-ktx:1.17.0")
+    implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("androidx.media3:media3-exoplayer:$media3Version")
     implementation("androidx.media3:media3-exoplayer-hls:$media3Version")
     implementation("androidx.media3:media3-datasource-okhttp:$media3Version")

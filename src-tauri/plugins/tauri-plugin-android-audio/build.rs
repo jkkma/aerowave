@@ -8,6 +8,15 @@ const COMMANDS: &[&str] = &[
     "set_sleep_timer",
     "cancel_sleep_timer",
     "get_sleep_timer",
+    "sync_alarms",
+    "get_alarm_state",
+    "snooze_alarm",
+    "dismiss_alarm",
+    "test_alarm",
+    "open_alarm_settings",
+    "pick_folder",
+    "folder_info",
+    "random_track",
 ];
 
 fn main() {

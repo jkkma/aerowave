@@ -1,4 +1,4 @@
-# Android preview
+# Android
 
 The first Android milestone reuses the station directory, saved stations,
 settings and Rust stream resolver. A Tauri plugin runs Media3 in a foreground
@@ -29,8 +29,8 @@ PowerShell process. The generated Android project is tracked under
 
 The debug APK is written below
 `src-tauri/gen/android/app/build/outputs/apk/`. Debug signing is for local
-development. `-Release` builds the optimized variant; distributing a release
-also requires a private Android signing key and release validation.
+development. The protected signing-key setup, optimized release build, retained
+APK and recovery procedure are documented in [Android releases](android-release.md).
 
 With a connected phone, install the ARM64 debug APK:
 
@@ -80,19 +80,46 @@ and checks again before resuming or reconnecting, because handler delays alone
 do not count time spent in deep sleep. It does not acquire an additional wake
 lock while paused.
 
-## Remaining work
+## Alarms and local music
 
-Alarms, snooze, local folders and backup tracks are unavailable.
-The desktop scheduler does not run on Android, and its feature commands reject
-attempts to enable those features. Android needs native scheduled delivery,
-permission handling, reboot recovery and document access before those controls
-can make reliable promises. There is no PC power or desktop tray support.
+The Android plugin owns alarm definitions, exact scheduling, ringing, snooze
+and notification actions. The webview displays that state; it does not keep an
+alarm alive with JavaScript timers. One-shot disabling and pending snoozes
+remain authoritative when the page is reopened. Station and backup-folder
+changes update native source metadata without rearming a completed one-shot.
 
-Before release, test audio across screen lock, returning to the application,
-notification controls, audio-focus changes, headphone disconnection, network
-loss and service/process recreation. Validate MP3, AAC and HLS on real devices,
-and test portrait, landscape, large text and system insets. OEM battery
-management and process termination require separate qualification.
+Settings provides shortcuts for Alarms & reminders, notifications, lock-screen
+alarms and battery restrictions. A denied permission is shown in the app. Keep
+the phone powered on: force-stopping the application prevents delivery until
+it is opened again. OEM battery controls require testing on each phone.
+
+Alarms must also start when the activity and Rust relay are absent. Their
+native player uses a guarded public-network connection and the Aerowave
+User-Agent. If a source cannot play, the chosen backup folder is tried, then
+the phone's default alarm sound. This Android fallback is shown in Settings;
+desktop fallback behavior is unchanged. It does not establish compatibility
+with every station supported by the desktop relay.
+
+Choose a music or backup folder with Android's system folder picker. The app
+keeps read access to that selected tree without requesting access to all files.
+Moving a folder, removing storage or revoking access requires selecting it
+again. Native folder playback continues to another track while the screen is
+locked. Radio backup selection also runs in the native media service.
+
+## Accessibility and qualification
+
+The Android activity follows the system font scale. Native window insets keep
+the webview inside status/navigation bars, cutouts and the keyboard; Android
+layouts wrap controls and allow alarm settings and ringing content to scroll.
+Alarm time controls have accessible labels, and the ringing overlay confines
+focus to its actions.
+
+Qualification must distinguish the installed build and device from features
+covered only by automated tests. Check screen lock, notification actions,
+audio-focus changes, wired/Bluetooth routing, network loss, process recreation,
+reboot, overnight playback, large text, rotation and battery restrictions.
+An optimized signed APK is documented in [Android releases](android-release.md).
+There is no Android PC-power or desktop-tray feature.
 
 ## Initial device checks
 
@@ -110,10 +137,9 @@ paused, resumed at the live stream, and stopped playback. After an explicit
 process stop, reopening restored a paused station and Play created a new relay
 connection successfully.
 
-These are initial device checks, not qualification for every Android version,
-OEM battery policy, long network outage or audio route. Bluetooth hardware,
-headphone unplugging, audio-focus interruption and long idle periods still need
-device coverage. Alarms remain outside this milestone.
+These initial radio checks predate the alarm implementation. Later route,
+folder, alarm and permission results are tracked in the
+[Android qualification record](android-qualification.md), including open gates.
 
 ## Sleep timer checks
 
@@ -139,8 +165,8 @@ disappeared and the service left foreground state before the page resumed.
 Native state then reported the timer finished. Saved stations and settings
 were unchanged, and the listening volume was restored after testing.
 
-Cancellation during the fade, station replacement with an active timer, and
-paused/deep-sleep/resume still need device checks. JVM tests cover monotonic
+Later cancellation, source replacement and paused-expiry checks are recorded in
+the [qualification record](android-qualification.md). JVM tests cover monotonic
 deadlines, the fade calculation, replacement/cancellation, and rejecting a play
 request overtaken by expiry. Frontend tests cover native state restoration and
 delayed command replies.

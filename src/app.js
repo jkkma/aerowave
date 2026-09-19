@@ -3,8 +3,8 @@
 
    The webview owns the face and desktop playback; Android hands playback to
    its native media service so radio can continue in the background. Neither
-   owns the clock: alarm times are decided in Rust and arrive here as
-   `alarm-fire` events, because a throttled hidden webview cannot keep time.
+   owns the clock: desktop alarms run in Rust and Android alarms run in its
+   native service, because a throttled hidden webview cannot keep time.
    ===================================================================== */
 
 const { invoke, convertFileSrc } = window.__TAURI__.core;
@@ -32,7 +32,7 @@ const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 if (IS_ANDROID) {
   $$('[data-tauri-drag-region]').forEach((element) => element.removeAttribute("data-tauri-drag-region"));
-  $("#build-label").textContent = "Android preview";
+  $("#build-label").textContent = "Android";
   $("#np-track").textContent = "Choose a station or browse the directory.";
 }
 
@@ -192,9 +192,13 @@ function resetAndroidPositionSample() {
   androidReadyGeneration = null;
 }
 
-const stoppedTrackHint = () => IS_ANDROID
-  ? "Choose a station or browse the directory."
-  : "Browse stations or play music from a folder.";
+const stoppedTrackHint = () => "Browse stations or play music from a folder.";
+
+function folderCommand(command, payload) {
+  return IS_ANDROID ? androidCommand(command, payload) : invoke(command, payload);
+}
+
+const trackUrl = (path) => IS_ANDROID ? path : convertFileSrc(path);
 
 function markPlaying(on) {
   document.body.classList.toggle("playing", on);
@@ -263,14 +267,18 @@ function restoreAndroidSource(nativeState) {
   if (!androidActiveStatus(nativeState.status)) return false;
   const generation = Number(nativeState.generation);
   if (!Number.isFinite(generation)) return false;
-  const stored = stationById(nativeState.stationId);
+  const local = nativeState.sourceUrl?.startsWith("content://");
+  const stored = local ? null : stationById(nativeState.stationId);
   const source = {
-    kind: "station",
+    kind: local ? "folder" : "station",
     url: stored?.url || nativeState.sourceUrl || "",
+    path: local ? nativeState.sourceUrl : undefined,
+    folder: nativeState.sourceFolder || null,
     title: nativeState.title || stored?.name || "Live radio",
     subtitle: nativeState.status === "paused" ? "Paused — press Play to resume" : "Playing in the background",
     stationId: nativeState.stationId || stored?.id || null,
-    hls: /\.m3u8(?:\?|$)/i.test(nativeState.sourceUrl || ""),
+    hls: nativeState.isHls ?? stored?.hls ?? /\.m3u8(?:\?|$)/i.test(nativeState.sourceUrl || ""),
+    hlsUrl: nativeState.isHls ? nativeState.sourceUrl : stored?.hlsUrl,
     nativeRestored: true,
   };
   if (!source.url) return false;
@@ -302,6 +310,10 @@ function applyAndroidPlaybackState(nativeState, { allowRestore = false } = {}) {
     if (!allowRestore || !restoreAndroidSource(nativeState)) return false;
   }
   if (player.nativeGeneration !== generation) return false;
+  if (nativeState.sourceUrl && nativeState.sourceUrl !== player.source.url &&
+      nativeState.sourceUrl.startsWith("content://") && androidActiveStatus(nativeState.status)) {
+    restoreAndroidSource(nativeState);
+  }
 
   if (Number.isFinite(nativeState.volume)) {
     player.target = Math.min(1, Math.max(0, nativeState.volume));
@@ -326,7 +338,10 @@ function applyAndroidPlaybackState(nativeState, { allowRestore = false } = {}) {
   if (nativeState.status === "error") {
     if (androidHandledErrorGeneration === generation) return true;
     androidHandledErrorGeneration = generation;
-    failure(nativeState.error || "Android audio stopped unexpectedly");
+    player.paused = true;
+    markPlaying(false);
+    setStatus("Playback unavailable", "error");
+    say(nativeState.error || "Android audio stopped unexpectedly", "bad", true);
     return true;
   }
 
@@ -359,7 +374,7 @@ function applyAndroidPlaybackState(nativeState, { allowRestore = false } = {}) {
   // decoding. Once this generation has genuinely advanced, a backward sample
   // alone must not make verified playback look like it is starting again.
   if (androidReadyGeneration === generation) {
-    setStatus("Live radio", "on");
+    setStatus(player.source.kind === "folder" ? "Playing your music" : "Live radio", "on");
   } else {
     setStatus("Starting audio", "busy");
   }
@@ -382,7 +397,163 @@ async function refreshAndroidPlayback({ allowRestore = false } = {}) {
 
 function startAndroidStateSync() {
   if (!IS_ANDROID || androidPollTimer) return;
-  androidPollTimer = setInterval(() => refreshAndroidPlayback(), 1000);
+  androidPollTimer = setInterval(() => {
+    if (document.hidden) return;
+    refreshAndroidPlayback({ allowRestore: true });
+    refreshAndroidAlarms();
+  }, 1000);
+}
+
+// Android is the authority for delivery, including one-shot disabling while
+// this page is absent. Serialize edits and do not let an older poll undo one.
+let androidAlarmSnapshot = null;
+let androidAlarmRequest = 0;
+let androidAlarmPending = 0;
+let androidAlarmQueue = Promise.resolve();
+let androidAlarmWriteBatch = null;
+const androidRingPending = new Set();
+let androidRingFocusBefore = null;
+
+function applyAndroidAlarmState(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.alarms)) return;
+  if (androidAlarmSnapshot && snapshot.revision < androidAlarmSnapshot.revision) return;
+  const alarmsChanged = JSON.stringify(state.alarms) !== JSON.stringify(snapshot.alarms);
+  const permissionsChanged = !androidAlarmSnapshot || androidAlarmSnapshot.error !== snapshot.error ||
+    JSON.stringify(androidAlarmSnapshot.permissions) !== JSON.stringify(snapshot.permissions);
+  androidAlarmSnapshot = snapshot;
+  state.alarms = snapshot.alarms;
+  if (alarmsChanged) renderAlarms();
+  if (permissionsChanged) renderAndroidAlarmPermissions();
+  const nextRing = snapshot.ringing;
+  if (!nextRing) {
+    if (ringing?.native) {
+      ringing = null;
+      $("#ringing").hidden = true;
+      $("#ring-dismiss").disabled = false;
+      $("#ring-snooze").disabled = false;
+      $("#app-content").inert = false;
+      if (androidRingFocusBefore?.isConnected) androidRingFocusBefore.focus();
+      androidRingFocusBefore = null;
+      renderSleepTimer();
+    }
+    return;
+  }
+  const changed = !ringing?.native || ringing.occurrenceId !== nextRing.occurrenceId;
+  if (!ringing?.native) androidRingFocusBefore = document.activeElement;
+  ringing = { ...nextRing, native: true };
+  $("#ring-trigger").textContent = nextRing.trigger === "test" ? "Alarm test"
+    : nextRing.trigger === "snooze" ? "Snooze ended" : "Alarm";
+  $("#ring-time").textContent = fmtAlarmTime(nextRing.hour, nextRing.minute);
+  $("#ring-label").textContent = nextRing.label || "Alarm";
+  $("#ring-source").textContent = nextRing.title || "Alarm sound";
+  $("#ring-note").textContent = nextRing.note || "";
+  $("#ring-snooze-mins").textContent = nextRing.snoozeMins + " min";
+  const actionPending = androidRingPending.has(nextRing.occurrenceId);
+  $("#ring-snooze").disabled = !nextRing.canSnooze || actionPending;
+  $("#ring-dismiss").disabled = actionPending;
+  $("#ring-snooze").title = nextRing.canSnooze ? "" : "Test alarms cannot be snoozed";
+  $("#ringcard").classList.remove("silent");
+  $("#ringing").hidden = false;
+  $("#app-content").inert = true;
+  renderSleepTimer();
+  if (changed) $("#ring-dismiss").focus();
+}
+
+function renderAndroidAlarmPermissions() {
+  const snapshot = androidAlarmSnapshot;
+  if (!snapshot) return;
+  const permissions = snapshot.permissions || {};
+  const required = [];
+  if (permissions.exact === "denied") required.push("allow Alarms & reminders");
+  if (permissions.notifications === "denied") required.push("allow notifications for alarm controls");
+  const summary = required.length ? "To use alarms, " + required.join(" and ") + "."
+    : "Android alarm permissions are ready.";
+  $("#android-alarm-status").textContent = snapshot.error || summary;
+  $("#android-alarm-status").classList.toggle("warn", !!snapshot.error || !!required.length);
+  $("#android-alarm-hint").textContent = required.length ? summary
+    : "Alarms run with the screen locked and are restored after a restart.";
+  $("#android-battery-status").textContent = permissions.batteryOptimized
+    ? "Battery optimization is enabled. Check this phone’s battery settings if background audio stops."
+    : "Android battery optimization is unrestricted for Aerowave.";
+  $("#android-fullscreen-status").textContent = permissions.fullScreen === "denied"
+    ? "Full-screen alarms are off. Use the notification to snooze or dismiss."
+    : "Alarm notifications can show over the lock screen.";
+}
+
+async function refreshAndroidAlarms({ initialize = false } = {}) {
+  if (!IS_ANDROID || androidAlarmPending || (document.hidden && !initialize)) return;
+  const request = ++androidAlarmRequest;
+  try {
+    const snapshot = await androidCommand("get_alarm_state");
+    if (request !== androidAlarmRequest || androidAlarmPending) return;
+    if (initialize && snapshot && !snapshot.initialized && !snapshot.error) {
+      androidAlarmSnapshot = snapshot;
+      await syncAndroidAlarms(true);
+    } else {
+      applyAndroidAlarmState(snapshot);
+      // Repair a source/settings save whose native update failed previously,
+      // without overwriting native one-shot or snooze decisions.
+      if (initialize && snapshot?.initialized) await syncAndroidAlarms(false);
+    }
+    refreshNextAlarm();
+  } catch (error) {
+    if (initialize) say("Could not load Android alarms: " + String(error), "bad", true);
+  }
+}
+
+function syncAndroidAlarms(includeAlarms = false) {
+  const payload = JSON.parse(JSON.stringify({
+    ...(includeAlarms ? { alarms: state.alarms } : {}),
+    stations: state.stations,
+    backupFolder: state.settings.backupFolder || null,
+  }));
+  if (!androidAlarmPending) {
+    androidAlarmWriteBatch = { revision: androidAlarmSnapshot?.revision ?? 0, error: null };
+  }
+  const batch = androidAlarmWriteBatch;
+  const request = ++androidAlarmRequest;
+  androidAlarmPending += 1;
+  const operation = androidAlarmQueue.then(async () => {
+    if (batch.error) throw batch.error;
+    try {
+      // Carry revisions from our own serialized writes, including source-only
+      // saves whose UI reply is superseded. An external native change still
+      // fails the comparison and invalidates the remaining stale edits.
+      const snapshot = await androidCommand("sync_alarms", { ...payload, expectedRevision: batch.revision });
+      batch.revision = snapshot.revision;
+      return snapshot;
+    } catch (error) {
+      batch.error = error;
+      throw error;
+    }
+  });
+  androidAlarmQueue = operation.catch(() => {});
+  return operation.then(snapshot => {
+    if (request === androidAlarmRequest) applyAndroidAlarmState(snapshot);
+    return snapshot;
+  }).finally(() => {
+    androidAlarmPending -= 1;
+    if (!androidAlarmPending) refreshAndroidAlarms();
+  });
+}
+
+async function androidRingAction(command) {
+  const ring = ringing;
+  if (!ring?.native || androidRingPending.has(ring.occurrenceId)) return;
+  androidRingPending.add(ring.occurrenceId);
+  $("#ring-snooze").disabled = $("#ring-dismiss").disabled = true;
+  try {
+    const snapshot = await androidCommand(command, { id: ring.alarmId, occurrenceId: ring.occurrenceId });
+    applyAndroidAlarmState(snapshot);
+    await refreshAndroidPlayback({ allowRestore: true });
+    refreshNextAlarm();
+  } catch (error) {
+    say("Could not change the alarm: " + String(error), "bad", true);
+    await refreshAndroidAlarms();
+  } finally {
+    androidRingPending.delete(ring.occurrenceId);
+    if (androidAlarmSnapshot) applyAndroidAlarmState(androidAlarmSnapshot);
+  }
 }
 
 /** Ramp the element volume up to `player.target` over `seconds`. */
@@ -807,6 +978,7 @@ async function startHls(source, url, generation) {
  */
 async function playable(source, url) {
   if (source.kind === "folder" && source.path) {
+    if (IS_ANDROID) return source.path;
     return await invoke("local_file_url", { path: source.path }) || url;
   }
   if (source.kind !== "station") return url;
@@ -846,6 +1018,8 @@ async function startAndroidPlayback(source, sourceUrl, useHls, generation, volum
       generation,
       isHls: useHls,
       sleepRevision,
+      sourceFolder: source.folder === BACKUP ? state.settings.backupFolder : source.folder || null,
+      backupFolder: state.settings.backupFolder || null,
     });
     if (superseded(generation) || player.source !== source || player.nativeGeneration !== generation) return false;
     if (nativeState?.status === "idle") {
@@ -869,6 +1043,10 @@ async function startAndroidPlayback(source, sourceUrl, useHls, generation, volum
  * servers never will.
  */
 async function play(source, opts = {}) {
+  if (IS_ANDROID && ringing) {
+    say("Dismiss or snooze the alarm before changing playback.");
+    return;
+  }
   stopPlayback(true, { skipNative: IS_ANDROID });
   const generation = playGeneration;
   player.source = source;
@@ -1204,7 +1382,7 @@ function failure(detail, opts = {}) {
 
   player.retries += 1;
   if (opts.fatal || player.retries > 4) {
-    if (IS_ANDROID) {
+    if (IS_ANDROID && !state.settings.backupFolder) {
       stopPlayback(true);
       setOrbArt(null);
       setStatus("Stream unavailable", "error");
@@ -1214,7 +1392,7 @@ function failure(detail, opts = {}) {
     }
     // The station is not coming back. Fall through to the backup folder.
     say("stream unavailable - falling back to the backup folder", "bad");
-    playBackupTrack(source.title + " is unavailable (" + detail + ")");
+    playBackupTrack(source.title + " is unavailable (" + detail + ")", { volume: player.target });
     return;
   }
   const wait = 1500 * player.retries;
@@ -1445,7 +1623,7 @@ async function playRandomFromFolder(folder, opts = {}) {
   const generation = playGeneration;
   const stale = () => request !== folderPickRequest || superseded(generation) || givingUp;
   try {
-    const pick = await invoke("random_track", { path: folder });
+    const pick = await folderCommand("random_track", { path: folder });
     if (stale()) return;
     // Remember what is being left so prev has somewhere to go back to. A
     // different folder is a different shuffle: what came before it is not
@@ -1461,7 +1639,7 @@ async function playRandomFromFolder(folder, opts = {}) {
     play(
       {
         kind: "folder",
-        url: convertFileSrc(pick.path),
+        url: trackUrl(pick.path),
         path: pick.path,
         title: pick.name.replace(/\.[^.]+$/, ""),
         subtitle: `${pick.total} track${pick.total === 1 ? "" : "s"} in the folder`,
@@ -2228,13 +2406,15 @@ async function playBackupTrack(reason, opts = {}) {
   const generation = playGeneration;
   const stale = () => superseded(generation) || givingUp;
   try {
-    const pick = await invoke("backup_track");
+    const pick = IS_ANDROID
+      ? await folderCommand("random_track", { path: state.settings.backupFolder || "" })
+      : await invoke("backup_track");
     if (stale()) return false;
     const title = pick.name.replace(/\.[^.]+$/, "");
     play(
       {
         kind: "folder",
-        url: convertFileSrc(pick.path),
+        url: trackUrl(pick.path),
         path: pick.path,
         title,
         subtitle: reason || "from the backup folder",
@@ -2494,6 +2674,7 @@ function beginRingAction(ring, resumePrevious) {
 }
 
 async function dismissRing({ resumePrevious = false } = {}) {
+  if (IS_ANDROID) return androidRingAction("dismiss_alarm");
   const ring = ringing;
   if (!ring) return;
   const action = beginRingAction(ring, resumePrevious);
@@ -2518,6 +2699,7 @@ async function dismissRing({ resumePrevious = false } = {}) {
 
 /** `why` is set when the alarm snoozed itself rather than being asked to. */
 async function snoozeRing(why, { resumePrevious = false } = {}) {
+  if (IS_ANDROID) return androidRingAction("snooze_alarm");
   const ring = ringing;
   if (!ring || ring.trigger === "test") return;
   const action = beginRingAction(ring, resumePrevious);
@@ -2547,7 +2729,8 @@ async function refreshNextAlarm() {
   const request = ++nextAlarmRequest;
   let next = null;
   try {
-    next = await invoke("next_alarm");
+    next = IS_ANDROID ? androidAlarmSnapshot?.next : await invoke("next_alarm");
+    if (IS_ANDROID && next) next = { ...next, inSecs: Math.max(0, (next.atMs - Date.now()) / 1000) };
   } catch { /* nothing scheduled */ }
   if (request !== nextAlarmRequest) return;
   const box = $("#next-alarm");
@@ -2710,7 +2893,7 @@ function renderAlarms() {
     const sw = document.createElement("button");
     sw.className = "sw";
     sw.setAttribute("aria-pressed", String(!!alarm.enabled));
-    sw.setAttribute("aria-label", `Enable the ${alarm.label || "alarm"} alarm at ${fmtAlarmTime(alarm.hour, alarm.minute)}`);
+    sw.setAttribute("aria-label", `${alarm.label || "Alarm"} at ${fmtAlarmTime(alarm.hour, alarm.minute)}`);
     sw.addEventListener("click", (e) => {
       e.stopPropagation();
       alarm.enabled = !alarm.enabled;
@@ -2736,8 +2919,8 @@ function renderAlarms() {
 /** Show a chosen folder and how much it has in it. */
 function showFolderCounts(info, selector) {
   $(selector).textContent = info.count
-    ? `${info.path}  —  ${info.count} playable file${info.count === 1 ? "" : "s"}`
-    : `${info.path}  —  nothing playable in here`;
+    ? `${info.name || info.path}  —  ${info.count} playable file${info.count === 1 ? "" : "s"}`
+    : `${info.name || info.path}  —  nothing playable in here`;
   $(selector).title = info.path;
   say(
     info.count ? info.count + " tracks found" : "no playable audio in that folder",
@@ -2763,14 +2946,14 @@ async function refreshFolderLabels() {
       continue;
     }
     try {
-      const info = await invoke("folder_info", { path: row.path });
+      const info = await folderCommand("folder_info", { path: row.path });
       el.textContent = info.count
-        ? `${row.path}  —  ${info.count} playable file${info.count === 1 ? "" : "s"}`
-        : `${row.path}  —  nothing playable in here`;
+        ? `${info.name || row.path}  —  ${info.count} playable file${info.count === 1 ? "" : "s"}`
+        : `${info.name || row.path}  —  nothing playable in here`;
       el.classList.toggle("warn", row.critical && !info.count);
       el.title = row.path;
-    } catch {
-      el.textContent = row.path + "  —  unreadable";
+    } catch (error) {
+      el.textContent = IS_ANDROID ? "Choose this folder again: " + String(error) : row.path + "  —  unreadable";
       el.classList.toggle("warn", row.critical);
     }
   }
@@ -2797,11 +2980,12 @@ function renderSettings() {
 
 // ------------------------------------------------------------ persisting ---
 
-const saveStations = () => invoke("save_stations", { stations: state.stations }).catch((e) => say(String(e), "bad"));
-const saveAlarms = () =>
-  invoke("save_alarms", { alarms: state.alarms })
-    .then(() => { refreshNextAlarm(); refreshPowerStatus(); })
-    .catch((e) => say(String(e), "bad"));
+const saveStations = () => invoke("save_stations", { stations: state.stations })
+  .then(() => { if (IS_ANDROID) return syncAndroidAlarms(); })
+  .catch((e) => say(String(e), "bad"));
+const saveAlarms = () => (IS_ANDROID ? syncAndroidAlarms(true) : invoke("save_alarms", { alarms: state.alarms }))
+  .then(() => { refreshNextAlarm(); refreshPowerStatus(); return true; })
+  .catch((e) => { say(String(e), "bad", true); return false; });
 
 let settingsSaveTimer = null;
 let settingsAutostartIntent = null;
@@ -2813,7 +2997,8 @@ function saveSettings(explicitAutostart = null) {
     settingsAutostartIntent = null;
     if (explicitAutostart !== null) state.settings.startWithWindows = explicitAutostart;
     invoke("save_settings", { settings: state.settings, explicitAutostart }).then(() => {
-      if (!IS_ANDROID) refreshPowerStatus();
+      if (IS_ANDROID) return syncAndroidAlarms();
+      refreshPowerStatus();
     }).catch((e) => {
       say(String(e), "bad");
       // start-with-Windows can fail on its own; reflect what actually stuck.
@@ -2826,12 +3011,11 @@ async function loadState() {
   state = await invoke("get_state");
   renderStations();
   renderSettings();
-  if (!IS_ANDROID) {
-    renderAlarms();
-    refreshNextAlarm();
-    refreshFolderLabels();
-    refreshPowerStatus();
-  }
+  if (IS_ANDROID) await refreshAndroidAlarms({ initialize: true });
+  renderAlarms();
+  refreshNextAlarm();
+  refreshFolderLabels();
+  if (!IS_ANDROID) refreshPowerStatus();
 }
 
 // -------------------------------------------------------- station editor ---
@@ -2965,7 +3149,10 @@ function updateDayHint() {
 
 function setKind(kind) {
   editorKind = kind;
-  $$("#al-kind .chip").forEach((c) => c.classList.toggle("on", c.dataset.kind === kind));
+  $$("#al-kind .chip").forEach((c) => {
+    c.classList.toggle("on", c.dataset.kind === kind);
+    c.setAttribute("aria-pressed", String(c.dataset.kind === kind));
+  });
   $("#al-station").classList.toggle("hidden", kind !== "station");
   $("#al-folderpick").classList.toggle("hidden", kind !== "folder");
   const note = $("#al-sourcenote");
@@ -2973,12 +3160,15 @@ function setKind(kind) {
   note.textContent =
     kind === "folder"
       ? "One file is picked at random from the folder and repeats until the alarm is answered — snoozes included, so it comes back with the same track."
-      : "If the stream will not start within twelve seconds, the backup folder plays instead.";
+      : IS_ANDROID
+        ? "If the stream cannot play, backup music takes over, followed by the phone’s alarm sound."
+        : "If the stream will not start within twelve seconds, the backup folder plays instead.";
   // Both kinds fall back to the backup folder, so both are silent without one.
   if (!state.settings.backupFolder) {
-    note.className = "editor-note bad";
-    note.textContent +=
-      " Choose backup music in Settings in case this source is unavailable.";
+    note.className = "editor-note" + (IS_ANDROID ? "" : " bad");
+    note.textContent += IS_ANDROID
+      ? " Without backup music, the phone’s alarm sound is the fallback."
+      : " Choose backup music in Settings in case this source is unavailable.";
   }
 }
 
@@ -3058,7 +3248,11 @@ function openAlarmEditor(alarm) {
 
   $("#al-label").value = base.label || "";
   editorDays = [...(base.days || [])];
-  $$("#al-days button").forEach((b) => b.classList.toggle("on", editorDays.includes(+b.dataset.day)));
+  $$("#al-days button").forEach((b) => {
+    const selected = editorDays.includes(+b.dataset.day);
+    b.classList.toggle("on", selected);
+    b.setAttribute("aria-pressed", String(selected));
+  });
   applyClockMode(base.hour, base.minute);
 
   const src = base.source || { kind: "station" };
@@ -3328,9 +3522,30 @@ setInterval(renderSleepTimer, 1000);
 
 function wire() {
   if (IS_ANDROID) {
-    window.addEventListener("focus", () => refreshAndroidPlayback());
+    const refreshNative = () => {
+      refreshAndroidPlayback({ allowRestore: true });
+      refreshAndroidAlarms();
+    };
+    window.addEventListener("focus", refreshNative);
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) refreshAndroidPlayback();
+      if (!document.hidden) refreshNative();
+    });
+    $$("[data-android-setting]").forEach(button => button.addEventListener("click", async () => {
+      try {
+        await androidCommand("open_alarm_settings", { setting: button.dataset.androidSetting });
+      } catch (error) { say(String(error), "bad"); }
+    }));
+    $$("#al-days button").forEach(button => {
+      button.setAttribute("aria-label", DAY_NAMES[+button.dataset.day]);
+    });
+    document.addEventListener("keydown", event => {
+      if (!ringing?.native || event.key !== "Tab") return;
+      const controls = [$("#ring-snooze"), $("#ring-dismiss")].filter(button => !button.disabled);
+      if (!controls.length) { event.preventDefault(); return; }
+      const at = controls.indexOf(document.activeElement);
+      const next = (at + (event.shiftKey ? -1 : 1) + controls.length) % controls.length;
+      event.preventDefault();
+      controls[next].focus();
     });
   } else {
     window.addEventListener("focus", refreshPowerStatus);
@@ -3541,10 +3756,9 @@ function wire() {
     browseSearch(false);
   });
 
-  if (!IS_ANDROID) {
   // shuffle folder on the radio tab
   $("#btn-pick-folder").addEventListener("click", async () => {
-    const info = await invoke("pick_folder");
+    const info = await folderCommand("pick_folder").catch(e => { say(String(e), "bad"); return null; });
     if (!info) return;
     state.settings.shuffleFolder = info.path;
     saveSettings();
@@ -3553,7 +3767,7 @@ function wire() {
   $("#btn-play-folder").addEventListener("click", () => playRandomFromFolder(shuffleFolder()));
 
   $("#btn-pick-backup").addEventListener("click", async () => {
-    const info = await invoke("pick_folder");
+    const info = await folderCommand("pick_folder").catch(e => { say(String(e), "bad"); return null; });
     if (!info) return;
     state.settings.backupFolder = info.path;
     saveSettings();
@@ -3572,6 +3786,7 @@ function wire() {
       if (i >= 0) editorDays.splice(i, 1);
       else editorDays.push(day);
       btn.classList.toggle("on", i < 0);
+      btn.setAttribute("aria-pressed", String(i < 0));
       editorQuickMins = 0; // a repeat is not a span from now either
       syncTimeUi();
     })
@@ -3616,14 +3831,14 @@ function wire() {
   $$("#al-kind .chip").forEach((chip) => chip.addEventListener("click", () => setKind(chip.dataset.kind)));
 
   $("#al-folderbtn").addEventListener("click", async () => {
-    const info = await invoke("pick_folder");
+    const info = await folderCommand("pick_folder").catch(e => { say(String(e), "bad"); return null; });
     if (!info) return;
     editorFolder = info.path;
-    $("#al-folderpath").textContent = info.path;
+    $("#al-folderpath").textContent = info.name || info.path;
     const note = $("#al-sourcenote");
     note.className = "editor-note" + (info.count ? "" : " bad");
     note.textContent = info.count
-      ? `${info.count} playable file${info.count === 1 ? "" : "s"} — e.g. ${info.sample.slice(0, 2).join(", ")}`
+      ? `${info.count} playable file${info.count === 1 ? "" : "s"}${info.sample?.length ? " — e.g. " + info.sample.slice(0, 2).join(", ") : ""}`
       : "No playable audio in that folder — the backup folder would ring instead.";
   });
 
@@ -3634,7 +3849,7 @@ function wire() {
     $("#al-volval").textContent = e.target.value;
   });
 
-  $("#alarm-editor").addEventListener("submit", (e) => {
+  $("#alarm-editor").addEventListener("submit", async (e) => {
     e.preventDefault();
     const result = readAlarmEditor();
     if (result.error) {
@@ -3646,17 +3861,17 @@ function wire() {
     const idx = state.alarms.findIndex((a) => a.id === result.alarm.id);
     if (idx >= 0) state.alarms[idx] = result.alarm;
     else state.alarms.push(result.alarm);
-    saveAlarms();
+    if (!(await saveAlarms())) return;
     rememberAlarmSetup(result.alarm);
     renderAlarms();
     closeAlarmEditor();
     say("alarm saved", "good");
   });
 
-  $("#al-delete").addEventListener("click", () => {
+  $("#al-delete").addEventListener("click", async () => {
     if (!editingAlarm) return;
     state.alarms = state.alarms.filter((a) => a.id !== editingAlarm.id);
-    saveAlarms();
+    if (!(await saveAlarms())) return;
     renderAlarms();
     closeAlarmEditor();
     say("alarm deleted");
@@ -3675,6 +3890,10 @@ function wire() {
     // the button was pressed and left CANCEL with nothing to undo. The alarm
     // goes over the wire instead, and the stored copy is untouched.
     try {
+      if (IS_ANDROID) {
+        applyAndroidAlarmState(await androidCommand("test_alarm", { alarm: result.alarm }));
+        return;
+      }
       const payload = await invoke("test_alarm", { alarm: result.alarm });
       onAlarmFire(payload);
     } catch (e) {
@@ -3685,7 +3904,6 @@ function wire() {
   // ringing overlay
   $("#ring-snooze").addEventListener("click", () => snoozeRing());
   $("#ring-dismiss").addEventListener("click", dismissRing);
-  }
 
   // settings
   $$(".settings .row").forEach((row) => {
@@ -3736,7 +3954,7 @@ function wire() {
 async function showBuildLabel() {
   try {
     const version = await window.__TAURI__.app.getVersion();
-    $("#build-label").textContent = (IS_ANDROID ? "Android preview" : "Radio & alarms") + " · " + version;
+    $("#build-label").textContent = (IS_ANDROID ? "Android" : "Radio & alarms") + " · " + version;
   } catch {
     /* the label reads fine without it */
   }

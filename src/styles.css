@@ -1083,6 +1083,7 @@ select.field option { background: #062434; color: var(--foam); }
 body.android {
   height: 100dvh;
   min-height: 100%;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto;
   overscroll-behavior: none;
 }
@@ -1145,17 +1146,34 @@ body.android {
 }
 
 .android .console { min-height: 440px; height: 68dvh; }
-.android .tabs { gap: 3px; }
-.android .tab { min-height: 44px; padding: 9px 4px; }
+.android .tabs { gap: 3px; flex-wrap: wrap; }
+.android .tab { min-height: 48px; padding: 9px 6px; flex: 1 1 auto; }
 .android .pane { overscroll-behavior: contain; }
-.android .paneheader { align-items: stretch; }
+.android .paneheader { align-items: stretch; flex-wrap: wrap; }
 .android .paneheader .field { flex: 1 1 160px; }
 .android .browsefilters { gap: 7px; }
 .android .row { min-height: 52px; padding: 7px 8px; gap: 7px; }
 .android .row .icon { width: 42px; height: 42px; }
 .android .editor { padding: 11px; }
 .android .editor-actions { row-gap: 7px; }
-.android #pane-settings.on { grid-template-rows: max-content max-content; }
+.android #pane-settings.on { grid-template-rows: repeat(5, max-content); }
+.android #pane-alarms.on { grid-template-rows: repeat(4, max-content); align-content: start; }
+.android #pane-alarms .list { overflow: visible; }
+.android .android-alarm-settings { padding: 8px 4px; }
+.android .android-alarm-settings p { margin: 10px 0; line-height: 1.5; }
+.android .timerow, .android .sourcerow, .android .folderpick { flex-wrap: wrap; }
+.android .timerow .grow { flex: 1 1 150px; }
+.android .stepper { width: 52px; height: 48px; font-size: 14px; }
+.android .days { flex-wrap: wrap; }
+.android .days button, .android .chip { min-width: 48px; min-height: 48px; }
+.android .folderpath { white-space: normal; overflow-wrap: anywhere; }
+.android .editor-actions { flex-wrap: wrap; }
+.android .gel, .android .field, .android .lbl { overflow-wrap: anywhere; }
+.android .field { min-height: 48px; }
+.android .ringing { overflow-y: auto; align-items: safe center; padding: 12px; }
+.android .ringcard { max-width: 100%; }
+.android .ringtime { font-size: clamp(36px, 13vw, 72px); }
+.android .ringactions { flex-wrap: wrap; }
 .android .about { padding-top: 4px; }
 .android .statusbar {
   min-height: calc(32px + env(safe-area-inset-bottom));
@@ -1191,4 +1209,26 @@ body.android {
   .android .sleepbox { grid-column: 1 / -1; grid-row: 4; }
   .android .console { min-height: 0; height: auto; }
   .android .row { min-height: 46px; }
+}
+
+/* A landscape keyboard can leave less than one control's height between the
+   player and the app chrome. Give the focused editor the remaining viewport. */
+@media (max-height: 300px) {
+  body.android:has(.editor :is(input, textarea, select):focus) { display: block; }
+  .android:has(.editor :is(input, textarea, select):focus) :is(.titlebar, .statusbar, .stage, .tabs) { display: none; }
+  .android:has(.editor :is(input, textarea, select):focus) main {
+    height: 100%;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    padding: 4px;
+    gap: 0;
+  }
+  .android:has(.editor :is(input, textarea, select):focus) .console {
+    height: 100%;
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+    padding: 4px;
+    gap: 0;
+  }
+  .android .pane.on:has(.editor :is(input, textarea, select):focus) > :not(.editor) { display: none; }
 }

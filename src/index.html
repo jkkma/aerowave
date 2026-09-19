@@ -34,7 +34,7 @@
   </div>
 </header>
 
-<main>
+<main id="app-content">
   <!-- ============================ left: the stage ====================== -->
   <section class="stage panel bevel">
     <div class="corner tl"></div><div class="corner tr"></div>
@@ -73,7 +73,7 @@
       </div>
     </div>
 
-    <p class="android-preview-note" role="note">This Android preview plays radio in the background, with a sleep timer. Alarms and music folders are coming later.</p>
+    <p class="android-preview-note" role="note">Radio and your music keep playing with the screen locked. Set a sleep timer here, or schedule a wake-up in Alarms.</p>
 
     <div class="sleepbox">
       <div class="sleeprow">
@@ -109,7 +109,7 @@
     <nav class="tabs" role="tablist">
       <button class="tab on" id="tab-radio" data-pane="radio" role="tab" aria-selected="true" aria-controls="pane-radio">Stations</button>
       <button class="tab" id="tab-browse" data-pane="browse" role="tab" aria-selected="false" aria-controls="pane-browse">Browse</button>
-      <button class="tab android-unavailable" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms">Alarms</button>
+      <button class="tab" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms">Alarms</button>
       <button class="tab" id="tab-settings" data-pane="settings" role="tab" aria-selected="false" aria-controls="pane-settings">Settings</button>
     </nav>
 
@@ -136,7 +136,7 @@
         <p class="editor-note" id="st-note"></p>
       </form>
 
-      <div class="folderbox android-unavailable">
+      <div class="folderbox">
         <div class="hud-mini">Your music</div>
         <p class="folderpath" id="folder-path">No folder chosen</p>
         <div class="editor-actions">
@@ -185,27 +185,29 @@
     </div>
 
     <!-- ---------------------------- alarms --------------------------- -->
-    <div class="pane android-unavailable" id="pane-alarms" role="tabpanel" aria-labelledby="tab-alarms">
+    <div class="pane" id="pane-alarms" role="tabpanel" aria-labelledby="tab-alarms">
       <div class="paneheader">
         <div class="nextalarm" id="next-alarm">No alarm set</div>
         <button class="gel wide" id="btn-add-alarm">+ Add alarm</button>
       </div>
       <ul class="list alarms" id="alarm-list"></ul>
 
+      <p class="android-only editor-note" id="android-alarm-hint">Checking Android alarm permissions…</p>
+
       <form class="editor hidden" id="alarm-editor" autocomplete="off">
         <div class="editor-title">Alarm</div>
 
         <div class="timerow">
           <div class="timeset">
-            <button type="button" class="stepper" data-step="hour" data-dir="1">▲</button>
-            <input class="timefield" id="al-hour" inputmode="numeric" maxlength="2" value="07">
-            <button type="button" class="stepper" data-step="hour" data-dir="-1">▼</button>
+            <button type="button" class="stepper" data-step="hour" data-dir="1" aria-label="Increase hour">▲</button>
+            <input class="timefield" id="al-hour" aria-label="Alarm hour" inputmode="numeric" maxlength="2" value="07">
+            <button type="button" class="stepper" data-step="hour" data-dir="-1" aria-label="Decrease hour">▼</button>
           </div>
           <span class="timecolon">:</span>
           <div class="timeset">
-            <button type="button" class="stepper" data-step="minute" data-dir="1">▲</button>
-            <input class="timefield" id="al-minute" inputmode="numeric" maxlength="2" value="00">
-            <button type="button" class="stepper" data-step="minute" data-dir="-1">▼</button>
+            <button type="button" class="stepper" data-step="minute" data-dir="1" aria-label="Increase minute">▲</button>
+            <input class="timefield" id="al-minute" aria-label="Alarm minute" inputmode="numeric" maxlength="2" value="00">
+            <button type="button" class="stepper" data-step="minute" data-dir="-1" aria-label="Decrease minute">▼</button>
           </div>
           <div class="meridiem hidden" id="al-meridiem" role="group" aria-label="Morning or afternoon">
             <button type="button" class="chip" data-ampm="am" aria-pressed="false">AM</button>
@@ -314,13 +316,27 @@
 
     <!-- --------------------------- settings -------------------------- -->
     <div class="pane" id="pane-settings" role="tabpanel" aria-labelledby="tab-settings">
-      <div class="folderbox backup android-unavailable">
+      <div class="folderbox backup">
         <div class="hud-mini">Backup music</div>
         <p class="editor-note">Choose music to play if a station or alarm source is unavailable.</p>
+        <p class="editor-note android-only">If no backup track can play, alarms use the phone’s default alarm sound.</p>
         <div class="folderpick">
           <span class="folderpath" id="backup-path">No folder chosen</span>
           <button class="gel" id="btn-pick-backup">Choose…</button>
         </div>
+      </div>
+      <div class="android-only android-alarm-settings">
+        <p class="hud-mini">Android alarms</p>
+        <p id="android-alarm-status" class="editor-note" role="status">Checking permissions…</p>
+        <div class="editor-actions">
+          <button class="gel" data-android-setting="exact">Alarms &amp; reminders</button>
+          <button class="gel" data-android-setting="notifications">Notifications</button>
+        </div>
+        <p id="android-fullscreen-status" class="editor-note"></p>
+        <button class="gel" data-android-setting="fullscreen">Lock-screen alarms</button>
+        <p id="android-battery-status" class="editor-note"></p>
+        <button class="gel" data-android-setting="battery">Battery settings</button>
+        <p class="editor-note">Keep the phone powered on. After restarting, music folders may need the first unlock; the system alarm sound is the fallback. Force-stopping Aerowave prevents alarms until you open it again.</p>
       </div>
       <ul class="list settings">
         <li class="row toggle" data-setting="clock24h"><span>24-hour clock</span><button class="sw" aria-pressed="true"></button></li>
@@ -369,7 +385,7 @@
   <p class="editor-note">Escape also cancels.</p>
 </dialog>
 
-<div class="ringing android-unavailable" id="ringing" hidden role="alertdialog" aria-modal="true" aria-labelledby="ring-label" aria-describedby="ring-source">
+<div class="ringing" id="ringing" hidden role="alertdialog" aria-modal="true" aria-labelledby="ring-label" aria-describedby="ring-source">
   <div class="ringcard panel bevel" id="ringcard">
     <div class="corner tl"></div><div class="corner tr"></div>
     <div class="corner bl"></div><div class="corner br"></div>

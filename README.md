@@ -316,17 +316,21 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 
 ## Installing it
 
-### Android preview
+### Android
 
 The Android port starts with station browsing, saved stations and native radio
 playback. Android's Media3 service owns playback and media controls; ordinary
 streams still use the Rust relay, while HLS goes directly through Media3 with
 public-address validation. The desktop playback paths above remain unchanged.
 
-The sleep timer runs in the Android media service, including its final fade.
-Alarms and local music folders are not available in this preview.
-See the [Android build and testing guide](docs/android.md) for the APK build,
-installation steps and remaining work.
+The sleep timer, alarms, snooze and music-folder playback run in native Android
+services. AlarmManager restores scheduled delivery after a reboot; the system
+folder picker grants persistent read access to chosen music. Cold-start alarms
+connect through their own guarded native player and fall back to backup music,
+then Android's alarm sound when necessary. Desktop alarm behavior above is
+unchanged. See the [Android build and testing guide](docs/android.md) for device
+evidence and limitations, and [Android releases](docs/android-release.md) for
+protected signing keys and optimized APKs.
 
 ### Zorin OS / Ubuntu Linux
 

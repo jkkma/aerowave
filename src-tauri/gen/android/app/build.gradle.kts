@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.gradle.api.GradleException
 
 plugins {
     id("com.android.application")
@@ -13,6 +14,46 @@ val tauriProperties = Properties().apply {
     }
 }
 
+fun versionCodeFor(versionName: String): Int {
+    val match = Regex("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$").matchEntire(versionName)
+        ?: throw GradleException("Android releases require a stable major.minor.patch version; found '$versionName'.")
+    val major = match.groupValues[1].toLong()
+    val minor = match.groupValues[2].toLong()
+    val patch = match.groupValues[3].toLong()
+    if (minor > 999 || patch > 999) {
+        throw GradleException("Android minor and patch versions must each be at most 999.")
+    }
+    val code = major * 1_000_000L + minor * 1_000L + patch
+    if (code !in 1..2_100_000_000L) {
+        throw GradleException("The derived Android version code $code is outside the supported range.")
+    }
+    return code.toInt()
+}
+
+val aerowaveVersionName = tauriProperties.getProperty("tauri.android.versionName", "")
+val aerowaveVersionCode = versionCodeFor(aerowaveVersionName)
+tauriProperties.getProperty("tauri.android.versionCode")?.toIntOrNull()?.let { generatedCode ->
+    if (generatedCode != aerowaveVersionCode) {
+        throw GradleException(
+            "Tauri generated Android version code $generatedCode, but $aerowaveVersionName reproducibly maps to $aerowaveVersionCode."
+        )
+    }
+}
+
+val releaseSigningEnvironment = mapOf(
+    "storeFile" to System.getenv("AEROWAVE_ANDROID_KEYSTORE_FILE"),
+    "storePassword" to System.getenv("AEROWAVE_ANDROID_STORE_PASSWORD"),
+    "keyAlias" to System.getenv("AEROWAVE_ANDROID_KEY_ALIAS"),
+    "keyPassword" to System.getenv("AEROWAVE_ANDROID_KEY_PASSWORD"),
+)
+val releaseTaskRequested = gradle.startParameter.taskNames.any { it.contains("release", ignoreCase = true) }
+val missingReleaseSigning = releaseSigningEnvironment.filterValues { it.isNullOrEmpty() }.keys
+if (releaseTaskRequested && missingReleaseSigning.isNotEmpty()) {
+    throw GradleException(
+        "Release signing is incomplete (${missingReleaseSigning.joinToString()}). Use tools/android-build.ps1 -Release."
+    )
+}
+
 android {
     compileSdk = 36
     namespace = "com.aerowave.radio"
@@ -23,8 +64,18 @@ android {
         applicationId = "com.aerowave.radio"
         minSdk = 26
         targetSdk = 36
-        versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
-        versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+        versionCode = aerowaveVersionCode
+        versionName = aerowaveVersionName
+    }
+    signingConfigs {
+        if (missingReleaseSigning.isEmpty()) {
+            create("aerowaveRelease") {
+                storeFile = file(releaseSigningEnvironment.getValue("storeFile")!!)
+                storePassword = releaseSigningEnvironment.getValue("storePassword")
+                keyAlias = releaseSigningEnvironment.getValue("keyAlias")
+                keyPassword = releaseSigningEnvironment.getValue("keyPassword")
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -39,6 +90,9 @@ android {
             }
         }
         getByName("release") {
+            if (missingReleaseSigning.isEmpty()) {
+                signingConfig = signingConfigs.getByName("aerowaveRelease")
+            }
             isMinifyEnabled = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
