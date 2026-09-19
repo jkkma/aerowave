@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-folder-info"
+description = "Enables the folder_info command without any pre-configured scope."
+commands.allow = ["folder_info"]
+
+[[permission]]
+identifier = "deny-folder-info"
+description = "Denies the folder_info command without any pre-configured scope."
+commands.deny = ["folder_info"]

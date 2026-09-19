@@ -12,4 +12,13 @@ permissions = [
   "allow-set-sleep-timer",
   "allow-cancel-sleep-timer",
   "allow-get-sleep-timer",
+  "allow-sync-alarms",
+  "allow-get-alarm-state",
+  "allow-snooze-alarm",
+  "allow-dismiss-alarm",
+  "allow-test-alarm",
+  "allow-open-alarm-settings",
+  "allow-pick-folder",
+  "allow-folder-info",
+  "allow-random-track",
 ]

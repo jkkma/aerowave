@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-test-alarm"
+description = "Enables the test_alarm command without any pre-configured scope."
+commands.allow = ["test_alarm"]
+
+[[permission]]
+identifier = "deny-test-alarm"
+description = "Denies the test_alarm command without any pre-configured scope."
+commands.deny = ["test_alarm"]

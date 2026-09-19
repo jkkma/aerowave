@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-random-track"
+description = "Enables the random_track command without any pre-configured scope."
+commands.allow = ["random_track"]
+
+[[permission]]
+identifier = "deny-random-track"
+description = "Denies the random_track command without any pre-configured scope."
+commands.deny = ["random_track"]

@@ -13,6 +13,15 @@ Allows Aerowave to control its Android background radio player.
 - `allow-set-sleep-timer`
 - `allow-cancel-sleep-timer`
 - `allow-get-sleep-timer`
+- `allow-sync-alarms`
+- `allow-get-alarm-state`
+- `allow-snooze-alarm`
+- `allow-dismiss-alarm`
+- `allow-test-alarm`
+- `allow-open-alarm-settings`
+- `allow-pick-folder`
+- `allow-folder-info`
+- `allow-random-track`
 
 ## Permission Table
 
@@ -45,6 +54,84 @@ Enables the cancel_sleep_timer command without any pre-configured scope.
 <td>
 
 Denies the cancel_sleep_timer command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-dismiss-alarm`
+
+</td>
+<td>
+
+Enables the dismiss_alarm command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-dismiss-alarm`
+
+</td>
+<td>
+
+Denies the dismiss_alarm command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-folder-info`
+
+</td>
+<td>
+
+Enables the folder_info command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-folder-info`
+
+</td>
+<td>
+
+Denies the folder_info command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-get-alarm-state`
+
+</td>
+<td>
+
+Enables the get_alarm_state command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-get-alarm-state`
+
+</td>
+<td>
+
+Denies the get_alarm_state command without any pre-configured scope.
 
 </td>
 </tr>
@@ -104,6 +191,32 @@ Denies the get_state command without any pre-configured scope.
 <tr>
 <td>
 
+`android-audio:allow-open-alarm-settings`
+
+</td>
+<td>
+
+Enables the open_alarm_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-open-alarm-settings`
+
+</td>
+<td>
+
+Denies the open_alarm_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `android-audio:allow-pause`
 
 </td>
@@ -130,6 +243,32 @@ Denies the pause command without any pre-configured scope.
 <tr>
 <td>
 
+`android-audio:allow-pick-folder`
+
+</td>
+<td>
+
+Enables the pick_folder command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-pick-folder`
+
+</td>
+<td>
+
+Denies the pick_folder command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `android-audio:allow-play`
 
 </td>
@@ -149,6 +288,32 @@ Enables the play command without any pre-configured scope.
 <td>
 
 Denies the play command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-random-track`
+
+</td>
+<td>
+
+Enables the random_track command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-random-track`
+
+</td>
+<td>
+
+Denies the random_track command without any pre-configured scope.
 
 </td>
 </tr>
@@ -234,6 +399,32 @@ Denies the set_volume command without any pre-configured scope.
 <tr>
 <td>
 
+`android-audio:allow-snooze-alarm`
+
+</td>
+<td>
+
+Enables the snooze_alarm command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-snooze-alarm`
+
+</td>
+<td>
+
+Denies the snooze_alarm command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `android-audio:allow-stop`
 
 </td>
@@ -253,6 +444,58 @@ Enables the stop command without any pre-configured scope.
 <td>
 
 Denies the stop command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-sync-alarms`
+
+</td>
+<td>
+
+Enables the sync_alarms command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-sync-alarms`
+
+</td>
+<td>
+
+Denies the sync_alarms command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-test-alarm`
+
+</td>
+<td>
+
+Enables the test_alarm command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-test-alarm`
+
+</td>
+<td>
+
+Denies the test_alarm command without any pre-configured scope.
 
 </td>
 </tr>

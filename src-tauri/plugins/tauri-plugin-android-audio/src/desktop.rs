@@ -3,7 +3,9 @@ use std::marker::PhantomData;
 use tauri::{plugin::PluginApi, AppHandle, Runtime};
 
 use crate::models::{
-    PlayPayload, PlaybackState, SleepTimerPayload, SleepTimerSnapshot, VolumePayload,
+    AlarmIdPayload, AlarmSettingsPayload, AlarmState, FolderInfo, FolderPathPayload, PlayPayload,
+    PlaybackState, RandomTrackPayload, SleepTimerPayload, SleepTimerSnapshot, SyncAlarmsPayload,
+    TestAlarmPayload, TrackPick, VolumePayload,
 };
 
 pub struct AndroidAudio<R: Runtime>(PhantomData<fn() -> R>);
@@ -53,5 +55,37 @@ impl<R: Runtime> AndroidAudio<R> {
 
     pub fn get_sleep_timer(&self) -> Result<SleepTimerSnapshot, String> {
         Ok(SleepTimerSnapshot::default())
+    }
+
+    pub fn sync_alarms(&self, _payload: SyncAlarmsPayload) -> Result<AlarmState, String> {
+        Err("Android alarms are only available on Android".into())
+    }
+
+    pub fn get_alarm_state(&self) -> Result<AlarmState, String> {
+        Ok(AlarmState::default())
+    }
+    pub fn snooze_alarm(&self, _payload: AlarmIdPayload) -> Result<AlarmState, String> {
+        Err("Android alarms are only available on Android".into())
+    }
+    pub fn dismiss_alarm(&self, _payload: AlarmIdPayload) -> Result<AlarmState, String> {
+        Err("Android alarms are only available on Android".into())
+    }
+    pub fn test_alarm(&self, _payload: TestAlarmPayload) -> Result<AlarmState, String> {
+        Err("Android alarms are only available on Android".into())
+    }
+    pub fn open_alarm_settings(
+        &self,
+        _payload: AlarmSettingsPayload,
+    ) -> Result<AlarmState, String> {
+        Err("Android alarms are only available on Android".into())
+    }
+    pub fn pick_folder(&self) -> Result<Option<FolderInfo>, String> {
+        Err("Android folders are only available on Android".into())
+    }
+    pub fn folder_info(&self, _payload: FolderPathPayload) -> Result<FolderInfo, String> {
+        Err("Android folders are only available on Android".into())
+    }
+    pub fn random_track(&self, _payload: RandomTrackPayload) -> Result<TrackPick, String> {
+        Err("Android folders are only available on Android".into())
     }
 }

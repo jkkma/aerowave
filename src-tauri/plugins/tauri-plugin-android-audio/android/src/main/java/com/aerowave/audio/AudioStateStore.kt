@@ -11,6 +11,8 @@ internal data class PlayRequest(
   val generation: Long,
   val isHls: Boolean,
   val sleepRevision: Long? = null,
+  val sourceFolder: String? = null,
+  val backupFolder: String? = null,
 )
 
 internal data class PlaybackSnapshot(
@@ -25,6 +27,8 @@ internal data class PlaybackSnapshot(
   val trackTitle: String? = null,
   val playableUrl: String = "",
   val isHls: Boolean = false,
+  val sourceFolder: String? = null,
+  val backupFolder: String? = null,
   // Sleep state deliberately stays in process memory. Persisting elapsed
   // realtime deadlines would leave a stale timer after service/process death.
   val sleepTimer: SleepTimerSnapshot = SleepTimerSnapshot(),
@@ -39,6 +43,8 @@ internal data class PlaybackSnapshot(
       generation,
       isHls,
       sleepTimer.revision,
+      sourceFolder,
+      backupFolder,
     )
   }
 
@@ -70,6 +76,8 @@ internal object AudioStateStore {
       positionMs = 0,
       playableUrl = request.url,
       isHls = request.isHls,
+      sourceFolder = request.sourceFolder,
+      backupFolder = request.backupFolder,
     )
   }
 
@@ -101,6 +109,8 @@ internal object AudioStateStore {
       trackTitle = null,
       playableUrl = "",
       isHls = false,
+      sourceFolder = null,
+      backupFolder = null,
     )
   }
 
@@ -120,6 +130,8 @@ internal object AudioStateStore {
       trackTitle = prefs.getString("trackTitle", null),
       playableUrl = prefs.getString("playableUrl", "") ?: "",
       isHls = prefs.getBoolean("isHls", false),
+      sourceFolder = prefs.getString("sourceFolder", null),
+      backupFolder = prefs.getString("backupFolder", null),
     )
     loaded = true
   }
@@ -137,6 +149,8 @@ internal object AudioStateStore {
       .putString("trackTitle", state.trackTitle)
       .putString("playableUrl", state.playableUrl)
       .putBoolean("isHls", state.isHls)
+      .putString("sourceFolder", state.sourceFolder)
+      .putString("backupFolder", state.backupFolder)
       .apply()
   }
 }
