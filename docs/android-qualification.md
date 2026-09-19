@@ -203,10 +203,12 @@ five minutes showed an active renderer without detected interruptions.
 
 The corrected signed 0.11.6 release began a fresh eight-hour run around 15:19 UTC
 on 2026-09-19, after the tester confirmed radio playback and again muted and
-locked the phone. Its first sample shows an active renderer with the screen
-asleep and charging power. Completion is expected around 23:19 UTC; the full
-duration remains pending. The monitor records actual screen state and filtered
-renderer evidence.
+locked the phone. Four samples spanning three minutes showed an active renderer
+with the screen asleep and charging power. Wireless debugging became unavailable
+at 15:22:58 UTC, and reconnecting to the known endpoint failed. The recorder was
+paused pending reconnection. This observation gap does not establish that audio
+stopped, and the full eight-hour duration remains unverified. The monitor records
+actual screen state and filtered renderer evidence.
 The one-minute monitor validation completed with six active-renderer samples
 and no detected issues. Unknown MediaSession positions were correctly treated
 as unavailable telemetry.
