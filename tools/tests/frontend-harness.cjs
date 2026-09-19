@@ -184,6 +184,7 @@ function createHarness(options = {}) {
   };
   const context = vm.createContext({
     document, Audio, Hls, URL, TextEncoder, TextDecoder, AbortController, console,
+    performance: options.performance || { now: () => 0 },
     btoa: (str) => Buffer.from(str, "binary").toString("base64"),
     navigator: options.navigator || {},
     window: Object.assign(new Element("window"), { __TAURI__: {

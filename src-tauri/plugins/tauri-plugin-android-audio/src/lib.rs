@@ -10,7 +10,9 @@ use desktop::AndroidAudio;
 #[cfg(target_os = "android")]
 use mobile::AndroidAudio;
 
-pub use models::{PlayPayload, PlaybackState, VolumePayload};
+pub use models::{
+    PlayPayload, PlaybackState, SleepTimer, SleepTimerPayload, SleepTimerSnapshot, VolumePayload,
+};
 
 use tauri::{
     plugin::{Builder, TauriPlugin},
@@ -50,10 +52,36 @@ fn set_volume<R: Runtime>(
     app.state::<AndroidAudio<R>>().set_volume(payload)
 }
 
+#[tauri::command]
+fn set_sleep_timer<R: Runtime>(
+    app: AppHandle<R>,
+    payload: SleepTimerPayload,
+) -> Result<SleepTimerSnapshot, String> {
+    app.state::<AndroidAudio<R>>().set_sleep_timer(payload)
+}
+
+#[tauri::command]
+fn cancel_sleep_timer<R: Runtime>(app: AppHandle<R>) -> Result<SleepTimerSnapshot, String> {
+    app.state::<AndroidAudio<R>>().cancel_sleep_timer()
+}
+
+#[tauri::command]
+fn get_sleep_timer<R: Runtime>(app: AppHandle<R>) -> Result<SleepTimerSnapshot, String> {
+    app.state::<AndroidAudio<R>>().get_sleep_timer()
+}
+
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("android-audio")
         .invoke_handler(tauri::generate_handler![
-            play, pause, resume, stop, get_state, set_volume
+            play,
+            pause,
+            resume,
+            stop,
+            get_state,
+            set_volume,
+            set_sleep_timer,
+            cancel_sleep_timer,
+            get_sleep_timer
         ])
         .setup(|app, api| {
             #[cfg(target_os = "android")]

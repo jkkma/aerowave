@@ -10,6 +10,7 @@ internal data class PlayRequest(
   val volume: Float,
   val generation: Long,
   val isHls: Boolean,
+  val sleepRevision: Long? = null,
 )
 
 internal data class PlaybackSnapshot(
@@ -24,9 +25,21 @@ internal data class PlaybackSnapshot(
   val trackTitle: String? = null,
   val playableUrl: String = "",
   val isHls: Boolean = false,
+  // Sleep state deliberately stays in process memory. Persisting elapsed
+  // realtime deadlines would leave a stale timer after service/process death.
+  val sleepTimer: SleepTimerSnapshot = SleepTimerSnapshot(),
 ) {
   fun requestOrNull(): PlayRequest? = playableUrl.takeIf { it.isNotBlank() }?.let {
-    PlayRequest(it, sourceUrl, title, stationId, volume, generation, isHls)
+    PlayRequest(
+      it,
+      sourceUrl,
+      title,
+      stationId,
+      volume,
+      generation,
+      isHls,
+      sleepTimer.revision,
+    )
   }
 
 }
@@ -45,13 +58,16 @@ internal object AudioStateStore {
   private var current = PlaybackSnapshot()
 
   fun begin(context: Context, request: PlayRequest): PlaybackSnapshot = update(context) {
-    PlaybackSnapshot(
+    it.copy(
       status = STATUS_BUFFERING,
       generation = request.generation,
       sourceUrl = request.sourceUrl,
       title = request.title,
       stationId = request.stationId,
       volume = request.volume,
+      error = null,
+      trackTitle = null,
+      positionMs = 0,
       playableUrl = request.url,
       isHls = request.isHls,
     )

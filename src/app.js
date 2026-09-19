@@ -293,6 +293,8 @@ function restoreAndroidSource(nativeState) {
 
 function applyAndroidPlaybackState(nativeState, { allowRestore = false } = {}) {
   if (!IS_ANDROID || !nativeState || typeof nativeState.status !== "string") return false;
+  // The native timer can finish with no source left to restore after a reload.
+  if (nativeState.sleepTimer) applySleepSnapshot(nativeState.sleepTimer);
   const generation = Number(nativeState.generation);
   if (!Number.isFinite(generation)) return false;
 
@@ -816,7 +818,7 @@ async function playable(source, url) {
   }
 }
 
-async function startAndroidPlayback(source, sourceUrl, useHls, generation, volume) {
+async function startAndroidPlayback(source, sourceUrl, useHls, generation, volume, sleepRevision) {
   let playUrl = sourceUrl;
   if (!useHls) {
     try {
@@ -843,8 +845,14 @@ async function startAndroidPlayback(source, sourceUrl, useHls, generation, volum
       volume,
       generation,
       isHls: useHls,
+      sleepRevision,
     });
     if (superseded(generation) || player.source !== source || player.nativeGeneration !== generation) return false;
+    if (nativeState?.status === "idle") {
+      if (nativeState.sleepTimer) applySleepSnapshot(nativeState.sleepTimer);
+      stopPlayback(true, { skipNative: true });
+      return false;
+    }
     applyAndroidPlaybackState(nativeState);
     return nativeState?.status !== "error" && nativeState?.status !== "idle";
   } catch (error) {
@@ -880,9 +888,14 @@ async function play(source, opts = {}) {
   markPlaying(true);
 
   setStatus("Connecting", "busy");
+  let sleepRevision;
   if (IS_ANDROID) {
     try {
-      await androidCommand("stop");
+      // Silence the previous station during resolution without cancelling its
+      // sleep timer. Native playback rejects a request overtaken by expiry.
+      const paused = await androidCommand("pause");
+      sleepRevision = paused?.sleepTimer?.revision;
+      if (paused?.sleepTimer) applySleepSnapshot(paused.sleepTimer);
     } catch (error) {
       if (!superseded(generation)) failure(String(error));
       return;
@@ -926,7 +939,7 @@ async function play(source, opts = {}) {
   // is also what an `icy-title` event is matched against.
   if (source.kind === "station") player.resolved = url;
   if (IS_ANDROID) {
-    if (!(await startAndroidPlayback(source, url, useHls, generation, volume))) return;
+    if (!(await startAndroidPlayback(source, url, useHls, generation, volume, sleepRevision))) return;
     if (source.kind === "station" && !useHls) startMetadata(source, initialInfo);
     return;
   }
@@ -3132,6 +3145,7 @@ function readAlarmEditor() {
 // --------------------------------------------------------- sleep timer ---
 
 let sleepSnapshot = { revision: -1, timer: null, outcome: null, error: null };
+let androidSleepSampleAt = 0;
 let sleepFading = false;
 let powerFocusBefore = null;
 let sleepRequest = 0;
@@ -3172,9 +3186,13 @@ function renderSleepTimer() {
     chip.setAttribute("aria-pressed", String(on));
     chip.disabled = !!ringing && +chip.dataset.mins > 0;
   });
-  $("#sleep-hint").textContent = timer
-    ? "This timer: " + sleepActionLabel(timer.action) + ". Choose minutes again to restart with the selected action."
-    : "Choose what happens, then set the minutes.";
+  $("#sleep-hint").textContent = IS_ANDROID
+    ? (timer
+      ? "Audio fades out before the timer ends, even with the screen locked. Choose minutes to restart, or Off to cancel."
+      : "Play a station, then choose when to stop. Works with the screen locked.")
+    : (timer
+      ? "This timer: " + sleepActionLabel(timer.action) + ". Choose minutes again to restart with the selected action."
+      : "Choose what happens, then set the minutes.");
   if (!timer) {
     $("#sleep-left").textContent = "";
     closePowerCountdown();
@@ -3197,26 +3215,37 @@ function renderSleepTimer() {
     return;
   }
   closePowerCountdown();
-  const left = timer.endsAtMs - Date.now();
+  const left = IS_ANDROID
+    ? timer.remainingMs - (performance.now() - androidSleepSampleAt)
+    : timer.endsAtMs - Date.now();
   $("#sleep-left").textContent = left > 0 ? fmtDuration(left / 1000) + " left" : "Finishing…";
   // Fade out over whatever is actually left rather than a fixed twenty
   // seconds, so a tick that arrives late - the window was hidden, and
   // WebView2 throttles timers there - still lands on silence at zero.
-  if (!sleepFading && !ringing && player.playing && left > 0 && left <= SLEEP_FADE_SECS * 1000) {
+  if (!IS_ANDROID && !sleepFading && !ringing && player.playing && left > 0 && left <= SLEEP_FADE_SECS * 1000) {
     sleepFading = true;
     fadeOut(Math.max(1, left / 1000));
   }
 }
 
 function applySleepSnapshot(snapshot) {
-  // Events and command replies may cross in flight. Only Rust advances the
+  // Events and command replies may cross in flight. Only the backend advances the
   // timer, and an older reply must never bring a cancelled power action back.
-  if (snapshot.revision <= sleepSnapshot.revision) return;
+  if (!snapshot || snapshot.revision < sleepSnapshot.revision) return;
+  if (snapshot.revision === sleepSnapshot.revision) {
+    if (IS_ANDROID) {
+      sleepSnapshot = snapshot;
+      androidSleepSampleAt = performance.now();
+      renderSleepTimer();
+    }
+    return;
+  }
   const previous = sleepSnapshot.timer;
   sleepSnapshot = snapshot;
+  if (IS_ANDROID) androidSleepSampleAt = performance.now();
   const timer = snapshot.timer;
   if (!timer || previous?.endsAtMs !== timer.endsAtMs || previous?.action !== timer.action) endSleepFade();
-  if (!ringing && ((timer?.executeAtMs != null && previous?.executeAtMs == null) || snapshot.outcome === "finished")) {
+  if (!IS_ANDROID && !ringing && ((timer?.executeAtMs != null && previous?.executeAtMs == null) || snapshot.outcome === "finished")) {
     sleepFading = false;
     stopPlayback();
   }
@@ -3231,11 +3260,13 @@ async function setSleep(minutes) {
     return;
   }
   const request = ++sleepRequest;
-  const action = $("#sleep-action").value;
+  const action = IS_ANDROID ? "stop" : $("#sleep-action").value;
   try {
-    const snapshot = minutes > 0
-      ? await invoke("set_sleep_timer", { minutes, action })
-      : await invoke("cancel_sleep_timer");
+    const snapshot = IS_ANDROID
+      ? await androidCommand(minutes > 0 ? "set_sleep_timer" : "cancel_sleep_timer", minutes > 0 ? { minutes } : undefined)
+      : (minutes > 0
+        ? await invoke("set_sleep_timer", { minutes, action })
+        : await invoke("cancel_sleep_timer"));
     applySleepSnapshot(snapshot);
     if (request === sleepRequest && snapshot.revision === sleepSnapshot.revision && !ringing) {
       say(minutes > 0 ? sleepActionLabel(action) + " in " + minutes + " minutes" : "sleep timer cancelled", "good");
@@ -3291,7 +3322,7 @@ async function refreshPowerStatus() {
   }
 }
 
-if (!IS_ANDROID) setInterval(renderSleepTimer, 1000);
+setInterval(renderSleepTimer, 1000);
 
 // ---------------------------------------------------------------- wiring ---
 
@@ -3345,10 +3376,10 @@ function wire() {
     saveSettings();
   });
 
+  $$("#sleep-chips .chip").forEach((chip) =>
+    chip.addEventListener("click", () => setSleep(+chip.dataset.mins))
+  );
   if (!IS_ANDROID) {
-    $$("#sleep-chips .chip").forEach((chip) =>
-      chip.addEventListener("click", () => setSleep(+chip.dataset.mins))
-    );
     $("#sleep-action").addEventListener("change", () => {
       state.settings.sleepTimerAction = $("#sleep-action").value;
       saveSettings();

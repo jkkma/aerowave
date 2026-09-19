@@ -59,9 +59,30 @@ computer on a network that permits communication between clients.
 - Settings live in the Android application's private config directory. Desktop
   portable-folder detection does not run on Android.
 
+## Sleep timer
+
+Start a station, then choose 15, 30, 45, 60, 90 or 120 minutes under Sleep timer.
+The native playback service owns the deadline and fades audio over the last
+20 seconds, including while the screen is locked. Choosing another duration
+restarts the timer; Off cancels it and restores the selected volume. Changing
+stations keeps the timer, and Stop cancels it. Pausing leaves the deadline
+running; playback cannot resume itself after expiry.
+
+The countdown uses elapsed time, so changing the phone's clock does not extend
+it. Returning to the app or reloading its page reads the native countdown and
+playback state. If Android terminates the playback service or process, audio
+stops and the timer is cleared; it does not start playback after a reboot.
+This feature stops audio only and needs no exact-alarm permission.
+
+Media3 already [holds a wake lock while playing or buffering](https://developer.android.com/reference/androidx/media3/exoplayer/ExoPlayer.Builder#setWakeMode(int)).
+The timer uses [elapsed realtime](https://developer.android.com/reference/android/os/SystemClock)
+and checks again before resuming or reconnecting, because handler delays alone
+do not count time spent in deep sleep. It does not acquire an additional wake
+lock while paused.
+
 ## Remaining work
 
-Alarms, snooze, sleep timers, local folders and backup tracks are unavailable.
+Alarms, snooze, local folders and backup tracks are unavailable.
 The desktop scheduler does not run on Android, and its feature commands reject
 attempts to enable those features. Android needs native scheduled delivery,
 permission handling, reboot recovery and document access before those controls
@@ -93,3 +114,33 @@ These are initial device checks, not qualification for every Android version,
 OEM battery policy, long network outage or audio route. Bluetooth hardware,
 headphone unplugging, audio-focus interruption and long idle periods still need
 device coverage. Alarms remain outside this milestone.
+
+## Sleep timer checks
+
+The sleep timer debug build was installed on the same Android 13 device on
+2026-09-19. The visible 15- and 30-minute controls set and replaced the native
+deadline, and Off cancelled it without stopping playback. Starting a timer
+without a native playback session returned an error. The portrait layout had
+no horizontal overflow and each timer button had a 44 by 44 CSS-pixel target.
+
+A one-minute timer was exercised with the webview explicitly frozen. Android's
+audio renderer released the radio track about 164 ms after the deadline,
+before any page execution resumed. The media session became idle, the media
+notification was removed, and a native-state refresh cleared the interface's
+timer and source. This proves expiry is independent of JavaScript execution;
+the phone remained awake during that run.
+
+A second one-minute test ran after the user physically locked the phone, while
+connected to power. Android reported the screen asleep before, during and
+after expiry, and the webview remained explicitly frozen. Audio-renderer
+samples showed the fade reducing the track volume; the track was released
+177 ms after the deadline. The media session became idle, the notification
+disappeared and the service left foreground state before the page resumed.
+Native state then reported the timer finished. Saved stations and settings
+were unchanged, and the listening volume was restored after testing.
+
+Cancellation during the fade, station replacement with an active timer, and
+paused/deep-sleep/resume still need device checks. JVM tests cover monotonic
+deadlines, the fade calculation, replacement/cancellation, and rejecting a play
+request overtaken by expiry. Frontend tests cover native state restoration and
+delayed command replies.

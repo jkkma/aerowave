@@ -27,6 +27,7 @@ class PlayArgs {
   var volume: Double = 1.0
   var generation: Long = 0
   var isHls: Boolean = false
+  var sleepRevision: Long? = null
 
   internal fun toRequest(): PlayRequest = PlayRequest(
     url = url,
@@ -36,12 +37,18 @@ class PlayArgs {
     volume = volume.coerceIn(0.0, 1.0).toFloat(),
     generation = generation,
     isHls = isHls,
+    sleepRevision = sleepRevision,
   )
 }
 
 @InvokeArg
 class SetVolumeArgs {
   var volume: Double = 1.0
+}
+
+@InvokeArg
+class SleepTimerArgs {
+  var minutes: Int = 0
 }
 
 @TauriPlugin(
@@ -109,6 +116,14 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
 
   private fun dispatchPlay(invoke: Invoke, request: PlayRequest) {
     try {
+      if (PlaybackService.play(request) { state -> invoke.resolve(state.toJsObject()) }) return
+      val stale = AudioStateStore.snapshot(activity)
+      if (request.sleepRevision != null &&
+        stale.sleepTimer.lastFinishedRevision > request.sleepRevision!!
+      ) {
+        invoke.resolve(AudioStateStore.stop(activity).toJsObject())
+        return
+      }
       val state = AudioStateStore.begin(activity, request)
       ContextCompat.startForegroundService(
         activity,
@@ -130,16 +145,9 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
   @Command
   fun pause(invoke: Invoke) {
     latestRequestedGeneration = null
-    var state = AudioStateStore.snapshot(activity)
-    if (state.status == STATUS_PLAYING || state.status == STATUS_BUFFERING) {
-      state = AudioStateStore.update(activity) {
-        it.copy(status = STATUS_PAUSED, error = null)
-      }
-      if (PlaybackService.isRunning()) {
-        activity.startService(PlaybackService.intentFor(activity, PlaybackService.ACTION_PAUSE))
-      }
+    PlaybackService.pause(activity) { state ->
+      invoke.resolve(state.toJsObject())
     }
-    invoke.resolve(state.toJsObject())
   }
 
   @Command
@@ -171,10 +179,9 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
   @Command
   fun stop(invoke: Invoke) {
     latestRequestedGeneration = null
-    if (PlaybackService.isRunning()) {
-      activity.startService(PlaybackService.intentFor(activity, PlaybackService.ACTION_STOP))
+    PlaybackService.stop(activity) { state ->
+      invoke.resolve(state.toJsObject())
     }
-    invoke.resolve(AudioStateStore.stop(activity).toJsObject())
   }
 
   @Command
@@ -187,14 +194,34 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
   @Command
   fun setVolume(invoke: Invoke) {
     val volume = invoke.parseArgs(SetVolumeArgs::class.java).volume.coerceIn(0.0, 1.0).toFloat()
-    val state = AudioStateStore.update(activity) { it.copy(volume = volume) }
-    if (PlaybackService.isRunning()) {
-      activity.startService(
-        PlaybackService.intentFor(activity, PlaybackService.ACTION_SET_VOLUME)
-          .putExtra(PlaybackService.EXTRA_VOLUME, volume),
-      )
+    PlaybackService.setVolume(activity, volume) { state ->
+      invoke.resolve(state.toJsObject())
     }
-    invoke.resolve(state.toJsObject())
+  }
+
+  @Command
+  fun setSleepTimer(invoke: Invoke) {
+    val minutes = invoke.parseArgs(SleepTimerArgs::class.java).minutes
+    PlaybackService.setSleepTimer(
+      activity,
+      minutes,
+      onSuccess = { state -> invoke.resolve(state.sleepTimer.toJsObject()) },
+      onError = invoke::reject,
+    )
+  }
+
+  @Command
+  fun cancelSleepTimer(invoke: Invoke) {
+    PlaybackService.cancelSleepTimer(activity) { state ->
+      invoke.resolve(state.sleepTimer.toJsObject())
+    }
+  }
+
+  @Command
+  fun getSleepTimer(invoke: Invoke) {
+    PlaybackService.snapshot(activity) { state ->
+      invoke.resolve(state.sleepTimer.toJsObject())
+    }
   }
 }
 
@@ -208,4 +235,20 @@ private fun PlaybackSnapshot.toJsObject(): JSObject = JSObject().apply {
   put("volume", volume.toDouble())
   put("error", error)
   put("trackTitle", trackTitle)
+  put("sleepTimer", sleepTimer.toJsObject())
+}
+
+private fun SleepTimerSnapshot.toJsObject(): JSObject = JSObject().apply {
+  put("revision", revision)
+  put("timer", timer?.toJsObject())
+  put("outcome", outcome)
+  put("error", error)
+}
+
+private fun SleepTimerInfo.toJsObject(): JSObject = JSObject().apply {
+  put("minutes", minutes)
+  put("action", "stop")
+  put("endsAtMs", endsAtMs)
+  put("executeAtMs", null)
+  put("remainingMs", remainingMs)
 }

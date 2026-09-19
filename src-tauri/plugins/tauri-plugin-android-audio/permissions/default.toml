@@ -9,4 +9,7 @@ permissions = [
   "allow-stop",
   "allow-get-state",
   "allow-set-volume",
+  "allow-set-sleep-timer",
+  "allow-cancel-sleep-timer",
+  "allow-get-sleep-timer",
 ]
