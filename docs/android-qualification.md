@@ -40,6 +40,28 @@ state and control flow only; they do not prove decoding or audibility.
   The tester heard the backup offline; native state showed continued local
   playback after Wi-Fi returned.
 
+### Temporary audio interruptions on the signed release
+
+The installed optimized 0.11.5 release was checked with a separate, silent
+helper requesting Android's
+[temporary audio focus](https://developer.android.com/media/optimize/audio-focus).
+The helper played no audio and released each focus request after 15 seconds.
+
+- `AUDIOFOCUS_GAIN_TRANSIENT` paused the radio's native renderer. Playback
+  resumed automatically when focus returned, at the previous volume. The tester
+  heard both the pause and the automatic recovery without pressing Play.
+- `AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK` kept the renderer active. Android listed
+  the owned player as ducked during the request and removed that attenuation
+  afterward. The tester heard the volume decrease and return without a stop.
+- The pause/resume sequence also passed while Android reported the screen
+  asleep before, during and after the interruption.
+- An explicit media Pause during temporary focus loss kept the renderer paused
+  after focus returned. A subsequent explicit Play restored the station.
+
+These checks establish temporary focus handling on this device and build.
+They do not reproduce a cellular call or every assistant/navigation app's
+routing behavior. The earlier other-music-app test covers permanent focus loss.
+
 ### Alarms
 
 - A locked one-shot folder alarm entered the ringing state 54 ms after its
@@ -151,9 +173,10 @@ an active renderer without detected interruptions across 20 samples spanning
 
 A new eight-hour run of the installed signed release started at 14:54 UTC on
 2026-09-19, after the tester confirmed audible radio and then muted and locked
-the phone. Its first sample shows an active renderer, a sleeping screen and
-charging power. The monitor runs independently in the background, with completion
-expected around 22:54 UTC. The full duration remains pending. The monitor records
+the phone. It was intentionally stopped at 14:59 UTC for the requested temporary
+focus checks and a reported release folder-picker defect. Six samples spanning
+five minutes showed an active renderer without detected interruptions. A fresh
+long run is needed after the corrected release is installed. The monitor records
 actual screen state and filtered renderer evidence.
 The one-minute monitor validation completed with six active-renderer samples
 and no detected issues. Unknown MediaSession positions were correctly treated
@@ -164,7 +187,6 @@ as unavailable telemetry.
 The Android scope is not complete or release-qualified. The remaining gates
 include:
 
-- transient audio-focus interruption checks;
 - overnight playback and alarm delivery under the target phone's battery
   policy;
 - a complete long-duration run of the installed signed release.

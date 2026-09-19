@@ -1,2 +1,2 @@
-# Media3 and Tauri publish their own consumer rules. Aerowave does not reflect
-# over plugin-owned classes, so this library needs no additional keep rules.
+# Media3 and Tauri publish their own consumer rules. Plugin responses construct
+# JSObject values with stable bridge keys, so plugin-owned models can stay minified.

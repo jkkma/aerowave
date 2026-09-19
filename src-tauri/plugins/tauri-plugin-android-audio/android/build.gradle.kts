@@ -34,4 +34,5 @@ dependencies {
     implementation("androidx.media3:media3-session:$media3Version")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
