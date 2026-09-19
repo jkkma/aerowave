@@ -9,6 +9,7 @@ import android.provider.DocumentsContract
 import androidx.activity.result.ActivityResult
 import app.tauri.annotation.InvokeArg
 import app.tauri.plugin.Invoke
+import app.tauri.plugin.JSObject
 import java.util.concurrent.Executors
 
 @InvokeArg
@@ -73,7 +74,7 @@ object LibraryCommands {
       )
       return
     }
-    runAsync(invoke) { DocumentLibrary.folderInfo(context, uri.toString()) }
+    runAsync(invoke) { DocumentLibrary.folderInfo(context, uri.toString()).toJsObject() }
   }
 
   fun folderInfo(context: Context, invoke: Invoke) {
@@ -83,7 +84,7 @@ object LibraryCommands {
       invoke.reject("A music folder path is required.", error)
       return
     }
-    runAsync(invoke) { DocumentLibrary.folderInfo(context, args.path) }
+    runAsync(invoke) { DocumentLibrary.folderInfo(context, args.path).toJsObject() }
   }
 
   fun randomTrack(context: Context, invoke: Invoke) {
@@ -93,18 +94,32 @@ object LibraryCommands {
       invoke.reject("A music folder path is required.", error)
       return
     }
-    runAsync(invoke) { DocumentLibrary.randomTrack(context, args.path, args.exclude) }
+    runAsync(invoke) { DocumentLibrary.randomTrack(context, args.path, args.exclude).toJsObject() }
   }
 
-  private fun runAsync(invoke: Invoke, work: () -> Any) {
+  private fun runAsync(invoke: Invoke, work: () -> JSObject) {
     worker.execute {
       try {
         val result = work()
-        main.post { invoke.resolveObject(result) }
+        main.post { invoke.resolve(result) }
       } catch (error: Exception) {
         val message = error.message ?: "Android could not read that music folder."
         main.post { invoke.reject(message, error) }
       }
     }
   }
+}
+
+// These keys belong to the Rust response schema. Release R8 can rename Kotlin
+// model fields, so the mobile bridge must not derive them through reflection.
+internal fun FolderInfo.toJsObject(): JSObject = JSObject().apply {
+  put("path", path)
+  put("name", name)
+  put("count", count)
+}
+
+internal fun TrackPick.toJsObject(): JSObject = JSObject().apply {
+  put("path", path)
+  put("name", name)
+  put("total", total)
 }
