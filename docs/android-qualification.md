@@ -13,7 +13,8 @@ signing and retained release artifacts, see [Android releases](android-release.m
 | Environment | What it establishes |
 |---|---|
 | POCO X3 Pro, Android 13, ARM64 debug build | Audible playback, physical audio routes, persisted folder access, locked-screen playback, exact alarm timing and native sleep-timer behavior |
-| Android API 36 x86_64 emulator, debug build | Fresh permission defaults, reboot restoration, locked wake and notification control flow, fallback selection, and large-text layout |
+| Same physical phone, optimized signed ARM64 release | Restored settings and folder grant, granted alarm and notification permissions, audible radio, disabled WebView inspection, and the ongoing locked-screen playback run |
+| Android API 36 x86_64 emulator, debug and signed release builds | Fresh permission defaults, reboot restoration, locked wake and notification control flow, fallback selection, large-text layout, and signed replacement preserving data |
 | Automated suites | Frontend, Rust core and Android JVM regression behavior |
 
 The emulator did not provide usable audio output. Its results therefore prove
@@ -110,6 +111,54 @@ These suites cover deterministic state and boundary logic. They do not replace
 device evidence for audio routing, OEM background policy, wake behavior or
 audibility.
 
+## Signed packaging
+
+Optimized version 0.11.5 (Android version code 11005) was built for ARM64 and
+x86_64 from clean source commit `bbc6e7d`. Both APKs contain only their requested
+native ABI and passed signature verification against the same persistent release
+certificate.
+The ARM64 package also passed `zipalign -c -P 16 4`.
+
+| Artifact | APK SHA-256 |
+|---|---|
+| ARM64 | `A5DE2DFF48C342B69308DE830FBDA361CAD9FA7AAA08BA358A24418057D0BFB4` |
+| x86_64 | `B7D1DF66852AC2F5D1F47777A53EA4C4E87EF6F36B8E940DE300B93D685BAECB` |
+
+The signed x86_64 build installed on a fresh emulator. Its minified command
+bridge saved a station and alarm. Replacing it with the same certificate kept
+both records, the first-install timestamp and the private data directory.
+The final package is non-debuggable and its bytecode explicitly disables
+WebView inspection. The Google APIs `userdebug` image nevertheless exposes
+inspection even after that call. The production phone's `user` image reported
+no WebView debugging socket for the installed release process.
+
+The tester approved the one-time preview uninstall after the app's private
+data was backed up. The saved station and settings were restored, the piano
+folder's access was granted again, and the optimized ARM64 release replaced
+the migration build without another uninstall. The installed APK's SHA-256
+matches the final artifact above. Its package is non-debuggable, and exact-alarm
+and notification access remained granted. The tester heard the saved station
+through the installed release, then muted the app and locked the phone. Android
+reported an active renderer with the screen asleep.
+
+## Extended playback run
+
+A bounded eight-hour run started on the physical phone at 14:21 UTC on
+2026-09-19, with app playback muted and the phone charging. It was stopped to
+prepare the requested signed-release installation. Its retained samples show
+an active renderer without detected interruptions across 20 samples spanning
+19 minutes; this is not an eight-hour pass.
+
+A new eight-hour run of the installed signed release started at 14:54 UTC on
+2026-09-19, after the tester confirmed audible radio and then muted and locked
+the phone. Its first sample shows an active renderer, a sleeping screen and
+charging power. The monitor runs independently in the background, with completion
+expected around 22:54 UTC. The full duration remains pending. The monitor records
+actual screen state and filtered renderer evidence.
+The one-minute monitor validation completed with six active-renderer samples
+and no detected issues. Unknown MediaSession positions were correctly treated
+as unavailable telemetry.
+
 ## Qualification still open
 
 The Android scope is not complete or release-qualified. The remaining gates
@@ -118,5 +167,4 @@ include:
 - transient audio-focus interruption checks;
 - overnight playback and alarm delivery under the target phone's battery
   policy;
-- final optimized, signed release build, install and replacement checks from
-  [Android releases](android-release.md).
+- a complete long-duration run of the installed signed release.
