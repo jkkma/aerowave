@@ -88,6 +88,14 @@ alarm alive with JavaScript timers. One-shot disabling and pending snoozes
 remain authoritative when the page is reopened. Station and backup-folder
 changes update native source metadata without rearming a completed one-shot.
 
+Alarm audio follows Android's active media output, so connected Bluetooth
+speakers receive it without also playing through the phone. Alarm and fallback
+tracks use the phone's media volume; keep that volume audible and allow media
+sound in Do Not Disturb. Disconnecting Bluetooth lets the alarm continue on the
+phone instead of pausing it. The alarm notification and exact scheduling retain
+their alarm behavior, and the service holds transient audio focus until the
+ring ends.
+
 Settings provides shortcuts for Alarms & reminders, notifications, lock-screen
 alarms and battery restrictions. A denied permission is shown in the app. Keep
 the phone powered on: force-stopping the application prevents delivery until
@@ -99,6 +107,14 @@ User-Agent. If a source cannot play, the chosen backup folder is tried, then
 the phone's default alarm sound. This Android fallback is shown in Settings;
 desktop fallback behavior is unchanged. It does not establish compatibility
 with every station supported by the desktop relay.
+
+Native playback handles the same-format chained Opus broadcast used by
+ChillSynth: a song change starts a new Ogg link, whose headers must not be sent
+to the audio decoder as samples. The extractor adapter suppresses those
+headers, resets the decoder and removes the repeated pre-roll from the audio
+timeline. This applies to non-seekable streams with identical Opus headers and
+an 80 ms pre-skip; incompatible links fail through the normal source-recovery
+path. Seekable files and other formats retain Media3's standard extraction.
 
 Choose a music or backup folder with Android's system folder picker. The app
 keeps read access to that selected tree without requesting access to all files.

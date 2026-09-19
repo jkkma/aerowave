@@ -130,14 +130,21 @@ class AlarmPlaybackService : Service(), Player.Listener {
     val dataSourceFactory = DefaultDataSource.Factory(this, networkFactory)
     val audioAttributes = AudioAttributes.Builder()
       .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-      .setUsage(C.USAGE_ALARM)
+      // Media usage follows Android's active media route, including Bluetooth,
+      // while the foreground notification keeps the alarm semantics.
+      .setUsage(C.USAGE_MEDIA)
       .build()
     player = ExoPlayer.Builder(this)
-      .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(dataSourceFactory))
-      // Media3 only automates focus for media/game usage. Alarm usage owns a
-      // transient focus request below so its attributes remain truthful.
+      .setMediaSourceFactory(
+        DefaultMediaSourceFactory(this, ChainedOpusExtractorsFactory())
+          .setDataSourceFactory(dataSourceFactory),
+      )
+      // The service owns a transient request so focus remains tied to the full
+      // ring lifecycle rather than to an individual fallback source.
       .setAudioAttributes(audioAttributes, false)
-      .setHandleAudioBecomingNoisy(true)
+      // A disconnected headset or Bluetooth route must fall back to the
+      // handset instead of pausing an alarm with no automatic noisy-route resume.
+      .setHandleAudioBecomingNoisy(false)
       .build()
       .also {
         it.setWakeMode(C.WAKE_MODE_NETWORK)
@@ -368,7 +375,15 @@ class AlarmPlaybackService : Service(), Player.Listener {
   }
 
   override fun onPlayerError(error: PlaybackException) {
-    handleSourceFailure(error.message ?: "The alarm audio could not play")
+    Log.e("AerowaveAlarmPlayback", "Playback failed for $sourceKind source", error)
+    val reason = when (sourceKind) {
+      "station" -> "The selected station could not play"
+      "folder" -> "The selected alarm track could not play"
+      "backup" -> "The backup alarm track could not play"
+      "tone" -> "The system alarm sound could not play"
+      else -> "The alarm audio could not play"
+    }
+    handleSourceFailure(reason)
   }
 
   override fun onTracksChanged(tracks: Tracks) {
@@ -518,7 +533,7 @@ class AlarmPlaybackService : Service(), Player.Listener {
 
   private fun requestAlarmFocus() {
     val attributes = PlatformAudioAttributes.Builder()
-      .setUsage(PlatformAudioAttributes.USAGE_ALARM)
+      .setUsage(PlatformAudioAttributes.USAGE_MEDIA)
       .setContentType(PlatformAudioAttributes.CONTENT_TYPE_MUSIC)
       .build()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -532,7 +547,7 @@ class AlarmPlaybackService : Service(), Player.Listener {
     } else {
       @Suppress("DEPRECATION")
       applyFocusRequestResult(audioManager.requestAudioFocus(
-        focusListener, AudioManager.STREAM_ALARM, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT,
+        focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT,
       ))
     }
   }
