@@ -85,7 +85,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
         .createDataSource()
     }
     val dataSourceFactory = DefaultDataSource.Factory(this, networkDataSourceFactory)
-    val mediaSourceFactory = DefaultMediaSourceFactory(this)
+    val mediaSourceFactory = DefaultMediaSourceFactory(this, ChainedOpusExtractorsFactory())
       .setDataSourceFactory(dataSourceFactory)
       // Reconnection is owned here so the attempt budget covers the whole
       // live stream rather than being reset independently for every segment.

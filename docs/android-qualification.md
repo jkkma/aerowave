@@ -187,6 +187,47 @@ played the downloaded piano, confirmed by the tester, native track metadata and
 an active audio renderer. This exercises the actual release bridge for both
 folder and track responses.
 
+### Bluetooth alarm and chained Opus correction in 0.11.7
+
+An alarm using ChillSynth's Ogg Opus broadcast reproduced two separate faults
+on the POCO X3 Pro. Android routed `USAGE_ALARM` to both the handset speaker and
+Bluetooth A2DP. At a later song boundary, Media3 1.11.1 sent the next Ogg link's
+`OpusHead` and `OpusTags` packets to the audio decoder, which rejected them and
+caused the alarm to switch to its local backup.
+
+Version 0.11.7 uses media routing with service-owned transient audio focus for
+alarm sources. The tester confirmed Bluetooth-only sound with this correction,
+and the active renderer used A2DP without the handset output. The alarm editor
+explains the resulting media-volume and Do Not Disturb requirements. Bluetooth
+disconnect no longer asks Media3 to pause an alarm; that disconnect path still
+needs a separate physical-device check.
+
+Both native players now use a narrowly scoped adapter for non-seekable chained
+Opus with identical headers and a 3,840-sample pre-skip. It suppresses the link
+headers, requests a decoder reset and corrects the header/pre-roll timestamps.
+Eleven regression tests include a synthetic two-link stream through Media3's
+real Ogg extractor, byte preservation, cumulative timing, seek reset, unchanged
+Vorbis/seekable behavior and rejection of incompatible configurations. All 52
+Android tests passed; the 128 Rust core tests, 132 frontend tests, Windows
+workspace check and repository seam/version checks also passed.
+
+The optimized ARM64 APK was built from local changes above `d9b43bd`, signed
+with the existing release certificate and installed without uninstalling. It
+passed 16 KB ZIP alignment, retained the original first-install time, and its
+installed SHA-256 matched the retained artifact:
+`61C80ED5E175656128D8A5571EF2D4F4B59796026C50EE099CE7A533E11ECD5F`.
+
+The installed build's four-minute ChillSynth alarm test crossed two real link
+boundaries. The adapter recorded both suppressed header pairs; Media3 recreated
+the Opus decoder while keeping the same active AudioTrack and Bluetooth route.
+Renderer frames continued increasing without an underrun, decoder error or
+local-audio fallback.
+The test was dismissed, and reopening the alarm confirmed its saved two-minute
+give-up setting was unchanged. This validates the foreground alarm Test path on
+this phone, not a new locked scheduled-start or overnight run. Recheck
+decoder-reset behavior when changing Media3 versions or device decoders; this
+is not general chained-Ogg support.
+
 ## Extended playback run
 
 A bounded eight-hour run started on the physical phone at 14:21 UTC on
