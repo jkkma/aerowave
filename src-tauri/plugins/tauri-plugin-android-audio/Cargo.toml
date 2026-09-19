@@ -1,0 +1,21 @@
+[package]
+name = "tauri-plugin-android-audio"
+version = "0.1.0"
+description = "Aerowave's Android Media3 background audio bridge"
+edition = "2021"
+license = "MIT"
+rust-version = "1.77"
+links = "tauri-plugin-android-audio"
+
+[lib]
+name = "tauri_plugin_android_audio"
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", default-features = false }

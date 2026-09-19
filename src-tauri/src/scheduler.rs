@@ -381,6 +381,7 @@ pub fn resolve_source(app: &AppHandle, alarm: &Alarm, trigger: &str) -> FirePayl
 
 /// Bring the window back from wherever it went and put it in front.
 fn surface_window(app: &AppHandle) {
+    #[cfg(desktop)]
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
@@ -455,6 +456,7 @@ pub fn dismiss_test(app: &AppHandle, alarm_id: &str) {
         // Keep the decision and the window change together so a newly claimed
         // real ring cannot lose its always-on-top grab to this old preview.
         if sched.ringing.is_none() {
+            #[cfg(desktop)]
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_always_on_top(false);
             }
@@ -477,6 +479,7 @@ pub fn dismiss(app: &AppHandle, alarm_id: &str) {
     }
     drop(sched);
     refresh(app);
+    #[cfg(desktop)]
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_always_on_top(false);
     }
@@ -508,6 +511,7 @@ pub fn snooze(app: &AppHandle, alarm_id: &str, minutes: u32) -> Result<i64, Stri
             sched.ringing = None;
         }
     }
+    #[cfg(desktop)]
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_always_on_top(false);
     }
@@ -755,6 +759,7 @@ fn tick_sleep(
     }
     if effect == SleepEffect::Countdown {
         // Do not take the alarm's always-on-top grab for a timer prompt.
+        #[cfg(desktop)]
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.unminimize();
             let _ = w.show();

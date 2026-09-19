@@ -20,9 +20,15 @@ test("only Linux webviews receive the reduced-compositing class", () => {
     platform: "Win32",
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
   } });
+  const android = createHarness({ navigator: {
+    platform: "Linux aarch64",
+    userAgent: "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36",
+  } });
 
   assert.equal(linux.document.body.classList.contains("linux"), true);
   assert.equal(windows.document.body.classList.contains("linux"), false);
+  assert.equal(android.document.body.classList.contains("android"), true);
+  assert.equal(android.document.body.classList.contains("linux"), false);
 });
 
 test("the Linux reduced-compositing backdrop is present and referenced", () => {

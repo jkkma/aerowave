@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Aerowave</title>
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -72,7 +73,9 @@
       </div>
     </div>
 
-    <div class="sleepbox">
+    <p class="android-preview-note" role="note">This Android preview plays radio in the background. Alarms, music folders, and sleep timers are coming later.</p>
+
+    <div class="sleepbox android-unavailable">
       <div class="sleeprow">
         <span class="hud-mini" id="sleep-caption">Sleep timer</span>
         <div class="chips" id="sleep-chips" role="group" aria-labelledby="sleep-caption">
@@ -106,7 +109,7 @@
     <nav class="tabs" role="tablist">
       <button class="tab on" id="tab-radio" data-pane="radio" role="tab" aria-selected="true" aria-controls="pane-radio">Stations</button>
       <button class="tab" id="tab-browse" data-pane="browse" role="tab" aria-selected="false" aria-controls="pane-browse">Browse</button>
-      <button class="tab" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms">Alarms</button>
+      <button class="tab android-unavailable" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms">Alarms</button>
       <button class="tab" id="tab-settings" data-pane="settings" role="tab" aria-selected="false" aria-controls="pane-settings">Settings</button>
     </nav>
 
@@ -133,7 +136,7 @@
         <p class="editor-note" id="st-note"></p>
       </form>
 
-      <div class="folderbox">
+      <div class="folderbox android-unavailable">
         <div class="hud-mini">Your music</div>
         <p class="folderpath" id="folder-path">No folder chosen</p>
         <div class="editor-actions">
@@ -182,7 +185,7 @@
     </div>
 
     <!-- ---------------------------- alarms --------------------------- -->
-    <div class="pane" id="pane-alarms" role="tabpanel" aria-labelledby="tab-alarms">
+    <div class="pane android-unavailable" id="pane-alarms" role="tabpanel" aria-labelledby="tab-alarms">
       <div class="paneheader">
         <div class="nextalarm" id="next-alarm">No alarm set</div>
         <button class="gel wide" id="btn-add-alarm">+ Add alarm</button>
@@ -311,7 +314,7 @@
 
     <!-- --------------------------- settings -------------------------- -->
     <div class="pane" id="pane-settings" role="tabpanel" aria-labelledby="tab-settings">
-      <div class="folderbox backup">
+      <div class="folderbox backup android-unavailable">
         <div class="hud-mini">Backup music</div>
         <p class="editor-note">Choose music to play if a station or alarm source is unavailable.</p>
         <div class="folderpick">
@@ -322,22 +325,23 @@
       <ul class="list settings">
         <li class="row toggle" data-setting="clock24h"><span>24-hour clock</span><button class="sw" aria-pressed="true"></button></li>
         <li class="row toggle" data-setting="showMetadata"><span>Show song information</span><button class="sw" aria-pressed="true"></button></li>
-        <li class="row toggle" data-setting="minimizeToTray"><span>Keep running when closed<em>Alarms stay active in the tray</em></span><button class="sw" aria-pressed="true"></button></li>
-        <li class="row toggle" data-setting="startWithWindows"><span>Start at login<em>Start quietly in the tray</em></span><button class="sw" aria-pressed="false"></button></li>
-        <li class="row toggle" data-setting="wakeForAlarms"><span>Wake this PC for alarms<em>Keeps the PC awake after alarms</em></span><button class="sw" aria-pressed="true" aria-describedby="power-status power-help"></button></li>
+        <li class="row toggle android-unavailable" data-setting="minimizeToTray"><span>Keep running when closed<em>Alarms stay active in the tray</em></span><button class="sw" aria-pressed="true"></button></li>
+        <li class="row toggle android-unavailable" data-setting="startWithWindows"><span>Start at login<em>Start quietly in the tray</em></span><button class="sw" aria-pressed="false"></button></li>
+        <li class="row toggle android-unavailable" data-setting="wakeForAlarms"><span>Wake this PC for alarms<em>Keeps the PC awake after alarms</em></span><button class="sw" aria-pressed="true" aria-describedby="power-status power-help"></button></li>
       </ul>
-      <div class="power-info">
+      <div class="power-info android-unavailable">
         <p class="editor-note" id="power-status" role="status">Checking PC wake support…</p>
         <p id="power-help">Keep Aerowave running, including in the tray. After a real alarm, the PC stays awake even when the sound stops; the screen can turn off normally. Turn this setting off or quit Aerowave to restore automatic sleep. Manual Sleep and Shut down still work. Waking requires compatible hardware and Windows wake timers to be allowed. Alarms cannot wake a shut-down PC.</p>
       </div>
       <div class="about">
-        <p class="hud-mini">Aerowave · Radio &amp; alarms</p>
-        <p>Keep Aerowave running for alarms to ring. You can hide it in the tray.
+        <p class="hud-mini desktop-only">Aerowave · Radio &amp; alarms</p>
+        <p class="desktop-only">Keep Aerowave running for alarms to ring. You can hide it in the tray.
            If a station cannot connect, your backup music takes over.</p>
+        <p class="android-only">Radio keeps playing when you leave Aerowave. Return here to browse stations or change playback.</p>
         <p class="wherefrom" id="config-where"></p>
         <div class="editor-actions">
           <span class="flex"></span>
-          <button class="gel danger" id="btn-quit">Quit Aerowave</button>
+          <button class="gel danger desktop-only" id="btn-quit">Quit Aerowave</button>
         </div>
       </div>
     </div>
@@ -355,7 +359,7 @@
 </footer>
 
 <!-- ============================ alarm overlay ========================= -->
-<dialog class="power-dialog panel bevel" id="power-countdown" aria-labelledby="power-title" aria-describedby="power-description">
+<dialog class="power-dialog panel bevel android-unavailable" id="power-countdown" aria-labelledby="power-title" aria-describedby="power-description">
   <div class="hud-mini">Sleep timer finished</div>
   <h2 id="power-title">PC power action</h2>
   <div class="power-seconds" id="power-seconds" role="timer" aria-live="off"></div>
@@ -365,7 +369,7 @@
   <p class="editor-note">Escape also cancels.</p>
 </dialog>
 
-<div class="ringing" id="ringing" hidden role="alertdialog" aria-modal="true" aria-labelledby="ring-label" aria-describedby="ring-source">
+<div class="ringing android-unavailable" id="ringing" hidden role="alertdialog" aria-modal="true" aria-labelledby="ring-label" aria-describedby="ring-source">
   <div class="ringcard panel bevel" id="ringcard">
     <div class="corner tl"></div><div class="corner tr"></div>
     <div class="corner bl"></div><div class="corner br"></div>

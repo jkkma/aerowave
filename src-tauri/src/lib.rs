@@ -17,11 +17,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+#[cfg(desktop)]
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+#[cfg(desktop)]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
-#[cfg(not(windows))]
+use tauri::{AppHandle, Emitter, Manager, State};
+#[cfg(desktop)]
+use tauri::WindowEvent;
+#[cfg(all(desktop, not(windows)))]
 use tauri_plugin_autostart::ManagerExt;
+#[cfg(desktop)]
 use tauri_plugin_dialog::DialogExt;
 
 use aerowave_core::sleep::{SleepAction, SleepSnapshot};
@@ -77,6 +82,16 @@ struct LocalTime {
 
 // ---------------------------------------------------------------- commands
 
+// Android needs native alarm delivery and document access before these
+// desktop features can make the same promises while the activity is asleep.
+fn require_desktop_feature() -> Result<(), String> {
+    if cfg!(mobile) {
+        Err("Alarms, sleep timers and local folders are not available in the Android preview yet".into())
+    } else {
+        Ok(())
+    }
+}
+
 #[tauri::command]
 fn get_state(state: State<AppState>) -> AppData {
     state.store.snapshot()
@@ -107,6 +122,7 @@ fn save_stations(state: State<AppState>, stations: Vec<Station>) -> Result<(), S
 
 #[tauri::command]
 fn save_alarms(app: AppHandle, state: State<AppState>, alarms: Vec<Alarm>) -> Result<(), String> {
+    require_desktop_feature()?;
     let _power_update = state.power_updates.lock().unwrap();
     scheduler::ensure_power_idle(&app)?;
     state.store.update(|d| {
@@ -136,6 +152,12 @@ fn save_settings(
     if let Some(want) = explicit_autostart {
         settings.start_with_windows = want;
     }
+    #[cfg(mobile)]
+    {
+        settings.start_with_windows = false;
+        settings.wake_for_alarms = false;
+        settings.minimize_to_tray = false;
+    }
     let want_autostart = settings.start_with_windows;
     state.store.update(|d| {
         // Record an explicit OFF even if another save enables wake again
@@ -147,6 +169,7 @@ fn save_settings(
             .set_wake_enabled(settings.wake_for_alarms);
         d.settings = settings;
     })?;
+    #[cfg(desktop)]
     scheduler::refresh(&app);
     // Never let this lose the rest of the settings - they are saved already.
     sync_autostart(&app, &state, want_autostart, explicit_autostart)
@@ -273,7 +296,7 @@ fn sync_autostart(app: &AppHandle, state: &AppState, want: bool, explicit: Optio
     result.map_err(|e| format!("settings saved, but start-with-Windows failed: {e}"))
 }
 
-#[cfg(not(windows))]
+#[cfg(all(desktop, not(windows)))]
 fn sync_autostart(app: &AppHandle, _state: &AppState, want: bool, _explicit: Option<bool>) -> Result<(), String> {
     let manager = app.autolaunch();
     if manager.is_enabled().unwrap_or(false) == want {
@@ -287,9 +310,15 @@ fn sync_autostart(app: &AppHandle, _state: &AppState, want: bool, _explicit: Opt
     result.map_err(|e| format!("settings saved, but start-at-login failed: {e}"))
 }
 
+#[cfg(mobile)]
+fn sync_autostart(_app: &AppHandle, _state: &AppState, _want: bool, _explicit: Option<bool>) -> Result<(), String> {
+    Ok(())
+}
+
 /// Open the folder picker. Async so the dialog does not block the main
 /// thread; the callback hands the answer back over a channel.
 #[tauri::command]
+#[cfg(desktop)]
 async fn pick_folder(app: AppHandle) -> Option<FolderInfo> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let mut dialog = app.dialog().file();
@@ -308,6 +337,12 @@ async fn pick_folder(app: AppHandle) -> Option<FolderInfo> {
 }
 
 #[tauri::command]
+#[cfg(mobile)]
+async fn pick_folder() -> Option<FolderInfo> {
+    None
+}
+
+#[tauri::command]
 fn folder_info(path: String) -> FolderInfo {
     library::info(std::path::Path::new(&path))
 }
@@ -315,6 +350,7 @@ fn folder_info(path: String) -> FolderInfo {
 /// Pick one random file out of a folder and open it to the asset protocol.
 #[tauri::command]
 fn random_track(app: AppHandle, state: State<AppState>, path: String) -> Result<TrackPick, String> {
+    require_desktop_feature()?;
     let dir = std::path::Path::new(&path);
     if !dir.is_dir() {
         return Err(format!("{path} is not a folder"));
@@ -338,6 +374,7 @@ fn random_track(app: AppHandle, state: State<AppState>, path: String) -> Result<
 /// a stream will not play.
 #[tauri::command]
 fn backup_track(app: AppHandle, state: State<AppState>) -> Result<TrackPick, String> {
+    require_desktop_feature()?;
     let folder = state
         .store
         .data
@@ -559,7 +596,7 @@ async fn browse_facets(query: browse::Query) -> Result<browse::Facets, String> {
 
 #[tauri::command]
 fn next_alarm(app: AppHandle) -> Option<NextAlarm> {
-    scheduler::next_alarm(&app)
+    if cfg!(mobile) { None } else { scheduler::next_alarm(&app) }
 }
 
 #[tauri::command]
@@ -568,6 +605,7 @@ fn set_sleep_timer(
     minutes: u32,
     action: SleepAction,
 ) -> Result<SleepSnapshot, String> {
+    require_desktop_feature()?;
     scheduler::set_sleep_timer(&app, minutes, action)
 }
 
@@ -595,6 +633,7 @@ fn power_status(app: AppHandle) -> scheduler::PowerStatus {
 /// get, without touching the stored copy.
 #[tauri::command]
 fn test_alarm(app: AppHandle, alarm: Alarm) -> Result<FirePayload, String> {
+    require_desktop_feature()?;
     scheduler::test_alarm(&app, alarm)
 }
 
@@ -605,6 +644,7 @@ fn dismiss_test_alarm(app: AppHandle, alarm_id: String) {
 
 #[tauri::command]
 fn snooze_alarm(app: AppHandle, alarm_id: String, minutes: u32) -> Result<i64, String> {
+    require_desktop_feature()?;
     let state = app.state::<AppState>();
     let _power_update = state.power_updates.lock().unwrap();
     scheduler::ensure_power_idle(&app)?;
@@ -617,7 +657,10 @@ fn dismiss_alarm(app: AppHandle, alarm_id: String) {
 }
 
 #[tauri::command]
-fn hide_window(app: AppHandle) {
+fn hide_window(_app: AppHandle) {
+    #[cfg(desktop)]
+    let app = _app;
+    #[cfg(desktop)]
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.hide();
     }
@@ -630,6 +673,7 @@ fn quit_app(app: AppHandle) {
 
 // ------------------------------------------------------------------- setup
 
+#[cfg(desktop)]
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Aerowave", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", "Stop playback", true, None::<&str>)?;
@@ -664,6 +708,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+#[cfg(desktop)]
 fn surface(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
@@ -693,12 +738,14 @@ fn config_location(state: State<AppState>) -> ConfigLocation {
 /// otherwise only `dismiss` and `snooze` clear.
 #[tauri::command]
 fn pending_alarm(app: AppHandle, state: State<AppState>) -> Option<FirePayload> {
+    if cfg!(mobile) { return None; }
     let preview = state.sched.lock().unwrap().preview_alarm.clone();
     if let Some(alarm) = preview {
         return Some(scheduler::resolve_source(&app, &alarm, "test"));
     }
     let ringing = state.sched.lock().unwrap().ringing.clone();
     let Some(id) = ringing else {
+        #[cfg(desktop)]
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.set_always_on_top(false);
         }
@@ -729,13 +776,13 @@ fn pending_alarm(app: AppHandle, state: State<AppState>) -> Option<FirePayload> 
 
 // Tauri maps custom protocols onto HTTP hosts on Windows. WebKit uses the
 // schemes directly, so both the loader URL and its CORS reply must match.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "android"))]
 const WEBVIEW_ORIGIN: &str = "http://tauri.localhost";
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 const WEBVIEW_ORIGIN: &str = "tauri://localhost";
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "android"))]
 const HLS_ORIGIN: &str = "http://awhls.localhost";
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 const HLS_ORIGIN: &str = "awhls://localhost";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -752,7 +799,9 @@ pub fn run() {
         }
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // A second launch just brings the running one forward.
             surface(app);
@@ -761,7 +810,10 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
-        ))
+        ));
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(tauri_plugin_android_audio::init());
+    builder
         .register_asynchronous_uri_scheme_protocol("awhls", {
             let hls = hls_protocol.clone();
             move |_ctx, request, responder| {
@@ -810,6 +862,7 @@ pub fn run() {
                 }
             });
 
+            #[cfg(desktop)]
             build_tray(&handle)?;
 
             // A portable copy that has been moved, or reinstalled to a new
@@ -830,9 +883,11 @@ pub fn run() {
                 }
             }
 
+            #[cfg(desktop)]
             scheduler::spawn(handle.clone());
 
             // Launched by the autostart entry: go straight to the tray.
+            #[cfg(desktop)]
             if std::env::args().any(|a| a == "--minimized") {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.hide();
@@ -840,7 +895,10 @@ pub fn run() {
             }
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(|_window, _event| {
+            #[cfg(desktop)]
+            let (window, event) = (_window, _event);
+            #[cfg(desktop)]
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
                 let to_tray = app

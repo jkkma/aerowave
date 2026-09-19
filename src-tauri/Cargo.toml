@@ -12,9 +12,9 @@ rust-version = "1.77"
 
 [lib]
 name = "aerowave_lib"
-# Desktop only. The cdylib/staticlib pair the mobile templates use makes the
-# mingw linker fall over ("export ordinal too large") when building the tests.
-crate-type = ["rlib"]
+# Android loads the Rust entry point from a shared library. Keep tests in core
+# so the desktop GUI stack is never exported into a test executable.
+crate-type = ["cdylib", "rlib"]
 # A test binary built from this crate links WebView2 and the Win32 GUI stack
 # and will not load outside a real app process. Everything worth unit testing
 # lives in the aerowave-core crate, which links none of that.
@@ -35,9 +35,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 aerowave-core = { path = "core" }
-tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
-tauri-plugin-dialog = "2"
-tauri-plugin-autostart = "2"
+tauri = { version = "2", features = ["image-png", "protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4"
@@ -52,7 +50,13 @@ tokio = { version = "1", features = ["time", "sync", "net", "io-util"] }
 futures-util = "0.3"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-android-audio = { path = "plugins/tauri-plugin-android-audio" }
 
 [target.'cfg(windows)'.dependencies]
 # auto-launch tells us one bit; the logon entry has more to say than that.

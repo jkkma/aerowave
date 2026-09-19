@@ -1,6 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
+  "platforms": ["windows", "linux", "macOS"],
   "description": "Permissions the Aerowave window needs",
   "windows": ["main"],
   "permissions": [

@@ -316,6 +316,17 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 
 ## Installing it
 
+### Android preview
+
+The Android port starts with station browsing, saved stations and native radio
+playback. Android's Media3 service owns playback and media controls; ordinary
+streams still use the Rust relay, while HLS goes directly through Media3 with
+public-address validation. The desktop playback paths above remain unchanged.
+
+Alarms, sleep timers and local music folders are not available in this preview.
+See the [Android build and testing guide](docs/android.md) for the APK build,
+installation steps and remaining work.
+
 ### Zorin OS / Ubuntu Linux
 
 Download the x64 `.deb` from [Releases](https://github.com/jkkma/aerowave/releases),
