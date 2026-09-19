@@ -1,29 +1,40 @@
 /* =====================================================================
    AEROWAVE — front end.
 
-   The webview owns playback and the face. It never owns the clock: alarm
-   times are decided in Rust and arrive here as `alarm-fire` events, because
-   WebView2 throttles timers in hidden windows and an alarm you have to be
-   watching is not an alarm.
+   The webview owns the face and desktop playback; Android hands playback to
+   its native media service so radio can continue in the background. Neither
+   owns the clock: alarm times are decided in Rust and arrive here as
+   `alarm-fire` events, because a throttled hidden webview cannot keep time.
    ===================================================================== */
 
 const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
-const appWindow = window.__TAURI__.window.getCurrentWindow();
+
+const tauriMetadata = window.__TAURI_INTERNALS__?.metadata || {};
+const IS_ANDROID = /Android/i.test(navigator.userAgent || "") ||
+  /android/i.test(String(tauriMetadata.currentPlatform || tauriMetadata.platform || ""));
+const appWindow = IS_ANDROID ? null : window.__TAURI__.window?.getCurrentWindow?.();
 
 // WebKitGTK repaints large filtered layers and a changing WebGL canvas on the
 // CPU on this path. The class lets CSS use a precomposed backdrop there while
 // Windows keeps the original layered animation.
-const IS_LINUX_WEBVIEW = /\bLinux\b/i.test(
+const IS_LINUX_WEBVIEW = !IS_ANDROID && /\bLinux\b/i.test(
   `${navigator.platform || ""} ${navigator.userAgent || ""}`
 );
 document.body.classList.toggle("linux", IS_LINUX_WEBVIEW);
+document.body.classList.toggle("android", IS_ANDROID);
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const pad2 = (n) => String(n).padStart(2, "0");
 const DAY_LETTERS = ["M", "T", "W", "T", "F", "S", "S"];
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+if (IS_ANDROID) {
+  $$('[data-tauri-drag-region]').forEach((element) => element.removeAttribute("data-tauri-drag-region"));
+  $("#build-label").textContent = "Android preview";
+  $("#np-track").textContent = "Choose a station or browse the directory.";
+}
 
 let state = { stations: [], alarms: [], settings: {} };
 let visibleStations = [];      // current filtered order, for prev/next
@@ -152,14 +163,42 @@ const player = {
   hls: false,         // is hls.js driving the element instead?
   paused: false,      // held, with the source still on the element, so it can resume
   pendingPosition: null, // local position until its media URL has arrived
+  nativeGeneration: null, // Android Media3 session this page is currently showing
   get playing() {
     return !!this.source;
   },
 };
 
+const ANDROID_AUDIO_PLUGIN = "plugin:android-audio";
+let androidStateRequest = 0;
+let androidPositionGeneration = null;
+let androidPositionMs = null;
+let androidReadyGeneration = null;
+let androidHandledErrorGeneration = null;
+let androidPollTimer = null;
+
+function androidCommand(command, payload) {
+  const name = `${ANDROID_AUDIO_PLUGIN}|${command}`;
+  return payload === undefined ? invoke(name) : invoke(name, { payload });
+}
+
+function invalidateAndroidStateRequests() {
+  androidStateRequest += 1;
+}
+
+function resetAndroidPositionSample() {
+  androidPositionGeneration = null;
+  androidPositionMs = null;
+  androidReadyGeneration = null;
+}
+
+const stoppedTrackHint = () => IS_ANDROID
+  ? "Choose a station or browse the directory."
+  : "Browse stations or play music from a folder.";
+
 function markPlaying(on) {
   document.body.classList.toggle("playing", on);
-  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = on ? "playing" : "none";
+  if (!IS_ANDROID && "mediaSession" in navigator) navigator.mediaSession.playbackState = on ? "playing" : "none";
 }
 
 function clearTimers() {
@@ -169,8 +208,17 @@ function clearTimers() {
   player.fadeTimer = player.metaTimer = player.retryTimer = null;
 }
 
-function stopPlayback(quiet) {
+function stopPlayback(quiet, { skipNative = false } = {}) {
   playGeneration += 1;
+  invalidateAndroidStateRequests();
+  if (IS_ANDROID && !skipNative) {
+    androidCommand("stop").catch((error) => {
+      if (!player.source) {
+        setStatus("Stop failed", "error");
+        say("Could not stop Android audio: " + String(error), "bad", true);
+      }
+    });
+  }
   // pause/load/destroy can queue events until after the next source is set.
   // Keep those teardown events guarded through the next connection attempt.
   switchingSource = true;
@@ -194,14 +242,145 @@ function stopPlayback(quiet) {
   player.relayed = false;
   player.triedDirect = false;
   stopHls();
+  player.nativeGeneration = null;
+  androidHandledErrorGeneration = null;
+  resetAndroidPositionSample();
   markPlaying(false);
   if (!quiet) {
     setOrbArt(null);
     setStatus("Stopped", "");
     $("#np-station").textContent = "Ready to listen";
-    $("#np-track").textContent = "Browse stations or play music from a folder.";
+    $("#np-track").textContent = stoppedTrackHint();
     $("#np-meta").textContent = "";
   }
+}
+
+function androidActiveStatus(status) {
+  return status === "buffering" || status === "playing" || status === "paused";
+}
+
+function restoreAndroidSource(nativeState) {
+  if (!androidActiveStatus(nativeState.status)) return false;
+  const generation = Number(nativeState.generation);
+  if (!Number.isFinite(generation)) return false;
+  const stored = stationById(nativeState.stationId);
+  const source = {
+    kind: "station",
+    url: stored?.url || nativeState.sourceUrl || "",
+    title: nativeState.title || stored?.name || "Live radio",
+    subtitle: nativeState.status === "paused" ? "Paused — press Play to resume" : "Playing in the background",
+    stationId: nativeState.stationId || stored?.id || null,
+    hls: /\.m3u8(?:\?|$)/i.test(nativeState.sourceUrl || ""),
+    nativeRestored: true,
+  };
+  if (!source.url) return false;
+
+  playGeneration = Math.max(playGeneration, generation);
+  resetAndroidPositionSample();
+  player.source = source;
+  player.nativeGeneration = generation;
+  player.resolved = nativeState.sourceUrl || source.url;
+  player.hls = source.hls;
+  player.target = Number.isFinite(nativeState.volume) ? nativeState.volume : (state.settings.volume ?? 0.8);
+  player.paused = nativeState.status === "paused";
+  player.retries = 0;
+  player.lastProgress = 0;
+  showNowPlaying(source.title, nativeState.trackTitle || source.subtitle, "");
+  setOrbArt(source);
+  renderStations();
+  return true;
+}
+
+function applyAndroidPlaybackState(nativeState, { allowRestore = false } = {}) {
+  if (!IS_ANDROID || !nativeState || typeof nativeState.status !== "string") return false;
+  const generation = Number(nativeState.generation);
+  if (!Number.isFinite(generation)) return false;
+
+  if (!player.source) {
+    if (!allowRestore || !restoreAndroidSource(nativeState)) return false;
+  }
+  if (player.nativeGeneration !== generation) return false;
+
+  if (Number.isFinite(nativeState.volume)) {
+    player.target = Math.min(1, Math.max(0, nativeState.volume));
+    const volume = Math.round(player.target * 100);
+    $("#volume").value = volume;
+    $("#volval").textContent = volume;
+    $("#volume").style.setProperty("--fill", volume + "%");
+  }
+
+  if (nativeState.trackTitle && state.settings.showMetadata !== false) {
+    player.streamTitle = true;
+    $("#np-track").textContent = nativeState.trackTitle;
+  }
+
+  if (nativeState.status === "idle") {
+    stopPlayback(false, { skipNative: true });
+    renderStations();
+    renderBrowse();
+    return true;
+  }
+
+  if (nativeState.status === "error") {
+    if (androidHandledErrorGeneration === generation) return true;
+    androidHandledErrorGeneration = generation;
+    failure(nativeState.error || "Android audio stopped unexpectedly");
+    return true;
+  }
+
+  if (nativeState.status === "paused") {
+    player.paused = true;
+    markPlaying(false);
+    setStatus("Paused", "");
+    resetAndroidPositionSample();
+    return true;
+  }
+
+  player.paused = false;
+  markPlaying(true);
+  if (nativeState.status === "buffering") {
+    resetAndroidPositionSample();
+    setStatus("Buffering", "busy");
+    return true;
+  }
+
+  const position = Math.max(0, Number(nativeState.positionMs) || 0);
+  const advanced = androidPositionGeneration === generation && androidPositionMs !== null && position > androidPositionMs;
+  androidPositionGeneration = generation;
+  androidPositionMs = position;
+  if (advanced) {
+    androidReadyGeneration = generation;
+    player.lastProgress = Date.now();
+    player.retries = 0;
+  }
+  // A live HLS window may slide its position back to zero while Media3 keeps
+  // decoding. Once this generation has genuinely advanced, a backward sample
+  // alone must not make verified playback look like it is starting again.
+  if (androidReadyGeneration === generation) {
+    setStatus("Live radio", "on");
+  } else {
+    setStatus("Starting audio", "busy");
+  }
+  return true;
+}
+
+async function refreshAndroidPlayback({ allowRestore = false } = {}) {
+  if (!IS_ANDROID || (document.hidden && !allowRestore)) return;
+  const request = ++androidStateRequest;
+  try {
+    const nativeState = await androidCommand("get_state");
+    if (request !== androidStateRequest) return;
+    applyAndroidPlaybackState(nativeState, { allowRestore });
+  } catch (error) {
+    if (request === androidStateRequest && allowRestore) {
+      say("Could not reconnect to Android audio: " + String(error), "bad", true);
+    }
+  }
+}
+
+function startAndroidStateSync() {
+  if (!IS_ANDROID || androidPollTimer) return;
+  androidPollTimer = setInterval(() => refreshAndroidPlayback(), 1000);
 }
 
 /** Ramp the element volume up to `player.target` over `seconds`. */
@@ -637,6 +816,43 @@ async function playable(source, url) {
   }
 }
 
+async function startAndroidPlayback(source, sourceUrl, useHls, generation, volume) {
+  let playUrl = sourceUrl;
+  if (!useHls) {
+    try {
+      playUrl = await playable(source, sourceUrl);
+    } catch (error) {
+      if (!superseded(generation) && player.source === source) failure(String(error));
+      return false;
+    }
+  }
+  if (superseded(generation) || player.source !== source || givingUp) return false;
+
+  player.relayed = !useHls && playUrl !== sourceUrl;
+  player.hls = useHls;
+  player.nativeGeneration = generation;
+  androidHandledErrorGeneration = null;
+  resetAndroidPositionSample();
+  invalidateAndroidStateRequests();
+  try {
+    const nativeState = await androidCommand("play", {
+      url: playUrl,
+      sourceUrl,
+      title: source.title || "Live radio",
+      stationId: source.stationId || null,
+      volume,
+      generation,
+      isHls: useHls,
+    });
+    if (superseded(generation) || player.source !== source || player.nativeGeneration !== generation) return false;
+    applyAndroidPlaybackState(nativeState);
+    return nativeState?.status !== "error" && nativeState?.status !== "idle";
+  } catch (error) {
+    if (!superseded(generation) && player.source === source) failure(String(error));
+    return false;
+  }
+}
+
 /**
  * Start a source. `opts.fadeSecs` ramps the volume in, `opts.volume`
  * overrides the master volume (alarms have their own). `opts.startTime`
@@ -645,10 +861,10 @@ async function playable(source, url) {
  * servers never will.
  */
 async function play(source, opts = {}) {
-  stopPlayback(true);
+  stopPlayback(true, { skipNative: IS_ANDROID });
   const generation = playGeneration;
   player.source = source;
-  player.lastProgress = Date.now();
+  player.lastProgress = IS_ANDROID ? 0 : Date.now();
   player.retries = 0;
   player.streamTitle = false;
   const volume = opts.volume !== undefined ? opts.volume : state.settings.volume ?? 0.8;
@@ -664,6 +880,15 @@ async function play(source, opts = {}) {
   markPlaying(true);
 
   setStatus("Connecting", "busy");
+  if (IS_ANDROID) {
+    try {
+      await androidCommand("stop");
+    } catch (error) {
+      if (!superseded(generation)) failure(String(error));
+      return;
+    }
+    if (superseded(generation) || player.source !== source) return;
+  }
   // A resumed station keeps the manifest reached through its playlist wrapper.
   // The original URL still identifies the station in BROWSE and the saved list.
   let url = source.hls && source.hlsUrl ? source.hlsUrl : source.url;
@@ -700,6 +925,11 @@ async function play(source, opts = {}) {
   // pointed at the relay, which would only hand it back its own stream. It
   // is also what an `icy-title` event is matched against.
   if (source.kind === "station") player.resolved = url;
+  if (IS_ANDROID) {
+    if (!(await startAndroidPlayback(source, url, useHls, generation, volume))) return;
+    if (source.kind === "station" && !useHls) startMetadata(source, initialInfo);
+    return;
+  }
   if (useHls) {
     // hls.js sets the element's source itself, to a MediaSource blob.
     if (!(await startHls(source, url, generation))) return;
@@ -946,8 +1176,29 @@ function failure(detail, opts = {}) {
     return;
   }
 
+  // The native snapshot deliberately exposes the broadcaster identity rather
+  // than its decoder details. Resolve a restored source again on its first
+  // failure so an extensionless HLS station cannot be retried through a relay.
+  if (IS_ANDROID && source.nativeRestored) {
+    source.nativeRestored = false;
+    setStatus("Reconnecting", "busy");
+    clearTimeout(player.retryTimer);
+    player.retryTimer = setTimeout(() => {
+      if (player.source === source) play(source, { volume: player.target });
+    }, 1500);
+    return;
+  }
+
   player.retries += 1;
   if (opts.fatal || player.retries > 4) {
+    if (IS_ANDROID) {
+      stopPlayback(true);
+      setOrbArt(null);
+      setStatus("Stream unavailable", "error");
+      $("#np-track").textContent = "This station is not playing. Try another one.";
+      say(source.title + " is unavailable: " + detail, "bad");
+      return;
+    }
     // The station is not coming back. Fall through to the backup folder.
     say("stream unavailable - falling back to the backup folder", "bad");
     playBackupTrack(source.title + " is unavailable (" + detail + ")");
@@ -976,6 +1227,13 @@ function failure(detail, opts = {}) {
     }
     if (superseded(generation) || player.source !== source) return;
     const upstream = player.resolved || source.url;
+    if (IS_ANDROID) {
+      const useHls = !!(player.hls || source.hls);
+      if (await startAndroidPlayback(source, upstream, useHls, generation, player.target)) {
+        if (!useHls) startMetadata(source);
+      }
+      return;
+    }
     if (player.hls || source.hls) {
       // Start the HLS player over rather than assigning a source: the element
       // plays a MediaSource, and pointing it at the .m3u8 would give it a
@@ -1225,9 +1483,25 @@ function pausePlayback() {
   // Set before the element is touched: the `pause` listener below reads it to
   // tell this apart from the audio being taken away by something else.
   player.paused = true;
-  audio.pause();
+  if (IS_ANDROID) {
+    const generation = player.nativeGeneration;
+    invalidateAndroidStateRequests();
+    androidCommand("pause").then((nativeState) => {
+      if (player.nativeGeneration === generation) applyAndroidPlaybackState(nativeState);
+    }).catch((error) => {
+      if (player.nativeGeneration === generation) {
+        player.paused = false;
+        markPlaying(true);
+        setStatus("Playing", "on");
+        say("Could not pause: " + String(error), "bad");
+        refreshAndroidPlayback();
+      }
+    });
+  } else {
+    audio.pause();
+  }
   markPlaying(false);
-  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+  if (!IS_ANDROID && "mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
   setStatus("Paused", "");
 }
 
@@ -1240,7 +1514,33 @@ function pausePlayback() {
 function resumePlayback() {
   const source = player.source;
   if (!source) return;
+  if (IS_ANDROID && source.nativeRestored) {
+    // A persisted native snapshot can outlive Media3's prepared item after the
+    // Android process is reclaimed. Rebuild the route on this explicit user
+    // action; an active background session never reaches this resume path.
+    source.nativeRestored = false;
+    play(source, { volume: player.target });
+    return;
+  }
   player.paused = false;
+  if (IS_ANDROID) {
+    const generation = player.nativeGeneration;
+    invalidateAndroidStateRequests();
+    markPlaying(true);
+    setStatus("Resuming", "busy");
+    androidCommand("resume").then((nativeState) => {
+      if (player.nativeGeneration === generation) applyAndroidPlaybackState(nativeState);
+    }).catch((error) => {
+      if (player.nativeGeneration === generation) {
+        player.paused = true;
+        markPlaying(false);
+        setStatus("Paused", "");
+        say("Could not resume: " + String(error), "bad");
+        refreshAndroidPlayback();
+      }
+    });
+    return;
+  }
   if (source.kind === "folder") {
     markPlaying(true);
     setStatus("Playing your music", "on");
@@ -1282,7 +1582,7 @@ function togglePlay() {
  * player on the machine to do it.
  */
 function wireMediaKeys() {
-  if (!("mediaSession" in navigator)) return;
+  if (IS_ANDROID || !("mediaSession" in navigator)) return;
   const on = (action, handler) => {
     try {
       navigator.mediaSession.setActionHandler(action, handler);
@@ -1826,7 +2126,9 @@ function renderBrowse() {
       const flag = document.createElement("span");
       flag.className = "tag";
       flag.textContent = "HLS";
-      flag.title = "Played through hls.js rather than by the webview itself.";
+      flag.title = IS_ANDROID
+        ? "Played by Android's native media player."
+        : "Played through hls.js rather than by the webview itself.";
       li.append(flag);
     }
 
@@ -2474,6 +2776,7 @@ function renderSettings() {
   $("#volume").value = vol;
   $("#volval").textContent = vol;
   $("#volume").style.setProperty("--fill", vol + "%");
+  if (IS_ANDROID) return;
   $("#sleep-action").value = state.settings.sleepTimerAction || "stop";
   renderSleepTimer();
   renderPowerStatus();
@@ -2496,7 +2799,9 @@ function saveSettings(explicitAutostart = null) {
     const explicitAutostart = settingsAutostartIntent;
     settingsAutostartIntent = null;
     if (explicitAutostart !== null) state.settings.startWithWindows = explicitAutostart;
-    invoke("save_settings", { settings: state.settings, explicitAutostart }).then(refreshPowerStatus).catch((e) => {
+    invoke("save_settings", { settings: state.settings, explicitAutostart }).then(() => {
+      if (!IS_ANDROID) refreshPowerStatus();
+    }).catch((e) => {
       say(String(e), "bad");
       // start-with-Windows can fail on its own; reflect what actually stuck.
       loadState().catch((error) => say(String(error), "bad"));
@@ -2507,11 +2812,13 @@ function saveSettings(explicitAutostart = null) {
 async function loadState() {
   state = await invoke("get_state");
   renderStations();
-  renderAlarms();
   renderSettings();
-  refreshNextAlarm();
-  refreshFolderLabels();
-  refreshPowerStatus();
+  if (!IS_ANDROID) {
+    renderAlarms();
+    refreshNextAlarm();
+    refreshFolderLabels();
+    refreshPowerStatus();
+  }
 }
 
 // -------------------------------------------------------- station editor ---
@@ -2984,21 +3291,30 @@ async function refreshPowerStatus() {
   }
 }
 
-setInterval(renderSleepTimer, 1000);
+if (!IS_ANDROID) setInterval(renderSleepTimer, 1000);
 
 // ---------------------------------------------------------------- wiring ---
 
 function wire() {
-  window.addEventListener("focus", refreshPowerStatus);
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) refreshPowerStatus();
-  });
+  if (IS_ANDROID) {
+    window.addEventListener("focus", () => refreshAndroidPlayback());
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refreshAndroidPlayback();
+    });
+  } else {
+    window.addEventListener("focus", refreshPowerStatus);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refreshPowerStatus();
+    });
+  }
 
   // window controls
-  $("#btn-min").addEventListener("click", () => appWindow.minimize());
-  $("#btn-max").addEventListener("click", () => appWindow.toggleMaximize());
-  $("#btn-close").addEventListener("click", () => appWindow.close());
-  $("#btn-quit").addEventListener("click", () => invoke("quit_app"));
+  if (appWindow) {
+    $("#btn-min").addEventListener("click", () => appWindow.minimize());
+    $("#btn-max").addEventListener("click", () => appWindow.toggleMaximize());
+    $("#btn-close").addEventListener("click", () => appWindow.close());
+    $("#btn-quit").addEventListener("click", () => invoke("quit_app"));
+  }
 
   // transport
   $("#btn-play").addEventListener("click", togglePlay);
@@ -3014,32 +3330,42 @@ function wire() {
     // on while an alarm rang, which is the one time you most want it. Cancels
     // any fade-in, which is the point - the user is overriding it.
     clearInterval(player.fadeTimer);
-    audio.volume = v / 100;
     player.target = v / 100;
+    if (IS_ANDROID) {
+      const generation = player.nativeGeneration;
+      invalidateAndroidStateRequests();
+      androidCommand("set_volume", { volume: player.target }).then((nativeState) => {
+        if (player.nativeGeneration === generation) applyAndroidPlaybackState(nativeState);
+      }).catch((error) => say("Could not change volume: " + String(error), "bad"));
+    } else {
+      audio.volume = player.target;
+    }
     // Carry it into the ring so a later fallback does not snap back.
     if (ringing) ringing.volume = v / 100;
     saveSettings();
   });
 
-  $$("#sleep-chips .chip").forEach((chip) =>
-    chip.addEventListener("click", () => setSleep(+chip.dataset.mins))
-  );
-  $("#sleep-action").addEventListener("change", () => {
-    state.settings.sleepTimerAction = $("#sleep-action").value;
-    saveSettings();
-    renderSleepTimer();
-  });
-  $("#power-cancel").addEventListener("click", () => setSleep(0));
-  $("#power-countdown").addEventListener("cancel", (event) => {
-    event.preventDefault();
-    setSleep(0);
-  });
-  $("#power-countdown").addEventListener("keydown", (event) => {
-    if (event.key === "Tab") {
+  if (!IS_ANDROID) {
+    $$("#sleep-chips .chip").forEach((chip) =>
+      chip.addEventListener("click", () => setSleep(+chip.dataset.mins))
+    );
+    $("#sleep-action").addEventListener("change", () => {
+      state.settings.sleepTimerAction = $("#sleep-action").value;
+      saveSettings();
+      renderSleepTimer();
+    });
+    $("#power-cancel").addEventListener("click", () => setSleep(0));
+    $("#power-countdown").addEventListener("cancel", (event) => {
       event.preventDefault();
-      $("#power-cancel").focus();
-    }
-  });
+      setSleep(0);
+    });
+    $("#power-countdown").addEventListener("keydown", (event) => {
+      if (event.key === "Tab") {
+        event.preventDefault();
+        $("#power-cancel").focus();
+      }
+    });
+  }
 
   // tabs
   $$(".tab").forEach((tab) =>
@@ -3049,9 +3375,9 @@ function wire() {
         t.setAttribute("aria-selected", String(t === tab));
       });
       $$(".pane").forEach((p) => p.classList.toggle("on", p.id === "pane-" + tab.dataset.pane));
-      if (tab.dataset.pane === "alarms") refreshNextAlarm();
+      if (!IS_ANDROID && tab.dataset.pane === "alarms") refreshNextAlarm();
       if (tab.dataset.pane === "browse") browseFirstLook();
-      if (tab.dataset.pane === "settings") refreshPowerStatus();
+      if (!IS_ANDROID && tab.dataset.pane === "settings") refreshPowerStatus();
     })
   );
 
@@ -3128,6 +3454,13 @@ function wire() {
         return;
       }
 
+      if (IS_ANDROID) {
+        note.className = "editor-note good";
+        note.textContent = "✓ stream answered" + (info.hls ? " (HLS)" : "") +
+          ". Play it to confirm audio on this phone — " + (bits || info.url);
+        return;
+      }
+
       note.textContent = "Server answered — checking the player can decode it…";
       const decoded = await canDecode(info.url, info.hls ? 15000 : 9000, {
         hls: !!info.hls,
@@ -3177,6 +3510,7 @@ function wire() {
     browseSearch(false);
   });
 
+  if (!IS_ANDROID) {
   // shuffle folder on the radio tab
   $("#btn-pick-folder").addEventListener("click", async () => {
     const info = await invoke("pick_folder");
@@ -3320,6 +3654,7 @@ function wire() {
   // ringing overlay
   $("#ring-snooze").addEventListener("click", () => snoozeRing());
   $("#ring-dismiss").addEventListener("click", dismissRing);
+  }
 
   // settings
   $$(".settings .row").forEach((row) => {
@@ -3328,14 +3663,16 @@ function wire() {
       const next = sw.getAttribute("aria-pressed") !== "true";
       // The hour field holds 12- or 24-hour digits according to this very
       // setting, so take the time in the old reading before switching.
-      const was = row.dataset.setting === "clock24h" ? readEditorTime() : null;
+      const was = row.dataset.setting === "clock24h" && !IS_ANDROID ? readEditorTime() : null;
       sw.setAttribute("aria-pressed", String(next));
       state.settings[row.dataset.setting] = next;
       if (row.dataset.setting === "clock24h") {
         tickClock();
-        renderAlarms();
-        refreshNextAlarm();
-        applyClockMode(was.hour, was.minute);
+        if (!IS_ANDROID) {
+          renderAlarms();
+          refreshNextAlarm();
+          applyClockMode(was.hour, was.minute);
+        }
       }
       saveSettings(row.dataset.setting === "startWithWindows" ? next : null);
     });
@@ -3368,7 +3705,7 @@ function wire() {
 async function showBuildLabel() {
   try {
     const version = await window.__TAURI__.app.getVersion();
-    $("#build-label").textContent = "Radio & alarms · " + version;
+    $("#build-label").textContent = (IS_ANDROID ? "Android preview" : "Radio & alarms") + " · " + version;
   } catch {
     /* the label reads fine without it */
   }
@@ -3376,6 +3713,7 @@ async function showBuildLabel() {
 
 /** Portable copies keep their settings beside the exe; say which this is. */
 async function showConfigLocation() {
+  if (IS_ANDROID) return;
   try {
     const where = await invoke("config_location");
     const line = $("#config-where");
@@ -3403,18 +3741,30 @@ async function boot() {
   await tickClock();
   // Saving an alarm can return before Windows finishes updating its timer.
   // Subscribe before the initial query so that completion cannot leave it stale.
-  await listen("power-status-updated", () => refreshPowerStatus());
+  if (!IS_ANDROID) await listen("power-status-updated", () => refreshPowerStatus());
   wire();
   setInterval(tickClock, 1000);
-  setInterval(refreshNextAlarm, 20000);
-  // AC/battery and Windows power-policy changes do not edit our saved settings.
-  setInterval(refreshPowerStatus, 20000);
+  if (!IS_ANDROID) {
+    setInterval(refreshNextAlarm, 20000);
+    // AC/battery and Windows power-policy changes do not edit our saved settings.
+    setInterval(refreshPowerStatus, 20000);
+  }
 
   await loadState();
 
+  await listen("icy-title", (event) => onStreamTitle(event.payload));
+  await listen("settings-updated", () => loadState().catch((e) => say(String(e), "bad")));
+
+  if (IS_ANDROID) {
+    await refreshAndroidPlayback({ allowRestore: true });
+    startAndroidStateSync();
+    showBuildLabel();
+    say(player.source ? "Background playback restored" : "Ready to listen", "good");
+    return;
+  }
+
   await listen("alarm-fire", (event) => onAlarmFire(event.payload));
   // Windows can turn autostart off behind our back; the backend says when.
-  await listen("settings-updated", () => loadState().catch((e) => say(String(e), "bad")));
   await listen("alarms-updated", async () => {
     try {
       state.alarms = (await invoke("get_state")).alarms;
@@ -3425,7 +3775,6 @@ async function boot() {
       say(String(e), "bad");
     }
   });
-  await listen("icy-title", (event) => onStreamTitle(event.payload));
   await listen("tray-stop", () => {
     if (ringing) dismissRing();
     else stopPlayback();

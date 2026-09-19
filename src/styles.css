@@ -35,6 +35,9 @@
 
 * { box-sizing: border-box; }
 
+.android-only,
+.android-preview-note { display: none; }
+
 html {
   background: var(--abyss);
 }
@@ -1073,3 +1076,116 @@ select.field option { background: #062434; color: var(--foam); }
   background: linear-gradient(180deg, rgba(2, 18, 28, .55), rgba(2, 14, 22, .42));
 }
 .folderbox.backup .editor-note { white-space: normal; line-height: 1.5; }
+
+/* Android uses the native media service for playback and the webview as its
+   compact remote. Safe-area padding belongs to the outer chrome so every
+   scrollable panel can still use its full measured width. */
+body.android {
+  height: 100dvh;
+  min-height: 100%;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overscroll-behavior: none;
+}
+
+.android .android-unavailable,
+.android .desktop-only,
+.android .winbtns { display: none !important; }
+
+.android .android-only { display: block; }
+
+.android .titlebar {
+  min-height: calc(48px + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top) calc(10px + env(safe-area-inset-right)) 0 calc(12px + env(safe-area-inset-left));
+  gap: 7px;
+}
+
+.android .titlebar [data-tauri-drag-region] { -webkit-app-region: no-drag; }
+.android .brand { gap: 7px; min-width: 0; }
+.android .brand .sub { white-space: nowrap; }
+.android .titleclock { gap: 5px; font-size: 12px; }
+.android .tb-date { display: none; }
+
+.android main {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: max-content minmax(440px, 68dvh);
+  gap: 10px;
+  padding: 10px calc(10px + env(safe-area-inset-right)) 10px calc(10px + env(safe-area-inset-left));
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.android .panel { padding: 12px; border-radius: 14px; }
+.android .stage { grid-template-rows: auto auto auto auto; gap: 9px; padding-top: 10px; overflow: visible; }
+.android .orbwrap { min-height: 112px; }
+.android .orb { width: 108px; height: 108px; }
+.android .station { margin-top: 5px; font-size: 22px; }
+.android .track { font-size: 13px; }
+.android .transport { flex-wrap: wrap; gap: 8px; }
+.android .gel { min-height: 44px; padding: 9px 14px; }
+.android .gel.big { width: 64px; height: 64px; min-height: 64px; }
+.android #btn-prev,
+.android #btn-next { width: 48px; height: 48px; }
+.android .volwrap { flex: 1 0 100%; justify-content: center; margin: 0; }
+.android .slider { width: min(210px, calc(100vw - 132px)); height: 32px; }
+.android .android-preview-note {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid rgba(150, 220, 240, .22);
+  border-radius: 10px;
+  background: rgba(2, 24, 36, .42);
+  color: #d3edf4;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+}
+
+.android .console { min-height: 440px; height: 68dvh; }
+.android .tabs { gap: 3px; }
+.android .tab { min-height: 44px; padding: 9px 4px; }
+.android .pane { overscroll-behavior: contain; }
+.android .paneheader { align-items: stretch; }
+.android .paneheader .field { flex: 1 1 160px; }
+.android .browsefilters { gap: 7px; }
+.android .row { min-height: 52px; padding: 7px 8px; gap: 7px; }
+.android .row .icon { width: 42px; height: 42px; }
+.android .editor { padding: 11px; }
+.android .editor-actions { row-gap: 7px; }
+.android #pane-settings.on { grid-template-rows: max-content max-content; }
+.android .about { padding-top: 4px; }
+.android .statusbar {
+  min-height: calc(32px + env(safe-area-inset-bottom));
+  padding: 0 calc(14px + env(safe-area-inset-right)) env(safe-area-inset-bottom) calc(14px + env(safe-area-inset-left));
+}
+
+@media (orientation: landscape) and (max-height: 600px) and (min-width: 600px) {
+  .android main {
+    grid-template-columns: minmax(300px, .9fr) minmax(360px, 1.1fr);
+    grid-template-rows: minmax(0, 1fr);
+    gap: 8px;
+    padding-top: 7px;
+    padding-bottom: 7px;
+    overflow: hidden;
+  }
+  .android .stage {
+    min-height: 0;
+    grid-template-columns: 88px minmax(0, 1fr);
+    grid-template-rows: minmax(70px, 1fr) auto auto;
+    gap: 5px 9px;
+    overflow-y: auto;
+  }
+  .android .orbwrap { grid-column: 1; grid-row: 1 / 4; min-height: 88px; }
+  .android .orb { width: 82px; height: 82px; }
+  .android .nowplaying { grid-column: 2; grid-row: 1; align-self: center; }
+  .android .station { font-size: 18px; }
+  .android .track { font-size: 12px; }
+  .android .transport { grid-column: 2; grid-row: 2; }
+  .android .gel.big { width: 52px; height: 52px; min-height: 52px; }
+  .android .volwrap { flex-basis: 100%; }
+  .android .slider { width: clamp(92px, 18vw, 150px); }
+  .android .android-preview-note { grid-column: 2; grid-row: 3; padding: 6px 8px; font-size: 10.5px; }
+  .android .console { min-height: 0; height: auto; }
+  .android .row { min-height: 46px; }
+}

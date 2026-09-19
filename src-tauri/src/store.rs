@@ -197,6 +197,7 @@ impl Default for AppData {
 /// written to the user profile. That is how the Scoop package ships, with
 /// `data` persisted across updates. Without that folder, settings go to the
 /// usual per-user config directory.
+#[cfg(desktop)]
 pub fn portable_data_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?.join("data");
@@ -205,6 +206,11 @@ pub fn portable_data_dir() -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+#[cfg(mobile)]
+pub fn portable_data_dir() -> Option<PathBuf> {
+    None
 }
 
 pub struct Store {
