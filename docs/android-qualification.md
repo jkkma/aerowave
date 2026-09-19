@@ -163,6 +163,30 @@ and notification access remained granted. The tester heard the saved station
 through the installed release, then muted the app and locked the phone. Android
 reported an active renderer with the screen asleep.
 
+### Folder response correction in 0.11.6
+
+The optimized 0.11.5 release exposed a folder-picker error that had not occurred
+in the debug build: `failed to deserialize response: missing field 'path'`.
+Release minification renamed the Kotlin folder and track fields before their
+reflective serialization. Version 0.11.6 constructs explicit response objects
+for folder selection, folder information and random-track selection, preserving
+the Rust bridge's required keys while retaining optimization.
+
+The corrected build passed 41 Android JVM tests, including two new production
+response-schema checks, plus 128 Rust core tests and the Windows workspace
+check. The optimized ARM64 APK was built from clean source `9e32c2a`, verified
+against the existing release certificate, and passed 16 KB ZIP alignment.
+Its SHA-256 is
+`935C8AD8E42EA012C7DF30F3D81197FC040EEE3B6DA447E6EA061AECA58C73C5`.
+The same-certificate update installed as version code 11006 without uninstalling
+the app, retained its first-install time and granted alarm/notification access,
+and matched that hash when read back from the phone. WebView inspection remained
+disabled. In that installed optimized build, the tester selected the backup
+folder again and confirmed its one-file count without an error. Shuffle then
+played the downloaded piano, confirmed by the tester, native track metadata and
+an active audio renderer. This exercises the actual release bridge for both
+folder and track responses.
+
 ## Extended playback run
 
 A bounded eight-hour run started on the physical phone at 14:21 UTC on
@@ -175,9 +199,14 @@ A new eight-hour run of the installed signed release started at 14:54 UTC on
 2026-09-19, after the tester confirmed audible radio and then muted and locked
 the phone. It was intentionally stopped at 14:59 UTC for the requested temporary
 focus checks and a reported release folder-picker defect. Six samples spanning
-five minutes showed an active renderer without detected interruptions. A fresh
-long run is needed after the corrected release is installed. The monitor records
-actual screen state and filtered renderer evidence.
+five minutes showed an active renderer without detected interruptions.
+
+The corrected signed 0.11.6 release began a fresh eight-hour run around 15:19 UTC
+on 2026-09-19, after the tester confirmed radio playback and again muted and
+locked the phone. Its first sample shows an active renderer with the screen
+asleep and charging power. Completion is expected around 23:19 UTC; the full
+duration remains pending. The monitor records actual screen state and filtered
+renderer evidence.
 The one-minute monitor validation completed with six active-renderer samples
 and no detected issues. Unknown MediaSession positions were correctly treated
 as unavailable telemetry.
