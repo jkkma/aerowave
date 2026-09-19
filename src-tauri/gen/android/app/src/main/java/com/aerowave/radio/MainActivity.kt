@@ -3,6 +3,7 @@ package com.aerowave.radio
 import android.os.Bundle
 import android.os.Build
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
 import android.webkit.WebView
 import android.view.WindowManager
@@ -43,6 +44,14 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
     appWebView = webView
+    // Wry finishes its WebView setup after this callback returns. Apply the
+    // process-wide setting on the UI queue to disable release inspection
+    // after initialization while debug builds remain inspectable.
+    webView.post {
+      val debuggable = BuildConfig.DEBUG &&
+        (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+      WebView.setWebContentsDebuggingEnabled(debuggable)
+    }
     applyFontScale()
   }
 
