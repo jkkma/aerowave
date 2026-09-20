@@ -254,6 +254,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - Point it at a folder and it plays a random file from it, walking up to 8 levels
   deep. When a track ends it rolls straight on to another one.
 - Recent picks are remembered so a small folder does not repeat itself.
+- On desktop, the orb shows the current track's embedded album art and updates
+  when you skip or go back. Tracks without usable art show the crystal again.
 - Only extensions WebView2 can actually decode are listed (`mp3 m4a aac mp4 flac
   ogg opus wav webm`) — WMA is deliberately absent, because an alarm that stays
   silent is worse than one that never existed.

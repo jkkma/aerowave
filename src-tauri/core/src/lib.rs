@@ -18,3 +18,4 @@ pub mod schedule;
 pub mod settings;
 pub mod sleep;
 pub mod stream_tags;
+pub mod track_art;

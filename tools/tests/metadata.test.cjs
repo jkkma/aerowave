@@ -172,6 +172,122 @@ test("a corrupt candidate is excluded before trying the next matching logo", asy
   assert.deepEqual([...last.args.excludedUrls], ["https://art.test/dead.png", "https://art.test/corrupt.png"]);
 });
 
+test("the current shuffle track supplies orb and system media artwork", async () => {
+  const h = artHarness((command, args) => {
+    if (command === "random_track") return { path: "/music/song.flac", name: "Song.flac", total: 3 };
+    if (command === "track_artwork") return args.path === "/music/song.flac" ? png : null;
+  });
+  h.context.window.aerowaveOrb = { ok: true, setImage: picture => { h.lastArt = picture; } };
+  await h.evaluate("playRandomFromFolder('/music')");
+  await flush();
+  await flush();
+  assert.equal(h.calls.find(c => c.command === "track_artwork").args.path, "/music/song.flac");
+  assert.equal(h.evaluate("player.source.path"), "/music/song.flac");
+  assert.equal(h.evaluate("player.artwork"), png);
+  assert.equal(h.lastArt, png);
+  assert.equal(h.context.navigator.mediaSession.metadata.artwork[0].src, png);
+});
+
+test("track artwork extraction does not hold up local playback", async () => {
+  const artwork = deferred();
+  const h = artHarness(command => command === "track_artwork" ? artwork.promise : undefined);
+  let finished = false;
+  const playback = h.evaluate("play({kind:'folder',path:'/music/slow.flac',url:'asset://slow.flac',title:'Slow'})")
+    .then(() => { finished = true; });
+  await flush();
+  await flush();
+  assert.equal(finished, true);
+  assert.equal(h.audios[0].paused, false);
+  assert.equal(h.calls.some(c => c.command === "track_artwork"), true);
+  artwork.resolve(null);
+  await playback;
+});
+
+for (const replacement of ["track", "stop", "station"]) {
+  test(`late track artwork cannot replace a newer ${replacement}`, async () => {
+    const oldArtwork = deferred();
+    const h = artHarness((command, args) => {
+      if (command === "track_artwork" && args.path === "/music/old.flac") return oldArtwork.promise;
+      if (command === "track_artwork") return null;
+    });
+    h.evaluate("player.source={kind:'folder',path:'/music/old.flac',title:'Old'}");
+    const pending = h.evaluate("setOrbArt(player.source)");
+    if (replacement === "track") {
+      await h.evaluate("player.source={kind:'folder',path:'/music/new.flac',title:'New'}; setOrbArt(player.source)");
+    } else if (replacement === "stop") {
+      h.evaluate("stopPlayback(true)");
+    } else {
+      h.evaluate("player.source={kind:'station',url:'https://radio.test/new',title:'New'}; setOrbArt(player.source); showOrbArt(player.source,'station-cover')");
+    }
+    oldArtwork.resolve(png);
+    await pending;
+    await flush();
+    assert.equal(h.evaluate("player.artwork"), replacement === "station" ? "station-cover" : null);
+  });
+}
+
+test("a track switch during image decoding discards the decoded result", async () => {
+  const decode = deferred();
+  let decodeStarted = false;
+  const h = artHarness((command, args) => command === "track_artwork" && args.path === "/music/old.flac" ? png : null);
+  h.context.Image = class {
+    naturalWidth = 640;
+    naturalHeight = 320;
+    decode() { decodeStarted = true; return decode.promise; }
+  };
+  h.evaluate("player.source={kind:'folder',path:'/music/old.flac',title:'Old'}");
+  const pending = h.evaluate("setOrbArt(player.source)");
+  await flush();
+  assert.equal(decodeStarted, true);
+  await h.evaluate("player.source={kind:'folder',path:'/music/new.flac',title:'New'}; setOrbArt(player.source)");
+  decode.resolve();
+  await pending;
+  assert.equal(h.evaluate("player.artwork"), null);
+  assert.equal(h.evaluate("trackArt.size"), 0);
+});
+
+for (const [name, embedded] of [["missing", null], ["corrupt", "data:image/png;base64,Y29ycnVwdA=="]]) {
+  test(`${name} embedded artwork clears the previous cover and media metadata`, async () => {
+    const h = artHarness(command => command === "track_artwork" ? embedded : undefined);
+    h.context.window.aerowaveOrb = { ok: true, setImage: picture => { h.lastArt = picture; } };
+    h.evaluate(`showOrbArt(player.source, ${JSON.stringify(png)}); player.source={kind:'folder',path:'/music/plain.mp3',title:'Plain'}`);
+    await h.evaluate("setOrbArt(player.source)");
+    assert.equal(h.evaluate("player.artwork"), null);
+    assert.equal(h.lastArt, null);
+    assert.equal(h.context.navigator.mediaSession.metadata.artwork.length, 0);
+  });
+}
+
+test("track art accepts the backend limit without raising the station logo limit", async () => {
+  const large = "data:image/png;base64," + "A".repeat(710000);
+  const h = artHarness(command => command === "track_artwork" ? large : undefined);
+  h.context.large = large;
+  await assert.rejects(h.evaluate("decodedOrbArt(large)"), /Invalid station artwork/);
+  h.evaluate("player.source={kind:'folder',path:'/music/cover.flac',title:'Cover'}");
+  await h.evaluate("setOrbArt(player.source)");
+  assert.equal(h.evaluate("player.artwork"), png);
+});
+
+test("decoded track artwork cache stays bounded", async () => {
+  const h = artHarness(command => command === "track_artwork" ? png : undefined);
+  for (let i = 0; i < 9; i++) {
+    h.context.trackIndex = i;
+    await h.evaluate("player.source={kind:'folder',path:`/music/${trackIndex}.flac`,title:String(trackIndex)}; setOrbArt(player.source)");
+  }
+  assert.equal(h.evaluate("trackArt.size"), 8);
+  assert.equal(h.evaluate("trackArt.has(JSON.stringify(['folder','/music/0.flac']))"), false);
+});
+
+test("Android content URI tracks do not call the desktop artwork extractor", async () => {
+  const h = artHarness(command => {
+    if (command === "track_artwork") throw new Error("desktop command must not run");
+  }, { navigator: { userAgent: "Android" } });
+  h.evaluate(`showOrbArt(player.source, ${JSON.stringify(png)}); player.source={kind:'folder',path:'content://provider/song',title:'Song'}`);
+  await h.evaluate("setOrbArt(player.source)");
+  assert.equal(h.calls.some(c => c.command === "track_artwork"), false);
+  assert.equal(h.evaluate("player.artwork"), null);
+});
+
 test("temporary art failure retries while playing and can recover", async () => {
   let attempt = 0;
   const h = artHarness(command => {
@@ -209,7 +325,7 @@ test("a quiet stop clears artwork and cancels pending artwork retries", async ()
   h.context.window.aerowaveOrb = { ok: true, setImage: picture => { h.lastArt = picture; } };
   await h.evaluate("setOrbArt(player.source)");
   const retry = h.evaluate("orbArtTimer");
-  h.evaluate(`showStationArt(player.source, ${JSON.stringify(png)}); stopPlayback(true)`);
+  h.evaluate(`showOrbArt(player.source, ${JSON.stringify(png)}); stopPlayback(true)`);
   assert.equal(h.lastArt, null);
   assert.equal(h.evaluate("player.artwork"), null);
   assert.equal(h.evaluate("orbArtTimer"), null);

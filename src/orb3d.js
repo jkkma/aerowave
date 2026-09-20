@@ -90,14 +90,14 @@ const state = {
 let logoToken = 0;
 
 /**
- * The palette the crystal is drawn from: seven aqua steps, deep to bright.
+ * The palette the crystal is drawn from: seven aqua steps, clear to pale.
  *
  * Few colours on purpose. An N64 texture was usually a colour-indexed bitmap
  * with a palette of sixteen or two hundred and fifty six, and what it could
  * not afford in colours it made up in dithering - so the count is the look.
  */
 const CRYSTAL_RAMP = [
-  "#07384f", "#0b5c7b", "#1388aa", "#27b3ce", "#59d5df", "#9cede9", "#ddfff5",
+  "#27b3ce", "#43c4d6", "#59d5df", "#7ae2e4", "#9cede9", "#bdf6ef", "#ddfff5",
 ];
 
 /**
@@ -305,17 +305,12 @@ function logoCanvas(image) {
   const ctx = canvas.getContext("2d");
   ctx.imageSmoothingEnabled = false;
 
-  // A narrow aqua setting keeps the artwork part of the crystal. The pale
-  // inset preserves transparent wordmarks without cropping wide or tall art.
-  ctx.fillStyle = "#1388aa";
-  ctx.fillRect(0, 0, size, size);
-  ctx.fillStyle = "#9cede9";
-  ctx.fillRect(3, 3, size - 6, size - 6);
+  // Fill the whole texture first so transparent parts of the source stay
+  // white after the artwork is cropped to cover the ball.
   ctx.fillStyle = LOGO_BACKING;
-  ctx.fillRect(6, 6, size - 12, size - 12);
+  ctx.fillRect(0, 0, size, size);
 
-  const inset = 12;
-  const scale = Math.min((size - inset * 2) / image.width, (size - inset * 2) / image.height);
+  const scale = Math.max(size / image.width, size / image.height);
   const w = image.width * scale;
   const h = image.height * scale;
   ctx.drawImage(image, (size - w) / 2, (size - h) / 2, w, h);
@@ -448,9 +443,6 @@ function frame(now) {
 
 /** Click it and it spins up - and keeps turning the way you shoved it. */
 function wireClicks(host) {
-  const ring = document.createElement("div");
-  ring.className = "orb-kick";
-  host.appendChild(ring);
   let flashTimer = null;
 
   host.addEventListener("pointerdown", (event) => {
@@ -462,11 +454,6 @@ function wireClicks(host) {
     // And it settles back to turning that way, rather than to whichever way
     // it happened to be turning before.
     state.dir = dir;
-
-    // Restart the ripple even if one is already running.
-    ring.classList.remove("go");
-    void ring.offsetWidth;
-    ring.classList.add("go");
 
     host.classList.add("kick");
     clearTimeout(flashTimer);

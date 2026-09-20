@@ -1236,11 +1236,15 @@ async function play(source, opts = {}) {
 }
 
 /*
- * The orb wears the artwork of whatever station is playing.
+ * The orb wears the artwork of whatever is playing.
  *
  * A station kept from BROWSE arrives with its own. The ones this app ships
  * with, and anything typed in by hand, have none - so the directory is asked
  * once what the station looks like and the answer is written back onto it.
+ * A desktop folder track can carry its own embedded picture. Rust extracts it
+ * from the already-granted file, then the same decoder prepares it for the orb
+ * and system media controls. Android's native player owns content URIs and its
+ * media session; the desktop command cannot open those grants.
  *
  * Either way the picture itself is fetched in Rust and handed over as a data
  * URL: the content security policy allows the webview no remote images, and
@@ -1252,6 +1256,10 @@ async function play(source, opts = {}) {
 const orbArt = new Map();
 /** How many to hold on to: a few hundred kilobytes each, so not many. */
 const ORB_ART_CACHE = 8;
+const trackArt = new Map();
+const STATION_ART_MAX_CHARS = 710000;
+const TRACK_ART_MAX_BYTES = 8 * 1024 * 1024;
+const TRACK_ART_MAX_CHARS = Math.ceil(TRACK_ART_MAX_BYTES / 3) * 4 + 128;
 const orbArtMisses = new Map();
 const ORB_ART_RETRY_MS = 15000;
 const ORB_ART_MISS_MS = 5 * 60000;
@@ -1261,16 +1269,16 @@ let orbArtSource = null;
 let orbArtRequest = 0;
 let orbArtTimer = null;
 
-async function decodedStationArt(picture) {
+async function decodedOrbArt(picture, maxChars = STATION_ART_MAX_CHARS, subject = "Station") {
   // Decode before caching or persisting an address. Magic bytes alone also
   // accept truncated files, and the orb cannot tell the caller they failed.
   if (typeof picture !== "string" || !/^data:image\/[a-z0-9.+-]+;base64,/i.test(picture)
-      || picture.length > 710000) throw new Error("Invalid station artwork");
+      || picture.length > maxChars) throw new Error(`Invalid ${subject.toLowerCase()} artwork`);
   const image = new Image();
   image.src = picture;
   await image.decode();
   const w = image.naturalWidth, h = image.naturalHeight;
-  if (!w || !h || w > 8192 || h > 8192 || w * h > 16777216) throw new Error("Station artwork is too large");
+  if (!w || !h || w > 8192 || h > 8192 || w * h > 16777216) throw new Error(`${subject} artwork is too large`);
   const canvas = document.createElement("canvas");
   const scale = Math.min(1, 256 / Math.max(w, h));
   canvas.width = Math.max(1, Math.round(w * scale));
@@ -1289,7 +1297,7 @@ function syncAndroidArtwork(source) {
   }).catch(() => {});
 }
 
-function showStationArt(source, picture) {
+function showOrbArt(source, picture) {
   if (source && player.source !== source) return;
   player.artwork = picture;
   if (window.aerowaveOrb?.ok) window.aerowaveOrb.setImage(picture);
@@ -1299,25 +1307,51 @@ function showStationArt(source, picture) {
 
 async function setOrbArt(source, retry = 0) {
   const station = source && source.kind === "station" ? source : null;
+  const track = source && source.kind === "folder" && typeof source.path === "string" && source.path ? source : null;
   const stationUrl = station?.url;
+  const trackPath = track?.path;
   const savedLogo = station?.logo || "";
-  const key = station ? JSON.stringify([stationUrl, savedLogo]) : "";
+  const key = station ? JSON.stringify([stationUrl, savedLogo])
+    : track ? JSON.stringify(["folder", trackPath]) : "";
   if (key && key === orbArtKey && source === orbArtSource && !retry) return;
   clearTimeout(orbArtTimer);
   orbArtTimer = null;
   orbArtKey = key;
   orbArtSource = source;
   const mine = ++orbArtRequest;
-  const current = () => mine === orbArtRequest && player.source === source && station.url === stationUrl;
+  const current = () => mine === orbArtRequest && player.source === source
+    && (station ? station.url === stationUrl : track ? track.path === trackPath : !source);
   if (!key) {
-    showStationArt(null, null);
+    showOrbArt(null, null);
+    return;
+  }
+  if (track) {
+    // Never leave the previous track's cover visible while extraction or image
+    // decoding is in flight, or when this file has no usable embedded picture.
+    showOrbArt(source, null);
+    if (trackArt.has(key)) {
+      showOrbArt(source, trackArt.get(key));
+      return;
+    }
+    if (IS_ANDROID) return;
+    try {
+      const data = await invoke("track_artwork", { path: trackPath });
+      if (!current() || !data) return;
+      const picture = await decodedOrbArt(data, TRACK_ART_MAX_CHARS, "Track");
+      if (!current()) return;
+      trackArt.set(key, picture);
+      while (trackArt.size > ORB_ART_CACHE) trackArt.delete(trackArt.keys().next().value);
+      showOrbArt(source, picture);
+    } catch {
+      // Missing and corrupt embedded pictures both leave the freshly cleared orb.
+    }
     return;
   }
   if (orbArt.has(key)) {
-    showStationArt(source, orbArt.get(key));
+    showOrbArt(source, orbArt.get(key));
     return;
   }
-  showStationArt(source, null);
+  showOrbArt(source, null);
   if ((orbArtMisses.get(key) || 0) > Date.now()) return;
   const excludedUrls = [];
   let picture = null;
@@ -1330,7 +1364,7 @@ async function setOrbArt(source, retry = 0) {
       try { data = await invoke("station_logo", { url: from }); }
       catch (error) { temporaryFailure = error?.retryable !== false; }
       if (data) {
-        try { picture = await decodedStationArt(data); }
+        try { picture = await decodedOrbArt(data); }
         catch { /* A permanent decode failure can still have a working replacement. */ }
       }
       if (!picture) excludedUrls.push(from);
@@ -1345,7 +1379,7 @@ async function setOrbArt(source, retry = 0) {
       if (excludedUrls.includes(found.url)) break;
       excludedUrls.push(found.url);
       try {
-        picture = await decodedStationArt(found.picture);
+        picture = await decodedOrbArt(found.picture);
         from = found.url;
       } catch { /* Try the next independently matched station image. */ }
     }
@@ -1373,7 +1407,7 @@ async function setOrbArt(source, retry = 0) {
     saveStations();
   }
   station.logo = from;
-  showStationArt(source, picture);
+  showOrbArt(source, picture);
 }
 
 function startMetadata(source, initialInfo = null) {
