@@ -1,6 +1,8 @@
 //! Local audio folders: scanning and picking a random track.
 
 use std::collections::VecDeque;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -65,6 +67,13 @@ pub fn info(dir: &Path) -> FolderInfo {
         count: files.len(),
         sample,
     }
+}
+
+/// Read embedded artwork without making a shuffle failure a playback failure.
+/// Parsing and its limits live in core; this module only owns filesystem I/O.
+pub fn track_artwork(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    aerowave_core::track_art::embedded_artwork_data_url(&mut BufReader::new(file))
 }
 
 /// Remembers what was played recently so a small folder does not repeat

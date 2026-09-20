@@ -534,6 +534,34 @@ fn local_file_url(
     }
 }
 
+/// Embedded artwork for a file the shuffle picker has already granted.
+/// Metadata parsing does blocking file I/O, so keep it off the async runtime.
+#[tauri::command]
+#[cfg(desktop)]
+async fn track_artwork(app: AppHandle, path: String) -> Result<Option<String>, String> {
+    if !app.asset_protocol_scope().is_allowed(&path) {
+        return Err("audio file has not been granted access".to_string());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = std::fs::canonicalize(path)
+            .map_err(|e| format!("could not locate audio file: {e}"))?;
+        if !app.asset_protocol_scope().is_allowed(&path) {
+            return Err("audio file has not been granted access".to_string());
+        }
+        Ok(library::track_artwork(&path))
+    })
+    .await
+    .map_err(|e| format!("artwork reader stopped unexpectedly: {e}"))?
+}
+
+#[tauri::command]
+#[cfg(mobile)]
+async fn track_artwork(path: String) -> Result<Option<String>, String> {
+    let _ = path;
+    Ok(None)
+}
+
 #[tauri::command]
 async fn probe_stream(
     url: String,
@@ -944,6 +972,7 @@ pub fn run() {
             probe_stream,
             relay_url,
             local_file_url,
+            track_artwork,
             hls_session,
             hls_close,
             browse_stations,

@@ -317,25 +317,11 @@ body.playing .orb {
 }
 body.playing .orb.gl { box-shadow: none; }
 
-.orb-kick {
-  position: absolute;
-  inset: 4%;
-  border-radius: 50%;
-  border: 2px solid rgba(220, 252, 255, .9);
-  opacity: 0;
-  pointer-events: none;
-}
-.orb-kick.go { animation: kickring .5s steps(8, end); }
-@keyframes kickring {
-  0%   { transform: scale(.98);  opacity: .9; border-width: 3px; }
-  100% { transform: scale(1.32); opacity: 0;  border-width: 1px; }
-}
-
 /* the hop: crouch, up, squash on landing, small rebound - half a second */
 .orb.gl,
 body.playing .orb.gl { animation: none; }
 .orb.gl.kick,
-body.playing .orb.gl.kick { animation: orbhop .5s steps(3, end); }
+body.playing .orb.gl.kick { animation: orbhop .5s ease-out; }
 @keyframes orbhop {
   0%   { transform: translateY(0)     scale(1, 1); }
   12%  { transform: translateY(-3px)  scale(.96, 1.06); }
@@ -1054,7 +1040,7 @@ select.field option { background: #062434; color: var(--foam); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .bloom, .shafts, .ringpulse, .orb, .orb-kick { animation: none !important; }
+  .bloom, .shafts, .ringpulse, .orb { animation: none !important; }
 }
 
 /* An alarm that could not find anything to play still has to be impossible

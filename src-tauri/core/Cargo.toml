@@ -1,12 +1,16 @@
 [package]
 name = "aerowave-core"
-version = "0.11.9"
+version = "0.12.0"
 edition = "2021"
 license = "MIT"
 description = "Parsing and scheduling rules, with no GUI dependencies so they can be unit tested"
 
 [dependencies]
+base64 = "0.22"
 chrono = "0.4"
+# 0.22.3 raised its MSRV to Rust 1.85; Aerowave still supports Rust 1.77.
+# Compressed ID3 frames are rare and can expand beyond the input read budget.
+lofty = { version = "=0.21.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
