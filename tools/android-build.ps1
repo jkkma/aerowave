@@ -120,7 +120,7 @@ function Publish-VerifiedReleaseApk {
     }
     $certificateMatch = [regex]::Match(
         ($verificationOutput | Out-String),
-        '(?im)^Signer #1 certificate SHA-256 digest:\s*([0-9a-f]+)\s*$'
+        '(?im)^(?:Signer #1 certificate|V[0-9]+(?:\.[0-9]+)? Signer: certificate) SHA-256 digest:\s*([0-9a-f]+)\s*$'
     )
     if (-not $certificateMatch.Success) {
         throw 'apksigner did not report a SHA-256 signing-certificate digest.'

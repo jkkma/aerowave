@@ -33,7 +33,7 @@ const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 if (IS_ANDROID) {
   $$('[data-tauri-drag-region]').forEach((element) => element.removeAttribute("data-tauri-drag-region"));
   $("#build-label").textContent = "Android";
-  $("#np-track").textContent = "Choose a station or browse the directory.";
+  showTrackText("Choose a station or browse the directory.");
 }
 
 let state = { stations: [], alarms: [], settings: {} };
@@ -259,7 +259,7 @@ function stopPlayback(quiet, { skipNative = false } = {}) {
   if (!quiet) {
     setStatus("Stopped", "");
     $("#np-station").textContent = "Ready to listen";
-    $("#np-track").textContent = stoppedTrackHint();
+    showTrackText(stoppedTrackHint());
     $("#np-meta").textContent = "";
   }
   refreshBrowseIndicators();
@@ -703,9 +703,15 @@ function cancelStationTest() {
   stationTest = null;
 }
 
+function showTrackText(text) {
+  const track = $("#np-track");
+  track.textContent = text || "";
+  track.title = track.textContent;
+}
+
 function showNowPlaying(title, sub, meta) {
   $("#np-station").textContent = title || "";
-  $("#np-track").textContent = sub || "";
+  showTrackText(sub);
   if (meta !== undefined) $("#np-meta").textContent = meta || "";
   updateMediaMetadata();
 }
@@ -728,8 +734,8 @@ function setTrackTitle(title) {
   player.trackTitle = String(title || "").trim();
   const source = player.source;
   if (!source) return;
-  $("#np-track").textContent = source.kind === "station" && state.settings.showMetadata === false
-    ? source.url : player.trackTitle;
+  showTrackText(source.kind === "station" && state.settings.showMetadata === false
+    ? source.url : player.trackTitle);
   updateMediaMetadata();
 }
 
@@ -1551,7 +1557,7 @@ function failure(detail, opts = {}) {
       stopPlayback(true);
       setOrbArt(null);
       setStatus("Stream unavailable", "error");
-      $("#np-track").textContent = "This station is not playing. Try another one.";
+      showTrackText("This station is not playing. Try another one.");
       say(source.title + " is unavailable: " + detail, "bad");
       return;
     }
@@ -2052,6 +2058,8 @@ let browseOffset = 0;
 let browseMore = false;
 let browseBusy = false;
 let browseLooked = false;
+/** Whether the current result query has completed successfully. */
+let browseSearched = false;
 let browseFiltersLoading = null;
 const pendingBrowseAdds = new Set();
 /**
@@ -2082,15 +2090,13 @@ const browseSaved = (url) => state.stations.some((s) => sameStream(s.url, url));
 const browseSaving = (url) => Array.from(pendingBrowseAdds).some((s) => sameStream(s.url, url));
 
 /**
- * How the result list reads: country first, then the station name.
+ * How each new page reads: country first, then the station name.
  *
- * The directory pages in name order, so every page is a slice of one
- * alphabet. Sorting the whole list each time a page lands therefore keeps the
- * names in order inside each country instead of restarting the alphabet at
- * every MORE. Countries drop a leading "The" the way the country dropdown
- * does, so a fifth of the world does not file under T, and a station the
- * directory has no country for sorts last - a blank heading the list reads as
- * a bug rather than as a station nobody labelled.
+ * Already loaded rows keep their place when MORE arrives. Sorting the entire
+ * list would repeatedly move stations without a country to the bottom, making
+ * them look like new results while the new stations appeared above them.
+ * Countries drop a leading "The" the way the country dropdown does, and a
+ * station without a country sorts last within its page.
  */
 function byCountryThenName(a, b) {
   const country = (c) => {
@@ -2123,6 +2129,7 @@ async function browseSearch(more) {
   const name = more ? browseName : $("#browse-query").value.trim();
   if (!more) {
     browseName = name;
+    browseSearched = false;
     browseResults = [];
     browseOffset = 0;
     browseMore = false;
@@ -2155,6 +2162,7 @@ async function browseSearch(more) {
     // A duplicate can land on a later page when another submission sorts by a
     // different name. Keep one row, but let votes choose it across pages just
     // as the backend already does within one page.
+    const appendAt = browseResults.length;
     for (const station of page.stations) {
       const at = browseResults.findIndex((seen) => sameStream(seen.url, station.url));
       if (at < 0) browseResults.push(station);
@@ -2162,12 +2170,14 @@ async function browseSearch(more) {
         browseResults[at] = station;
       }
     }
-    browseResults.sort(byCountryThenName);
+    const added = browseResults.splice(appendAt).sort(byCountryThenName);
+    browseResults.push(...added);
     // `offered` is counted before cleanup, so zero surviving rows cannot mean
     // end-of-results. Rust applies the explicit offset cap and reports this.
     browseMore = typeof page.hasMore === "boolean"
       ? page.hasMore
       : page.offered >= BROWSE_PAGE && offset < BROWSE_MAX_OFFSET;
+    browseSearched = true;
     browseNote(
       browseResults.length
         ? `${browseResults.length} from radio-browser.info — press a row to listen, + to keep it`
@@ -2197,7 +2207,12 @@ const asTag = (t) => [t.value, t.name, t.stations];
  * both are a convenience - searching still works if they will not load.
  */
 function loadBrowseFilters() {
-  if (browseFiltersLoading) return browseFiltersLoading;
+  // A submitted name or filter change makes every old count stale. Refresh
+  // immediately even when the global lists are still loading; each dropdown's
+  // generation guard prevents older facet replies from painting over this one.
+  if (browseFiltersLoading) {
+    return Promise.all([refreshBrowseFilters(), browseFiltersLoading]);
+  }
   const jobs = [];
   if (!browseCountries) {
     jobs.push(
@@ -2215,13 +2230,17 @@ function loadBrowseFilters() {
   }
   if (!jobs.length) return refreshBrowseFilters();
 
-  const loading = Promise.all(jobs)
-    .then(() => refreshBrowseFilters())
+  let loading;
+  loading = Promise.all(jobs)
+    .then(() => {
+      if (browseFiltersLoading === loading) browseFiltersLoading = null;
+      return refreshBrowseFilters();
+    })
     .finally(() => {
       if (browseFiltersLoading === loading) browseFiltersLoading = null;
     });
   browseFiltersLoading = loading;
-  return loading;
+  return Promise.all([refreshBrowseFilters(), loading]);
 }
 
 /** What one filter leaves available to the other, worked out once and kept. */
@@ -2252,6 +2271,7 @@ function facetsFor(query) {
  */
 function facetQuery(base, omit) {
   const query = {};
+  if (browseName) query.name = browseName;
   if (base.countryCode) query.countryCode = base.countryCode;
   if (base.tag) query.tag = base.tag;
   // `omit` leaves out the filter the answer is for. Counting formats under the
@@ -2272,14 +2292,14 @@ function facetQuery(base, omit) {
  * has 68 stations and none of them are 320k - and a filter that lies about
  * what it will find is worse than one that offers no count at all.
  *
- * The tally is megabytes, so it happens only when a filter changes - not on
- * every search - and each answer is kept for the rest of the run.
+ * The tally can be megabytes, so each submitted name and filter combination
+ * shares one cached request for the rest of the run.
  */
 async function refreshBrowseFilters() {
   const jobs = [];
-  // Format and bitrate narrow both lists, so neither global list is right
-  // any more once one of them is set.
-  const narrowed = !!browseCodec || !!browseBitrate;
+  // Name, format and bitrate narrow both lists, so neither global list is
+  // right any more once one of them is set.
+  const narrowed = !!browseName || !!browseCodec || !!browseBitrate;
 
   if (browseCountry || narrowed) {
     jobs.push(
@@ -2291,6 +2311,7 @@ async function refreshBrowseFilters() {
   } else {
     invalidateBrowseNarrow("#browse-tag");
     setBrowseFallback("#browse-tag", [], asTag, browseTag, browseTagLabel);
+    $("#browse-tag").disabled = !!browseFiltersLoading;
   }
 
   if (browseTag || narrowed) {
@@ -2303,13 +2324,14 @@ async function refreshBrowseFilters() {
   } else {
     invalidateBrowseNarrow("#browse-country");
     setBrowseFallback("#browse-country", [], asCountry, browseCountry, browseCountryLabel);
+    $("#browse-country").disabled = !!browseFiltersLoading;
   }
 
   // The fixed lists are only worth counting once something else is narrowing
   // them. With nothing set the answer would be the whole directory, and a
   // tally is megabytes - the browse tab is meant to cost nothing until asked.
   const place = { countryCode: browseCountry, tag: browseTag };
-  const anywhereElse = !!browseCountry || !!browseTag;
+  const anywhereElse = !!browseName || !!browseCountry || !!browseTag;
   if (anywhereElse || !!browseBitrate) {
     jobs.push(narrowFixed("#browse-codec", facetQuery(place, "codec"), (f) => f.codecs, "format"));
   } else {
@@ -2363,6 +2385,10 @@ function invalidateBrowseNarrow(selector) {
 
 function resetFixed(selector) {
   invalidateBrowseNarrow(selector);
+  clearFixedCounts(selector);
+}
+
+function clearFixedCounts(selector) {
   Array.prototype.forEach.call($(selector).options, (option) => {
     if (option.dataset.label) option.textContent = option.dataset.label;
     option.disabled = false;
@@ -2373,6 +2399,8 @@ async function narrowFixed(selector, query, pick, what) {
   const select = $(selector);
   const mine = (browseNarrows.get(selector) || 0) + 1;
   browseNarrows.set(selector, mine);
+  clearFixedCounts(selector);
+  select.disabled = true;
   try {
     const facets = await facetsFor(query);
     if (browseNarrows.get(selector) !== mine) return;
@@ -2380,8 +2408,10 @@ async function narrowFixed(selector, query, pick, what) {
   } catch {
     if (browseNarrows.get(selector) !== mine) return;
     // Leave the plain list rather than a half-annotated one.
-    resetFixed(selector);
+    clearFixedCounts(selector);
     say(`could not work out which ${what}s are available`, "bad");
+  } finally {
+    if (browseNarrows.get(selector) === mine) select.disabled = false;
   }
 }
 
@@ -2394,19 +2424,22 @@ async function narrow(selector, query, pick, unpack, what) {
   // chosen minutes ago, without firing a change event to say so.
   const mine = (browseNarrows.get(selector) || 0) + 1;
   browseNarrows.set(selector, mine);
+  const chosen = filterNow(selector);
+  const fallback = selector === "#browse-tag" ? browseTags : browseCountries;
+  setBrowseFallback(selector, fallback || [], unpack, chosen.value, chosen.label);
   select.disabled = true;
   try {
     const facets = await facetsFor(query);
     if (browseNarrows.get(selector) !== mine) return;
-    const chosen = filterNow(selector);
-    setBrowseOptions(selector, pick(facets), unpack, chosen.value, chosen.label, facets.sampled);
+    const current = filterNow(selector);
+    setBrowseOptions(selector, pick(facets), unpack, current.value, current.label, facets.sampled);
   } catch {
     if (browseNarrows.get(selector) !== mine) return;
     // The old list belongs to different filters. Replace its now-false counts
     // with the global uncounted choices, while keeping the current selection.
-    const chosen = filterNow(selector);
-    const fallback = selector === "#browse-tag" ? browseTags : browseCountries;
-    setBrowseFallback(selector, fallback || [], unpack, chosen.value, chosen.label);
+    const current = filterNow(selector);
+    const currentFallback = selector === "#browse-tag" ? browseTags : browseCountries;
+    setBrowseFallback(selector, currentFallback || [], unpack, current.value, current.label);
     say(`could not work out which ${what}s are available`, "bad");
   } finally {
     if (browseNarrows.get(selector) === mine) select.disabled = false;
@@ -2462,7 +2495,7 @@ function setBrowseOptions(selector, entries, unpack, value, label, sampled) {
     const option = document.createElement("option");
     option.value = value;
     option.dataset.label = label || value;
-    option.textContent = `${label || value} (0)`;
+    option.textContent = `${label || value} (0${sampled ? "+" : ""})`;
     select.append(option);
   }
   select.value = value;
@@ -2553,7 +2586,9 @@ function renderBrowse() {
       ? "Searching…"
       : browseMore
         ? "Nothing usable was on this page."
-        : "Search for a station, or explore by country and genre.";
+        : browseSearched
+          ? "No stations match this search."
+          : "Search for a station, or explore by country and genre.";
     list.append(li);
   } else browseResults.forEach((st, i) => {
     const li = document.createElement("li");
@@ -4054,23 +4089,19 @@ function wire() {
   $("#browse-country").addEventListener("change", (e) => {
     browseCountry = e.target.value;
     browseCountryLabel = labelOf(e.target);
-    refreshBrowseFilters();
     browseSearch(false);
   });
   $("#browse-tag").addEventListener("change", (e) => {
     browseTag = e.target.value;
     browseTagLabel = labelOf(e.target);
-    refreshBrowseFilters();
     browseSearch(false);
   });
   $("#browse-codec").addEventListener("change", (e) => {
     browseCodec = e.target.value;
-    refreshBrowseFilters();
     browseSearch(false);
   });
   $("#browse-bitrate").addEventListener("change", (e) => {
     browseBitrate = e.target.value;
-    refreshBrowseFilters();
     browseSearch(false);
   });
 

@@ -49,6 +49,7 @@ python -B tools/hooks/check_seam.py
 python -B -m unittest discover -s tools/hooks/tests -v
 node --test tools/tests/*.test.cjs
 cargo run --manifest-path src-tauri/Cargo.toml --example networkcheck --locked
+cargo run --manifest-path src-tauri/Cargo.toml --example directorycheck --locked
 ```
 
 The frontend tests run the actual application functions in an isolated DOM/media
@@ -58,8 +59,16 @@ WebView2 decoding or Windows keyboard delivery.
 
 `networkcheck` starts local fixture servers and exercises the production relay
 and HLS client without opening the app or its settings. It checks ICY stripping,
-redirect/address validation and byte ranges, then waits for the actual 8-second
+XML now-playing titles through the probe and relay, redirect/address validation
+and byte ranges, then waits for the actual 8-second
 response-head and 30-second idle-stream deadlines. It makes no broadcaster calls.
+
+`directorycheck` uses local fixture servers to check directory recovery after a
+dropped connection, server error or malformed response, including the case where
+only one mirror exists. It also checks the retry count and shared time limit.
+Pass `-- --live` to additionally check search, countries and genres against the
+public directory, including agreement between name-filtered counts and search
+results, without opening the app or its settings.
 
 The core-test hook owns its subprocess tree. On Windows a job object is attached
 before Cargo can start, so a timeout terminates test descendants too. Hook JSON

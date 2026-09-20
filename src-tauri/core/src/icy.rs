@@ -1,6 +1,10 @@
 //! Reading what Icecast and Shoutcast servers hand back: playlist files and
 //! the ICY metadata blocks interleaved with the audio.
 
+use quick_xml::{events::Event, Reader};
+
+const MAX_STRUCTURED_TITLE_BYTES: usize = 255 * 16;
+
 /// Is this URL (or content type) a playlist file rather than a stream?
 pub fn looks_like_playlist(url: &str, content_type: &str) -> bool {
     let lower = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
@@ -318,7 +322,184 @@ pub fn stream_title(block: &str) -> Option<String> {
     let terminator = if quoted { rest.find("';") } else { rest.find(';') };
     let end = terminator.unwrap_or_else(|| rest.trim_end_matches('\0').trim_end().len());
     let title = rest.get(..end)?.trim();
-    Some(title.to_string())
+    Some(normalize_stream_title(title))
+}
+
+/// Some Bauer stations put an XML `RadioInfo` document inside StreamTitle.
+/// Treat an XML declaration or a `RadioInfo` root as structured: an invalid or
+/// unfamiliar document is an explicit clear, never markup or a stale song.
+fn normalize_stream_title(title: &str) -> String {
+    let declared_xml = title.starts_with("<?xml");
+    let radio_info_root = title.strip_prefix("<RadioInfo").is_some_and(|rest| {
+        matches!(
+            rest.as_bytes().first(),
+            Some(b'>') | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        )
+    });
+    if !declared_xml && !radio_info_root {
+        return title.to_string();
+    }
+    radio_info_title(title).unwrap_or_default()
+}
+
+#[derive(Clone, Copy)]
+enum RadioInfoField {
+    DaletArtist,
+    LeadArtist,
+    Song,
+    DaletTitle,
+}
+
+#[derive(Default)]
+struct RadioInfo {
+    dalet_artist: Option<String>,
+    lead_artist: Option<String>,
+    song: Option<String>,
+    dalet_title: Option<String>,
+}
+
+impl RadioInfo {
+    fn set(&mut self, field: RadioInfoField, value: String) {
+        let slot = match field {
+            RadioInfoField::DaletArtist => &mut self.dalet_artist,
+            RadioInfoField::LeadArtist => &mut self.lead_artist,
+            RadioInfoField::Song => &mut self.song,
+            RadioInfoField::DaletTitle => &mut self.dalet_title,
+        };
+        if slot.is_none() {
+            *slot = Some(value);
+        }
+    }
+
+    fn display(self) -> String {
+        let artist = nonempty(self.dalet_artist).or_else(|| nonempty(self.lead_artist));
+        let title = nonempty(self.song).or_else(|| nonempty(self.dalet_title));
+        match (artist, title) {
+            (Some(artist), Some(title)) => format!("{artist} — {title}"),
+            (Some(artist), None) => artist,
+            (None, Some(title)) => title,
+            (None, None) => String::new(),
+        }
+    }
+}
+
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
+}
+
+fn radio_info_field(name: &[u8]) -> Option<RadioInfoField> {
+    match name {
+        b"DB_DALET_ARTIST_NAME" => Some(RadioInfoField::DaletArtist),
+        b"DB_LEAD_ARTIST_NAME" => Some(RadioInfoField::LeadArtist),
+        b"DB_SONG_NAME" => Some(RadioInfoField::Song),
+        b"DB_DALET_TITLE_NAME" => Some(RadioInfoField::DaletTitle),
+        _ => None,
+    }
+}
+
+fn radio_info_title(xml: &str) -> Option<String> {
+    if xml.len() > MAX_STRUCTURED_TITLE_BYTES {
+        return None;
+    }
+
+    let mut reader = Reader::from_str(xml);
+    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut info = RadioInfo::default();
+    let mut field = None;
+    let mut field_text = String::new();
+    let mut saw_root = false;
+    let mut closed_root = false;
+
+    loop {
+        match reader.read_event().ok()? {
+            Event::Start(start) => {
+                if closed_root {
+                    return None;
+                }
+                let name = start.name().as_ref().to_vec();
+                if stack.is_empty() {
+                    if saw_root || name.as_slice() != b"RadioInfo" {
+                        return None;
+                    }
+                    saw_root = true;
+                } else if stack.len() == 2
+                    && stack[0].as_slice() == b"RadioInfo"
+                    && stack[1].as_slice() == b"Table"
+                {
+                    field = radio_info_field(&name);
+                    field_text.clear();
+                } else if field.is_some() {
+                    // The fields used for display are text-only. Reject nested
+                    // markup rather than guessing how it should be flattened.
+                    return None;
+                }
+                stack.push(name);
+            }
+            Event::Empty(empty) => {
+                if closed_root || stack.is_empty() {
+                    return None;
+                }
+                if stack.len() == 2
+                    && stack[0].as_slice() == b"RadioInfo"
+                    && stack[1].as_slice() == b"Table"
+                {
+                    if let Some(field) = radio_info_field(empty.name().as_ref()) {
+                        info.set(field, String::new());
+                    }
+                }
+            }
+            Event::Text(text) => {
+                let text = text.xml10_content().ok()?;
+                let decoded = quick_xml::escape::unescape(&text).ok()?;
+                if field.is_some() {
+                    field_text.push_str(&decoded);
+                } else if stack.is_empty() && !decoded.trim().is_empty() {
+                    return None;
+                }
+            }
+            Event::CData(text) => {
+                if field.is_some() {
+                    field_text.push_str(&text.xml10_content().ok()?);
+                } else if stack.is_empty() {
+                    return None;
+                }
+            }
+            Event::GeneralRef(reference) => {
+                let value = if let Some(character) = reference.resolve_char_ref().ok()? {
+                    character.to_string()
+                } else {
+                    let name = reference.decode().ok()?;
+                    quick_xml::escape::resolve_xml_entity(&name)?.to_string()
+                };
+                if field.is_some() {
+                    field_text.push_str(&value);
+                } else if stack.is_empty() {
+                    return None;
+                }
+            }
+            Event::End(end) => {
+                let name = end.name();
+                if stack.last().map(Vec::as_slice) != Some(name.as_ref()) {
+                    return None;
+                }
+                if stack.len() == 3 {
+                    if let Some(field) = field.take() {
+                        info.set(field, field_text.trim().to_string());
+                        field_text.clear();
+                    }
+                }
+                stack.pop();
+                if stack.is_empty() {
+                    closed_root = true;
+                }
+            }
+            Event::DocType(_) => return None,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    (saw_root && closed_root && stack.is_empty()).then(|| info.display())
 }
 
 #[cfg(test)]
@@ -373,6 +554,85 @@ mod tests {
             stream_title("StreamTitle=Artist - Track;\0\0"),
             Some("Artist - Track".to_string())
         );
+    }
+
+    #[test]
+    fn ordinary_angle_bracket_titles_are_not_mistaken_for_radio_info() {
+        assert_eq!(stream_title("StreamTitle='<3';"), Some("<3".to_string()));
+        assert_eq!(
+            stream_title("StreamTitle='  <Unknown> - Song  ';"),
+            Some("<Unknown> - Song".to_string())
+        );
+        assert_eq!(
+            stream_title("StreamTitle='<RadioInformation>Song</RadioInformation>';"),
+            Some("<RadioInformation>Song</RadioInformation>".to_string())
+        );
+    }
+
+    #[test]
+    fn reads_bauer_radio_info_and_prefers_clean_song_and_dalet_artist() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?><RadioInfo><Table><DB_ALBUM_NAME>UB40</DB_ALBUM_NAME><DB_DALET_ARTIST_NAME>UB40 &amp; Chrissie Hynde</DB_DALET_ARTIST_NAME><DB_DALET_TITLE_NAME>Breakfast In Bed PRETENDERS</DB_DALET_TITLE_NAME><DB_LEAD_ARTIST_NAME>UB40</DB_LEAD_ARTIST_NAME><DB_RADIO_NAME>M80 Pop</DB_RADIO_NAME><DB_SONG_NAME>Breakfast in Bed</DB_SONG_NAME></Table><Table1><ID>3587</ID><NAME>Chrissie Hynde</NAME></Table1></RadioInfo>"#;
+        let block = format!("StreamTitle='{xml}';StreamUrl='https://example.test/event';");
+        assert_eq!(
+            stream_title(&block).as_deref(),
+            Some("UB40 & Chrissie Hynde — Breakfast in Bed")
+        );
+    }
+
+    #[test]
+    fn radio_info_decodes_numeric_entities_and_cdata_and_uses_fallbacks() {
+        let xml = r#"<RadioInfo><Table><DB_LEAD_ARTIST_NAME><![CDATA[Earth & Fire]]></DB_LEAD_ARTIST_NAME><DB_DALET_TITLE_NAME>One &#38; Two</DB_DALET_TITLE_NAME></Table></RadioInfo>"#;
+        let block = format!("StreamTitle='{xml}';");
+        assert_eq!(
+            stream_title(&block).as_deref(),
+            Some("Earth & Fire — One & Two")
+        );
+    }
+
+    #[test]
+    fn invalid_or_unknown_structured_titles_clear_instead_of_leaking_markup() {
+        for xml in [
+            "<RadioInfo><Table><DB_SONG_NAME>Broken</Table></RadioInfo>",
+            "<?xml version=\"1.0\"?><SomethingElse><TITLE>Wrong</TITLE></SomethingElse>",
+            "<RadioInfo><Table><DB_SONG_NAME>&unknown;</DB_SONG_NAME></Table></RadioInfo>",
+        ] {
+            let block = format!("StreamTitle='{xml}';");
+            assert_eq!(stream_title(&block), Some(String::new()), "{xml}");
+        }
+    }
+
+    #[test]
+    fn empty_radio_info_is_an_explicit_clear() {
+        let xml = "<RadioInfo><Table><DB_DALET_ARTIST_NAME/><DB_SONG_NAME>  </DB_SONG_NAME></Table></RadioInfo>";
+        let block = format!("StreamTitle='{xml}';");
+        assert_eq!(stream_title(&block), Some(String::new()));
+    }
+
+    #[test]
+    fn structured_titles_are_bounded_to_the_largest_icy_block() {
+        let xml = format!(
+            "<RadioInfo><Table><DB_SONG_NAME>{}</DB_SONG_NAME></Table></RadioInfo>",
+            "x".repeat(MAX_STRUCTURED_TITLE_BYTES)
+        );
+        let block = format!("StreamTitle='{xml}';");
+        assert_eq!(stream_title(&block), Some(String::new()));
+    }
+
+    #[test]
+    fn radio_info_survives_every_relay_chunk_boundary() {
+        let xml = r#"<RadioInfo><Table><DB_DALET_ARTIST_NAME>Artist &amp; Guest</DB_DALET_ARTIST_NAME><DB_SONG_NAME><![CDATA[Song <Live>]]></DB_SONG_NAME></Table></RadioInfo>"#;
+        let block = format!("StreamTitle='{xml}';");
+        let (wire, want) = interleaved(64, &[&block]);
+        for size in 1..=wire.len() {
+            let mut strip = MetaStrip::new(64);
+            let mut audio = Vec::new();
+            let mut titles = Vec::new();
+            for piece in wire.chunks(size) {
+                titles.extend(strip.push(piece, &mut audio));
+            }
+            assert_eq!(audio, want, "audio, chunked by {size}");
+            assert_eq!(titles, ["Artist & Guest — Song <Live>"], "titles by {size}");
+        }
     }
 
     /// An ICY stream and the audio that is hiding in it: `metaint` bytes, a

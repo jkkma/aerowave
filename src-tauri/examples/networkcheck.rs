@@ -148,6 +148,42 @@ async fn native_container_metadata() {
     println!("PASS: native Ogg tags reach probes and the relay, chained clears included, without changing container bytes");
 }
 
+async fn xml_icy_titles() {
+    let xml = concat!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><RadioInfo><Table>",
+        "<DB_DALET_ARTIST_NAME>UB40 &amp; Chrissie Hynde</DB_DALET_ARTIST_NAME>",
+        "<DB_DALET_TITLE_NAME>Breakfast In Bed PRETENDERS</DB_DALET_TITLE_NAME>",
+        "<DB_LEAD_ARTIST_NAME>UB40</DB_LEAD_ARTIST_NAME>",
+        "<DB_SONG_NAME>Breakfast in Bed</DB_SONG_NAME></Table>",
+        "<Table1><NAME>Chrissie Hynde</NAME></Table1></RadioInfo>"
+    );
+    let mut body = Vec::new();
+    for title in [xml, ""] {
+        body.extend([b'a'; 16]);
+        let mut metadata = format!("StreamTitle='{title}';").into_bytes();
+        metadata.resize((metadata.len() + 15) / 16 * 16, 0);
+        body.push((metadata.len() / 16) as u8);
+        body.extend(metadata);
+    }
+    let source = icy_fixture(body, Some(16), false, false).await;
+    let expected = "UB40 & Chrissie Hynde — Breakfast in Bed";
+    let info = stream::probe(&source, true, false).await.unwrap();
+    assert_eq!(info.title.as_deref(), Some(expected));
+
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let sink = heard.clone();
+    let relay = relay::Relay::start(Arc::new(move |_, title| {
+        sink.lock().unwrap().push(title.to_string());
+    }))
+    .await
+    .unwrap();
+    let response = reqwest::get(relay.route(&source)).await.unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(response.bytes().await.unwrap().as_ref(), &[b'a'; 32]);
+    assert_eq!(*heard.lock().unwrap(), [expected, ""]);
+    println!("PASS: ICY RadioInfo XML becomes artist and song in both probes and relay events, with clears and audio bytes preserved");
+}
+
 async fn wrapped_icy_fixture() -> (String, String) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -464,6 +500,7 @@ async fn main() {
     local_files().await;
     large_interval().await;
     native_container_metadata().await;
+    xml_icy_titles().await;
     wrapped_icy_fallback().await;
     guarded_redirects().await;
     tokio::join!(raw_head_deadline(), raw_idle_deadline());

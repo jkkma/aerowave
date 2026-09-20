@@ -107,6 +107,22 @@ test("HLS titles follow playback time, honor the preference, and clear a previou
   assert.equal(h.context.navigator.mediaSession.metadata.title, "HLS");
 });
 
+test("long track titles remain available in the tooltip and media session, then clear together", async () => {
+  const h = mediaHarness();
+  await h.evaluate("play({kind:'station',url:'https://radio.test/live',title:'Station',subtitle:'…'})");
+  const title = "Artist — " + "A long song title ".repeat(40).trim();
+  h.context.incomingTitle = title;
+  h.evaluate("onStreamTitle({url:'https://radio.test/live',title:incomingTitle})");
+  assert.equal(h.el("#np-track").textContent, title);
+  assert.equal(h.el("#np-track").title, title);
+  assert.equal(h.context.navigator.mediaSession.metadata.title, title);
+  h.evaluate("onStreamTitle({url:'https://radio.test/live',title:''})");
+  assert.equal(h.el("#np-track").title, "");
+  assert.equal(h.context.navigator.mediaSession.metadata.title, "Station");
+  h.evaluate("showNowPlaying('Next station', 'Waiting for track information')");
+  assert.equal(h.el("#np-track").title, "Waiting for track information");
+});
+
 test("late metadata polling cannot replace a relay title or a newer station", async () => {
   const probe = deferred();
   const h = mediaHarness({ invoke: (command, args) => command === "probe_stream" && args.wantTitle ? probe.promise : undefined });

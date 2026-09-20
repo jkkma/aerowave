@@ -113,7 +113,295 @@ test("a failed More request keeps its retry and offset", async () => {
   assert.equal(h.evaluate("browseResults.length"), 2);
 });
 
-test("sampled zero format and bitrate buckets remain selectable", () => {
+test("More appends new rows without moving the old countryless tail", async () => {
+  const requests = [];
+  const station = (name, url, country, votes = 0) => ({ ...directoryStation(name, url, votes), country });
+  const h = browseHarness(({ query }) => {
+    requests.push(query.offset);
+    if (query.offset === 0) return {
+      offered: 40, hasMore: true, stations: [
+        station("Avant", "https://avant.test/live", ""),
+        station("Bitlis", "https://bitlis.test/live", "Türkiye", 1),
+      ],
+    };
+    if (query.offset === 40) return {
+      offered: 40, hasMore: true, stations: [
+        station("Drone", "https://drone.test/live", ""),
+        station("France", "https://france.test/live", "France"),
+        station("Bitlis updated", "http://bitlis.test/live/", "Türkiye", 10),
+        station("Avant", "http://avant.test/live/", ""),
+      ],
+    };
+    return {
+      offered: 1, hasMore: false, stations: [
+        station("Australia", "https://australia.test/live", "Australia"),
+      ],
+    };
+  });
+  seedSelects(h);
+  await h.evaluate("browseSearch(false)");
+  assert.equal(h.evaluate("JSON.stringify(browseResults.map(s => s.name))"), '["Bitlis","Avant"]');
+  await h.el("#browse-list").children.at(-1).children[0].dispatch("click");
+  assert.equal(h.evaluate("JSON.stringify(browseResults.map(s => s.name))"), '["Bitlis updated","Avant","France","Drone"]');
+  await h.el("#browse-list").children.at(-1).children[0].dispatch("click");
+  assert.equal(h.evaluate("JSON.stringify(browseResults.map(s => s.name))"), '["Bitlis updated","Avant","France","Drone","Australia"]');
+  assert.deepEqual(requests, [0, 40, 80]);
+});
+
+test("submitted name and selected filters produce matching counts and empty state", async () => {
+  const facetQueries = [];
+  const stationQueries = [];
+  const h = createHarness({ invoke(command, args) {
+    if (command === "browse_facets") {
+      const query = JSON.parse(JSON.stringify(args.query));
+      facetQueries.push(query);
+      const codecIsOmitted = query.countryCode === "DE" && !query.codec;
+      return {
+        countries: query.codec ? [] : [{ code: "DE", name: "Germany", stations: 111 }],
+        tags: query.codec ? [] : [{ value: "techno", name: "Techno", stations: 111 }],
+        codecs: codecIsOmitted
+          ? [{ key: "MP3", stations: 103 }, { key: "OGG", stations: 0 }]
+          : [],
+        bitrates: [],
+        sampled: false,
+      };
+    }
+    if (command === "browse_stations") {
+      stationQueries.push(JSON.parse(JSON.stringify(args.query)));
+      return { offered: 0, hasMore: false, stations: [] };
+    }
+    return undefined;
+  } });
+  seedSelects(h);
+  h.el("#browse-codec").append(option("OGG", "OGG"));
+  h.el("#browse-country").value = "DE";
+  h.el("#browse-codec").value = "OGG";
+  h.el("#browse-query").value = "techno";
+  h.evaluate(`browseCountries = [{code:"DE",name:"Germany",stations:50}];
+    browseTags = [{value:"techno",name:"Techno",stations:80}];
+    browseCountry = "DE"; browseCountryLabel = "Germany"; browseCodec = "OGG"`);
+
+  await h.evaluate("browseSearch(false)");
+  await h.evaluate("loadBrowseFilters()");
+
+  assert.equal(facetQueries.every((query) => query.name === "techno"), true);
+  assert.equal(facetQueries.some((query) => query.countryCode === "DE" && !query.codec), true);
+  assert.equal(facetQueries.some((query) => query.codec === "OGG" && !query.countryCode), true);
+  assert.equal(facetQueries.some((query) => query.countryCode === "DE" && query.codec === "OGG"), true);
+  assert.equal(h.el("#browse-country").selectedOptions[0].textContent, "Germany (0)");
+  assert.equal(h.el("#browse-country").selectedOptions[0].disabled, false);
+  assert.equal(h.el("#browse-codec").selectedOptions[0].textContent, "OGG (0)");
+  assert.equal(h.el("#browse-codec").selectedOptions[0].disabled, false);
+  assert.equal(h.el("#browse-list").children[0].textContent, "No stations match this search.");
+  assert.equal(h.el("#browse-note").textContent, "Nothing in the directory matches that.");
+  assert.equal(stationQueries[0].name, "techno");
+  assert.equal(stationQueries[0].countryCode, "DE");
+  assert.equal(stationQueries[0].codec, "OGG");
+});
+
+test("submitted name reaches every facet with AAC and 192k selected", async () => {
+  const facetQueries = [];
+  const h = createHarness({ invoke(command, args) {
+    if (command === "browse_facets") {
+      const query = JSON.parse(JSON.stringify(args.query));
+      facetQueries.push(query);
+      return {
+        countries: [],
+        tags: [],
+        codecs: query.codec ? [] : [{ key: "AAC", stations: 0 }],
+        bitrates: query.bitrate ? [] : [{ key: "192", stations: 0 }],
+        sampled: false,
+      };
+    }
+    if (command === "browse_stations") return { offered: 0, hasMore: false, stations: [] };
+    return undefined;
+  } });
+  seedSelects(h);
+  h.el("#browse-codec").append(option("AAC", "AAC"));
+  h.el("#browse-bitrate").append(option("192", "192k"));
+  h.el("#browse-country").value = "DE";
+  h.el("#browse-codec").value = "AAC";
+  h.el("#browse-bitrate").value = "192";
+  h.el("#browse-query").value = "techno";
+  h.evaluate(`browseCountries = [{code:"DE",name:"Germany",stations:50}]; browseTags = [];
+    browseCountry = "DE"; browseCountryLabel = "Germany";
+    browseCodec = "AAC"; browseBitrate = "192"`);
+
+  await h.evaluate("browseSearch(false)");
+  await h.evaluate("loadBrowseFilters()");
+
+  assert.equal(facetQueries.every((query) => query.name === "techno"), true);
+  assert.equal(facetQueries.some((query) => !query.countryCode && query.codec === "AAC" && query.bitrate === "192"), true);
+  assert.equal(facetQueries.some((query) => query.countryCode === "DE" && !query.codec && query.bitrate === "192"), true);
+  assert.equal(facetQueries.some((query) => query.countryCode === "DE" && query.codec === "AAC" && !query.bitrate), true);
+  assert.equal(h.el("#browse-country").selectedOptions[0].textContent, "Germany (0)");
+  assert.equal(h.el("#browse-codec").selectedOptions[0].textContent, "AAC (0)");
+  assert.equal(h.el("#browse-bitrate").selectedOptions[0].textContent, "192k (0)");
+  assert.equal(h.el("#browse-country").selectedOptions[0].disabled, false);
+  assert.equal(h.el("#browse-codec").selectedOptions[0].disabled, false);
+  assert.equal(h.el("#browse-bitrate").selectedOptions[0].disabled, false);
+  assert.equal(h.el("#browse-list").children[0].textContent, "No stations match this search.");
+});
+
+test("a filter change commits the edited name before it refreshes counts", async () => {
+  const facetQueries = [];
+  const h = createHarness({ invoke(command, args) {
+    if (command === "browse_facets") {
+      facetQueries.push(JSON.parse(JSON.stringify(args.query)));
+      return { countries: [], tags: [], codecs: [], bitrates: [], sampled: false };
+    }
+    if (command === "browse_stations") return { offered: 0, hasMore: false, stations: [] };
+    return undefined;
+  } });
+  seedSelects(h);
+  h.el("#browse-country").append(option("DE", "Germany"));
+  h.el("#browse-country").value = "DE";
+  h.el("#browse-query").value = "techno";
+  h.evaluate(`browseName = "old";
+    browseCountries = [{code:"DE",name:"Germany",stations:50}]; browseTags = [];
+    wire()`);
+
+  await h.el("#browse-country").dispatch("change");
+  await h.evaluate("loadBrowseFilters()");
+
+  assert.equal(facetQueries.length > 0, true);
+  assert.equal(facetQueries.every((query) => query.name === "techno"), true);
+  assert.equal(facetQueries.some((query) => query.name === "old"), false);
+});
+
+test("a name-only search narrows every filter from one shared facet tally", async () => {
+  const facetQueries = [];
+  const h = createHarness({ invoke(command, args) {
+    if (command === "browse_facets") {
+      facetQueries.push(JSON.parse(JSON.stringify(args.query)));
+      return {
+        countries: [{ code: "DE", name: "Germany", stations: 111 }],
+        tags: [{ value: "techno", name: "Techno", stations: 111 }],
+        codecs: [{ key: "MP3", stations: 103 }, { key: "FLAC", stations: 0 }],
+        bitrates: [{ key: "128", stations: 17 }, { key: "320", stations: 2 }],
+        sampled: false,
+      };
+    }
+    if (command === "browse_stations") return { offered: 0, hasMore: false, stations: [] };
+    return undefined;
+  } });
+  seedSelects(h);
+  h.el("#browse-query").value = "techno";
+
+  await h.evaluate("browseSearch(false)");
+  await h.evaluate("loadBrowseFilters()");
+
+  assert.deepEqual(facetQueries, [{ name: "techno" }]);
+  assert.equal(h.el("#browse-country").options[1].textContent, "Germany (111)");
+  assert.equal(h.el("#browse-tag").options[1].textContent, "Techno (111)");
+  assert.equal(h.el("#browse-codec").options[1].textContent, "MP3 (103)");
+  assert.equal(h.el("#browse-codec").options[2].textContent, "FLAC (0)");
+  assert.equal(h.el("#browse-bitrate").options[1].textContent, "128k (17)");
+  assert.equal(h.el("#browse-bitrate").options[2].textContent, "320k (2)");
+});
+
+test("unsubmitted name edits leave counts and More alone, while clearing restores globals", async () => {
+  const facetQueries = [];
+  const stationQueries = [];
+  const h = createHarness({ invoke(command, args) {
+    if (command === "browse_facets") {
+      facetQueries.push(JSON.parse(JSON.stringify(args.query)));
+      return {
+        countries: [{ code: "DE", name: "Germany", stations: 111 }],
+        tags: [{ value: "techno", name: "Techno", stations: 111 }],
+        codecs: [{ key: "MP3", stations: 103 }],
+        bitrates: [{ key: "128", stations: 17 }], sampled: false,
+      };
+    }
+    if (command === "browse_stations") {
+      stationQueries.push({ name: args.query.name, offset: args.query.offset });
+      return args.query.offset === 0 && args.query.name
+        ? { offered: 40, hasMore: true, stations: [directoryStation("Techno", "https://techno.test/live")] }
+        : { offered: 0, hasMore: false, stations: [] };
+    }
+    return undefined;
+  } });
+  seedSelects(h);
+  h.evaluate(`browseCountries = [{code:"DE",name:"Germany",stations:50}];
+    browseTags = [{value:"techno",name:"Techno",stations:80}]`);
+  h.el("#browse-query").value = "techno";
+  await h.evaluate("browseSearch(false)");
+  await h.evaluate("loadBrowseFilters()");
+  assert.equal(h.el("#browse-country").options[1].textContent, "Germany (111)");
+
+  h.el("#browse-query").value = "house";
+  await h.evaluate("browseSearch(true)");
+  assert.deepEqual(stationQueries.slice(0, 2), [
+    { name: "techno", offset: 0 }, { name: "techno", offset: 40 },
+  ]);
+  assert.deepEqual(facetQueries, [{ name: "techno" }]);
+  assert.equal(h.el("#browse-country").options[1].textContent, "Germany (111)");
+
+  h.el("#browse-query").value = "";
+  await h.evaluate("browseSearch(false)");
+  await h.evaluate("loadBrowseFilters()");
+  assert.deepEqual(stationQueries.at(-1), { name: "", offset: 0 });
+  assert.deepEqual(facetQueries, [{ name: "techno" }]);
+  assert.equal(h.el("#browse-country").options[1].textContent, "Germany (50)");
+  assert.equal(h.el("#browse-tag").options[1].textContent, "Techno (80)");
+  assert.equal(h.el("#browse-codec").options[1].textContent, "MP3");
+  assert.equal(h.el("#browse-bitrate").options[1].textContent, "128k");
+});
+
+test("changed queries clear stale counts and reject delayed facets while global lists load", async () => {
+  const countries = deferred();
+  const tags = deferred();
+  const oldFacets = deferred();
+  const newFacets = deferred();
+  const h = createHarness({ invoke(command, args) {
+    if (command === "browse_countries") return countries.promise;
+    if (command === "browse_tags") return tags.promise;
+    if (command === "browse_facets") {
+      if (args.query.name === "old") return oldFacets.promise;
+      if (args.query.name === "new") return newFacets.promise;
+    }
+    return undefined;
+  } });
+  seedSelects(h);
+  const loading = h.evaluate('browseName = "old"; loadBrowseFilters()');
+  oldFacets.resolve({
+    countries: [{ code: "OLD", name: "Old count", stations: 9 }],
+    tags: [{ value: "old", name: "Old tag", stations: 9 }],
+    codecs: [{ key: "MP3", stations: 9 }],
+    bitrates: [{ key: "128", stations: 9 }], sampled: false,
+  });
+  await flush();
+  assert.equal(h.el("#browse-country").options[1].textContent, "Old count (9)");
+  assert.equal(h.el("#browse-codec").options[1].textContent, "MP3 (9)");
+
+  h.evaluate('browseName = "new"; loadBrowseFilters()');
+  assert.deepEqual(h.el("#browse-country").options.map((entry) => entry.textContent), ["Any country"]);
+  assert.equal(h.el("#browse-country").disabled, true);
+  assert.equal(h.el("#browse-codec").options[1].textContent, "MP3");
+  assert.equal(h.el("#browse-codec").disabled, true);
+
+  h.evaluate('browseName = ""; loadBrowseFilters()');
+  assert.deepEqual(h.el("#browse-country").options.map((entry) => entry.textContent), ["Any country"]);
+  assert.equal(h.el("#browse-country").disabled, true);
+  assert.equal(h.el("#browse-codec").disabled, false);
+  newFacets.resolve({
+    countries: [{ code: "NEW", name: "New count", stations: 7 }],
+    tags: [{ value: "new", name: "New tag", stations: 7 }],
+    codecs: [{ key: "MP3", stations: 7 }],
+    bitrates: [{ key: "128", stations: 7 }], sampled: false,
+  });
+  await flush();
+  assert.deepEqual(h.el("#browse-country").options.map((entry) => entry.textContent), ["Any country"]);
+  assert.equal(h.el("#browse-codec").options[1].textContent, "MP3");
+
+  countries.resolve([{ code: "DE", name: "Germany", stations: 50 }]);
+  tags.resolve([{ value: "techno", name: "Techno", stations: 80 }]);
+  await loading;
+  assert.deepEqual(h.el("#browse-country").options.map((entry) => entry.textContent), ["Any country", "Germany (50)"]);
+  assert.deepEqual(h.el("#browse-tag").options.map((entry) => entry.textContent), ["Any genre", "Techno (80)"]);
+});
+
+test("sampled zero format, bitrate and selected dynamic buckets remain selectable", () => {
   const h = createHarness();
   seedSelects(h);
   h.evaluate(`annotateFixed("#browse-codec", [{key:"MP3",stations:5000}], true);
@@ -127,6 +415,10 @@ test("sampled zero format and bitrate buckets remain selectable", () => {
     annotateFixed("#browse-bitrate", [{key:"128",stations:10}], false)`);
   assert.equal(h.el("#browse-codec").options[2].disabled, true);
   assert.equal(h.el("#browse-bitrate").options[2].disabled, true);
+
+  h.evaluate(`setBrowseOptions("#browse-country", [], asCountry, "DE", "Germany", true)`);
+  assert.equal(h.el("#browse-country").selectedOptions[0].textContent, "Germany (0+)");
+  assert.equal(h.el("#browse-country").selectedOptions[0].disabled, false);
 });
 
 test("a failed facet update replaces stale counts with uncounted global choices", async () => {
