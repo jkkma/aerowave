@@ -12,6 +12,7 @@ pub mod directory;
 pub mod icy;
 pub mod local_media;
 pub mod network;
+pub mod persistence;
 pub mod power;
 pub mod ring;
 pub mod schedule;

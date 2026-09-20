@@ -2,8 +2,8 @@
    The orb: one smoothly lit ball, turning slowly on a vertical axis.
 
    A smooth-shaded sphere with a 64-pixel texture wrapped around it, rendered
-   into a small buffer and scaled up with hard pixel edges. Its aqua veins
-   make the rotation visible; the light follows the round surface without
+   into a small buffer and scaled up with hard pixel edges. Its cyan shading
+   makes the rotation visible; the light follows the round surface without
    exposing the triangles underneath.
 
    Diffuse lighting and a brightened rim give it volume without a bright
@@ -52,9 +52,9 @@ const LOGO_SIZE = 128;
 const LOGO_BACKING = "#ffffff";
 /** How many times a picture is repeated around the ball, and top to bottom. */
 const LOGO_REPEAT = [2, 1];
-/** A subdued crystal glow and a neutral lift beneath station art, so its
+/** A clear blue crystal glow and a neutral lift beneath station art, so its
  *  colours remain readable on the shadow side without a cyan wash. */
-const CORE_EMISSIVE = 0x031b25;
+const CORE_EMISSIVE = 0x054457;
 const LOGO_EMISSIVE = 0x0e1a20;
 /** The shove a click gives it, tuned to be spent in about half a second. */
 const KICK_SPEED = 6.5;
@@ -90,15 +90,25 @@ const state = {
 let logoToken = 0;
 
 /**
- * The palette the crystal is drawn from: seven aqua steps, clear to pale.
+ * The palette the crystal is drawn from: seven cyan steps, clear to icy blue.
  *
  * Few colours on purpose. An N64 texture was usually a colour-indexed bitmap
  * with a palette of sixteen or two hundred and fifty six, and what it could
  * not afford in colours it made up in dithering - so the count is the look.
  */
 const CRYSTAL_RAMP = [
-  "#27b3ce", "#43c4d6", "#59d5df", "#7ae2e4", "#9cede9", "#bdf6ef", "#ddfff5",
+  "#147fae", "#2aa5cc", "#50d3f1", "#6edff5", "#90eafa", "#b6f4fc", "#ddfcff",
 ];
+
+// Choose the pattern once per launch. Returning from station art keeps this
+// same crystal, while a fresh app run gets different shapes and shades.
+const CRYSTAL_PATTERN = {
+  seed: Math.floor(Math.random() * 4294967296),
+  cells: 2 + Math.floor(Math.random() * 4),
+  warp: 12 + Math.random() * 16,
+  darkest: 0.04 + Math.random() * 0.06,
+  lightest: 0.62 + Math.random() * 0.04,
+};
 
 /**
  * The 4x4 ordered dither the bands are broken up with, which is the other
@@ -122,7 +132,7 @@ const BAYER = [
  */
 function noiseOctave(size, cells, seed) {
   const grid = [];
-  // A fixed grain keeps the crystal recognizable across launches.
+  // A seeded field stays still on the surface as the crystal turns.
   for (let i = 0; i < cells * cells; i++) {
     seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
     grid.push(seed / 4294967296);
@@ -148,9 +158,10 @@ function noiseOctave(size, cells, seed) {
 }
 
 /**
- * Broad, wandering aqua veins give the crystal a recognizable shape in motion.
- * The noise only roughens those shapes; it does not obscure their movement.
- * Whole periods around each axis keep the 64-pixel skin seamless, and ordered
+ * Soft cyan shading gives the crystal a recognizable shape in motion.
+ * Keep the transitions broad: narrow pale veins read as white stripes, while
+ * grain makes the diffuse shadow look stained.
+ * Wrapped fields on both axes keep the 64-pixel skin seamless, and ordered
  * dithering joins its seven palette steps without adding a smooth gradient.
  */
 function crystalCanvas() {
@@ -159,8 +170,27 @@ function crystalCanvas() {
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext("2d");
 
-  const grain = noiseOctave(size, 6, 64);
-  const drift = noiseOctave(size, 3, 1996);
+  const pattern = CRYSTAL_PATTERN;
+  const patches = noiseOctave(size, pattern.cells, pattern.seed);
+  const bendX = noiseOctave(size, 2, pattern.seed ^ 0x9e3779b9);
+  const bendY = noiseOctave(size, 3, pattern.seed ^ 0x85ebca6b);
+  const fields = new Float32Array(size * size);
+  let darkest = Infinity;
+  let lightest = -Infinity;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const field = patches(
+        x + (bendX(x, y) - 0.5) * pattern.warp,
+        y + (bendY(x, y) - 0.5) * pattern.warp
+      );
+      fields[y * size + x] = field;
+      darkest = Math.min(darkest, field);
+      lightest = Math.max(lightest, field);
+    }
+  }
+  // Give even a quiet random field a full blue range, while keeping the pale
+  // stripe colours out. Broad warped patches avoid a repeating band layout.
+  const range = Math.max(0.000001, lightest - darkest);
 
   const ramp = CRYSTAL_RAMP.map((hex) => [
     parseInt(hex.slice(1, 3), 16),
@@ -172,13 +202,8 @@ function crystalCanvas() {
   const image = ctx.createImageData(size, size);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      const u = (x / size) * Math.PI * 2;
-      const v = (y / size) * Math.PI * 2;
-      const wave = Math.sin(v * 2 + Math.sin(u) * 1.35 + Math.cos(u * 2) * 0.4
-        + (drift(x, y) - 0.5) * 1.2);
-      const vein = Math.pow(1 - Math.abs(wave), 3);
-      const field = 0.34 + wave * 0.32 + vein * 0.55
-        + (grain(x, y) - 0.5) * 0.14;
+      const shade = (fields[y * size + x] - darkest) / range;
+      const field = pattern.darkest + shade * (pattern.lightest - pattern.darkest);
       const dither = (BAYER[y & 3][x & 3] + 0.5) / 16 - 0.5;
       const step = Math.min(top, Math.max(0, Math.round(field * top + dither * 0.65)));
 

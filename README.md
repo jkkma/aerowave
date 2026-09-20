@@ -176,6 +176,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   station counts beside each entry. Press a row to listen without keeping it, `+` to
   add it to your stations. Nothing is saved until you press `+`, and nothing is
   fetched until you open the tab.
+- Adding a station shows a pending state until its settings file is written.
+  If the write fails, `+` becomes available to retry. Failed additions cannot
+  be swept into a later settings save.
 - Results are listed by country, and alphabetically inside each one, with MORE
   pages further in. The directory itself pages in name order, so the whole
   list is sorted again as each page lands: that keeps one alphabet running
@@ -183,6 +186,10 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   A station the directory has no country for sorts last. The genre list is
   the busiest two hundred tags — the directory holds tens of thousands,
   nearly all of them one station's private label.
+- MORE keeps the submitted search even if you edit the name field before
+  searching again. Failed pages can be retried, and pages containing only
+  duplicates do not hide later results. Paging stops at the directory offset
+  cap instead of repeating the last page.
 - **All four filters narrow each other**, and none of them counts under itself —
   counting formats under the chosen format would only ever report the format
   already chosen. Choose a country and the genre list becomes the genres that
@@ -190,6 +197,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   countries that carry it; and both are counted under whatever format and
   bitrate are also set, because "Paraguay (68)" beside a 320k filter promises
   stations the next search cannot find.
+  A selected genre matches that individual tag exactly, so `rock` does not
+  also count entries tagged only `hard rock`.
 - Format and bitrate are annotated rather than rebuilt. They are short fixed
   lists — five formats the player can open, nine bands of bitrate — so an
   option with nothing behind it is greyed out where it stands rather than
@@ -209,6 +218,11 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   or the dropdown would refuse to offer what it is currently set to. The
   results simply come back empty, which is honest; silently un-setting a filter
   you chose would not be.
+  A zero in an incomplete sample stays selectable too: the rest of the
+  directory may still contain that format or bitrate. If a tally fails, the
+  filters fall back to uncounted choices instead of showing another selection's
+  old counts. Missing initial country and genre lists are retried on the next
+  visit or search.
 - Duplicate submissions are collapsed twice over: within a page as it arrives,
   and again against everything already on screen, so pressing MORE cannot bring
   back a stream you are already looking at. Matching is on the stream URL,
@@ -227,12 +241,17 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   not use and the one they do use looked missing. The surviving row keeps the
   place the stream first appeared, so a page stays in the order it was paged
   in.
+  A higher-voted submission on a later page replaces the earlier representative
+  before the visible list is sorted again.
 - Every count is of what the list will actually show, not of what the directory
   holds. The same station is submitted more than once all the time — Albania's
   two AAC+ stations were "Radio One - Tirana 95.2 FM" and "RadioOne", the same
   stream twice — so the tally collapses duplicate streams and drops nameless or
   unplayable entries exactly as the search does. A count that promises two and
   delivers one is the thing these counts exist to avoid.
+  Each country, genre, format and bitrate bucket counts a stream once. When
+  duplicate submissions have different metadata, both classifications remain
+  available, because either corresponding filtered search can find the stream.
 - radio-browser publishes no crossed counts, so all of this is tallied from the
   stations themselves — a megabyte or two — which is why it happens only when a
   filter changes, and is remembered for the rest of the run. Nothing is tallied
@@ -245,6 +264,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   reach are left out, duplicate submissions of one stream are collapsed, and
   anything that is not an `http(s)` address is dropped rather than saved as a
   station that could only ever fail.
+  A mirror that returns a failed or malformed response is released so later
+  requests can discover a healthy one.
 - HLS entries are flagged in the row and play through hls.js.
 - An added station is an ordinary station — editable, taggable, and usable as an
   alarm source like any other.
@@ -488,9 +509,10 @@ at, and prints its SHA-256.
 - The window is undecorated with its own titlebar, to get the glass look. It is
   draggable by the titlebar and resizable from the edges.
 - The orb uses smooth shading over a subdivided icosahedron, so lighting gives
-  it depth without visible triangular faces. Its 64-pixel, seven-colour aqua
-  wave texture and ordered dithering make the rotation readable and keep the
-  same crystal markings on every launch. It spins on one vertical axis, a
+  it depth without visible triangular faces. Its 64-pixel aqua texture uses
+  broad, randomly warped patches with darker blue shades and ordered dithering.
+  The pattern changes on each launch and stays stable throughout that run,
+  without a white streak across its surface. It spins on one vertical axis, a
   little faster while something is playing, and a click gives it a
   half-second spin-up and a short, stepped hop. Station artwork fits inside a
   pale aqua-edged inset without cropping, with a faint rim light and no glare

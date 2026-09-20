@@ -15,14 +15,17 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use aerowave_core::directory::{
-    bitrate_band_by_key, bitrate_band_index, clean_name, first_tag, image_kind, is_country_code,
-    is_hostname, playable_url, sort_key, stream_key, stream_matches, BITRATE_BANDS,
+    bitrate_band_by_key, clean_name, directory_failure_forgets_mirror, directory_page_window,
+    exact_tag_filter, first_tag, image_kind, is_country_code, is_hostname, playable_url, sort_key,
+    stream_key, stream_matches, tally_directory_facets, DirectoryFacetEntry, DirectoryFailure,
+    BITRATE_BANDS, DIRECTORY_CODECS,
 };
 use aerowave_core::network::public_http_destination_allowed;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use futures_util::StreamExt;
 use rand::seq::SliceRandom;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -155,6 +158,9 @@ pub struct Query {
 pub struct Page {
     pub offered: u32,
     pub stations: Vec<BrowseStation>,
+    /// Whether advancing by `offered` reaches a distinct page inside the
+    /// catalogue window Browse deliberately exposes.
+    pub has_more: bool,
 }
 
 /// What is actually available underneath the filter that is already set: the
@@ -188,10 +194,6 @@ pub struct Bucket {
     pub key: String,
     pub stations: u32,
 }
-
-/// The formats the dropdown offers, matched whole against what the directory
-/// reports - "AAC" and "AAC+" are two different answers, not one with a suffix.
-const CODECS: [&str; 5] = ["MP3", "AAC", "AAC+", "OGG", "FLAC"];
 
 /// One genre the directory has a useful number of stations under.
 #[derive(Serialize, Clone, Debug)]
@@ -353,13 +355,31 @@ async fn host() -> String {
     slot.get_or_insert(picked).clone()
 }
 
-/// Ask the directory for one of its JSON endpoints and hand back the body.
+struct DirectoryResponse {
+    host: String,
+    body: String,
+}
+
+fn parse_directory_json<T: DeserializeOwned>(
+    response: DirectoryResponse,
+    description: &str,
+) -> Result<T, String> {
+    serde_json::from_str(&response.body).map_err(|error| {
+        if directory_failure_forgets_mirror(DirectoryFailure::Json) {
+            forget(&response.host);
+        }
+        format!("{description}: {error}")
+    })
+}
+
+/// Ask the directory for one of its JSON endpoints and hand back the body with
+/// the mirror that supplied it, so an unreadable answer can release that host.
 async fn get(
     path: &str,
     params: &[(&str, String)],
     seconds: u64,
     cap: usize,
-) -> Result<String, String> {
+) -> Result<DirectoryResponse, String> {
     let client = client()?;
     let host = host().await;
     let response = client
@@ -369,13 +389,15 @@ async fn get(
         .send()
         .await
         .map_err(|e| {
-            forget(&host);
+            if directory_failure_forgets_mirror(DirectoryFailure::Request) {
+                forget(&host);
+            }
             format!("radio-browser: {}", describe(&e))
         })?;
     if !response.status().is_success() {
-        // A mirror having a bad day, rather than a question it refused: worth
-        // asking somebody else next time.
-        if response.status().is_server_error() {
+        if directory_failure_forgets_mirror(DirectoryFailure::HttpStatus(
+            response.status().as_u16(),
+        )) {
             forget(&host);
         }
         return Err(format!(
@@ -383,21 +405,27 @@ async fn get(
             response.status()
         ));
     }
-    read_capped(response, cap).await
+    let body = read_capped(response, cap).await.map_err(|error| {
+        if directory_failure_forgets_mirror(DirectoryFailure::Body) {
+            forget(&host);
+        }
+        error
+    })?;
+    Ok(DirectoryResponse { host, body })
 }
 
 /// The countries the directory has anything in, in the order a person would
 /// look through them.
 pub async fn countries() -> Result<Vec<Country>, String> {
-    let body = get(
+    let response = get(
         "countries",
         &[("hidebroken", "true".into())],
         20,
         MAX_BODY_BYTES,
     )
     .await?;
-    let raw: Vec<RawCountry> = serde_json::from_str(&body)
-        .map_err(|e| format!("radio-browser sent an unreadable country list: {e}"))?;
+    let raw: Vec<RawCountry> =
+        parse_directory_json(response, "radio-browser sent an unreadable country list")?;
     let mut out: Vec<Country> = raw
         .into_iter()
         .filter_map(|entry| {
@@ -423,7 +451,7 @@ pub async fn countries() -> Result<Vec<Country>, String> {
 /// The genres worth offering as a filter, in the order a person would look
 /// through them.
 pub async fn tags() -> Result<Vec<Tag>, String> {
-    let body = get(
+    let response = get(
         "tags",
         &[
             ("hidebroken", "true".into()),
@@ -435,8 +463,8 @@ pub async fn tags() -> Result<Vec<Tag>, String> {
         MAX_BODY_BYTES,
     )
     .await?;
-    let raw: Vec<RawTag> = serde_json::from_str(&body)
-        .map_err(|e| format!("radio-browser sent an unreadable genre list: {e}"))?;
+    let raw: Vec<RawTag> =
+        parse_directory_json(response, "radio-browser sent an unreadable genre list")?;
     let mut out: Vec<Tag> = raw
         .into_iter()
         .filter_map(|entry| {
@@ -487,8 +515,11 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
         ("hidebroken", "true".into()),
         ("limit", FACET_LIMIT.to_string()),
         ("name", query.name.trim().to_string()),
-        ("tag", query.tag.trim().to_string()),
     ];
+    if let Some(tag) = exact_tag_filter(&query.tag) {
+        params.push(("tag", tag.value));
+        params.push(("tagExact", tag.exact.to_string()));
+    }
     let code = query.country_code.trim().to_ascii_uppercase();
     if is_country_code(&code) {
         params.push(("countrycode", code));
@@ -498,56 +529,24 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
     // count at all: it promises stations that the next search cannot find.
     quality_params(&query, &mut params);
 
-    let body = get("stations/search", &params, 60, MAX_FACET_BYTES).await?;
-    let raw: Vec<Raw> = serde_json::from_str(&body)
-        .map_err(|e| format!("radio-browser sent something unreadable: {e}"))?;
+    let response = get("stations/search", &params, 60, MAX_FACET_BYTES).await?;
+    let raw: Vec<Raw> = parse_directory_json(response, "radio-browser sent something unreadable")?;
     let sampled = raw.len() as u32 >= FACET_LIMIT;
 
-    let mut tag_counts: HashMap<String, u32> = HashMap::new();
-    let mut country_counts: HashMap<String, (String, u32)> = HashMap::new();
-    let mut codec_counts = [0u32; CODECS.len()];
-    let mut bitrate_counts = [0u32; BITRATE_BANDS.len()];
-    // Count what the search would actually show, not what the directory holds.
-    // The same station is submitted more than once all the time - Albania's two
-    // AAC+ stations were "Radio One - Tirana 95.2 FM" and "RadioOne", the same
-    // stream twice - and a station with no name or an unplayable address never
-    // reaches a row either. A count that promises two and delivers one is the
-    // thing these counts exist to avoid.
-    let mut seen: HashSet<String> = HashSet::new();
-    for entry in &raw {
-        let Some(url) = playable_url(text(&entry.url), text(&entry.url_resolved)) else {
-            continue;
-        };
-        if clean_name(text(&entry.name), 60).is_empty() {
-            continue;
-        }
-        if !seen.insert(stream_key(&url)) {
-            continue;
-        }
-
-        let codec = clean_name(text(&entry.codec), 16).to_ascii_uppercase();
-        if let Some(slot) = CODECS.iter().position(|known| *known == codec) {
-            codec_counts[slot] += 1;
-        }
-        if let Some(slot) = bitrate_band_index(number(&entry.bitrate) as u32) {
-            bitrate_counts[slot] += 1;
-        }
-        for tag in text(&entry.tags).split(',') {
-            let value = tag.trim();
-            if !value.is_empty() {
-                *tag_counts.entry(value.to_string()).or_default() += 1;
-            }
-        }
-        let code = clean_name(text(&entry.countrycode), 2).to_ascii_uppercase();
-        let name = clean_name(text(&entry.country), 60);
-        if is_country_code(&code) && !name.is_empty() {
-            let slot = country_counts.entry(code).or_insert((name, 0));
-            slot.1 += 1;
-        }
-    }
+    let counted = tally_directory_facets(raw.iter().map(|entry| DirectoryFacetEntry {
+        url: text(&entry.url),
+        resolved_url: text(&entry.url_resolved),
+        name: text(&entry.name),
+        tags: text(&entry.tags),
+        country_code: text(&entry.countrycode),
+        country_name: text(&entry.country),
+        codec: text(&entry.codec),
+        bitrate: number(&entry.bitrate).clamp(0, u32::MAX as i64) as u32,
+    }));
 
     // Busiest first to decide what makes the cut, then alphabetical to read.
-    let mut tags: Vec<Tag> = tag_counts
+    let mut tags: Vec<Tag> = counted
+        .tags
         .into_iter()
         .map(|(value, stations)| Tag {
             name: clean_name(&value, 40),
@@ -560,7 +559,8 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
     tags.truncate(FACET_TAGS);
     tags.sort_by_key(|tag| sort_key(&tag.name));
 
-    let mut countries: Vec<Country> = country_counts
+    let mut countries: Vec<Country> = counted
+        .countries
         .into_iter()
         .map(|(code, (name, stations))| Country {
             code,
@@ -570,9 +570,9 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
         .collect();
     countries.sort_by_key(|country| sort_key(&country.name));
 
-    let codecs = CODECS
+    let codecs = DIRECTORY_CODECS
         .iter()
-        .zip(codec_counts)
+        .zip(counted.codecs)
         .map(|(key, stations)| Bucket {
             key: key.to_string(),
             stations,
@@ -580,7 +580,7 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
         .collect();
     let bitrates = BITRATE_BANDS
         .iter()
-        .zip(bitrate_counts)
+        .zip(counted.bitrates)
         .map(|(band, stations)| Bucket {
             key: band.key.to_string(),
             stations,
@@ -695,9 +695,8 @@ async fn art_candidates(
     requested_resolved: &str,
 ) -> Result<Vec<String>, String> {
     let params = &[("url", query_url.to_string())];
-    let body = get("stations/byurl", params, 20, MAX_BODY_BYTES).await?;
-    let raw: Vec<Raw> = serde_json::from_str(&body)
-        .map_err(|e| format!("radio-browser sent something unreadable: {e}"))?;
+    let response = get("stations/byurl", params, 20, MAX_BODY_BYTES).await?;
+    let raw: Vec<Raw> = parse_directory_json(response, "radio-browser sent something unreadable")?;
     Ok(raw
         .iter()
         .filter(|entry| {
@@ -791,18 +790,22 @@ pub async fn art(
 }
 
 pub async fn search(query: Query) -> Result<Page, String> {
+    let page = directory_page_window(query.limit, query.offset);
     let mut params: Vec<(&str, String)> = vec![
         // Stations the directory's own checker cannot reach are not worth
         // offering: everything here is meant to be pressed and heard.
         ("hidebroken", "true".into()),
         ("order", ORDER.into()),
         ("reverse", "false".into()),
-        ("limit", query.limit.clamp(1, 100).to_string()),
+        ("limit", page.limit.to_string()),
         // A catalogue this size is for searching, not for reading to the end.
-        ("offset", query.offset.min(1000).to_string()),
+        ("offset", page.offset.to_string()),
         ("name", query.name.trim().to_string()),
-        ("tag", query.tag.trim().to_string()),
     ];
+    if let Some(tag) = exact_tag_filter(&query.tag) {
+        params.push(("tag", tag.value));
+        params.push(("tagExact", tag.exact.to_string()));
+    }
     // Sent only when it is really a country code. A filter the directory
     // cannot make sense of would quietly return nothing at all.
     let code = query.country_code.trim().to_ascii_uppercase();
@@ -811,10 +814,10 @@ pub async fn search(query: Query) -> Result<Page, String> {
     }
     quality_params(&query, &mut params);
 
-    let body = get("stations/search", &params, 20, MAX_BODY_BYTES).await?;
-    let raw: Vec<Raw> = serde_json::from_str(&body)
-        .map_err(|e| format!("radio-browser sent something unreadable: {e}"))?;
+    let response = get("stations/search", &params, 20, MAX_BODY_BYTES).await?;
+    let raw: Vec<Raw> = parse_directory_json(response, "radio-browser sent something unreadable")?;
     let offered = raw.len() as u32;
+    let has_more = page.has_more(offered);
 
     // One row per stream. Which submission gets to be that row is decided by
     // votes rather than by whichever the directory sorted first: ordered by
@@ -863,5 +866,9 @@ pub async fn search(query: Query) -> Result<Page, String> {
         }
     }
     let stations = order.iter().filter_map(|key| best.remove(key)).collect();
-    Ok(Page { offered, stations })
+    Ok(Page {
+        offered,
+        stations,
+        has_more,
+    })
 }

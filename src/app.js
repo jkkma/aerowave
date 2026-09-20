@@ -262,6 +262,7 @@ function stopPlayback(quiet, { skipNative = false } = {}) {
     $("#np-track").textContent = stoppedTrackHint();
     $("#np-meta").textContent = "";
   }
+  refreshBrowseIndicators();
 }
 
 function androidActiveStatus(status) {
@@ -303,6 +304,7 @@ function restoreAndroidSource(nativeState) {
   if (typeof nativeState.trackTitle === "string") setTrackTitle(nativeState.trackTitle);
   setOrbArt(source);
   renderStations();
+  refreshBrowseIndicators();
   return true;
 }
 
@@ -338,7 +340,6 @@ function applyAndroidPlaybackState(nativeState, { allowRestore = false } = {}) {
   if (nativeState.status === "idle") {
     stopPlayback(false, { skipNative: true });
     renderStations();
-    renderBrowse();
     return true;
   }
 
@@ -1769,6 +1770,7 @@ function playStation(station, opts) {
   state.settings.lastStation = station.id;
   saveSettings();
   renderStations();
+  refreshBrowseIndicators();
 }
 
 /**
@@ -2027,6 +2029,8 @@ function stepFolder(delta) {
 
 /** Rows per request. Two screenfuls: enough to browse, small enough to be quick. */
 const BROWSE_PAGE = 40;
+/** The backend deliberately caps directory traversal rather than pretending it is finite. */
+const BROWSE_MAX_OFFSET = 1000;
 /** What the directory calls each chosen filter, and what to call it in a list. */
 let browseTag = "";
 let browseTagLabel = "";
@@ -2041,11 +2045,15 @@ let browseCountries = null;
 let browseTags = null;
 const browseFacets = new Map();
 let browseResults = [];
+/** The text query that produced `browseResults`; edits apply only on Search. */
+let browseName = "";
 /** Where the next page starts, counted in what the directory offered. */
 let browseOffset = 0;
 let browseMore = false;
 let browseBusy = false;
 let browseLooked = false;
+let browseFiltersLoading = null;
+const pendingBrowseAdds = new Set();
 /**
  * Which search the list belongs to. Changing a filter while one is in flight
  * used to be dropped on the floor: the dropdowns showed the new filter, the
@@ -2071,6 +2079,7 @@ const sameStream = (a, b) => {
 };
 
 const browseSaved = (url) => state.stations.some((s) => sameStream(s.url, url));
+const browseSaving = (url) => Array.from(pendingBrowseAdds).some((s) => sameStream(s.url, url));
 
 /**
  * How the result list reads: country first, then the station name.
@@ -2109,17 +2118,23 @@ function browseNote(text, mood) {
 /** Run a search. `more` adds the next page instead of starting over. */
 async function browseSearch(more) {
   const mine = ++browseRequest;
+  const couldLoadMore = browseMore;
   browseBusy = true;
-  const name = $("#browse-query").value.trim();
+  const name = more ? browseName : $("#browse-query").value.trim();
   if (!more) {
+    browseName = name;
     browseResults = [];
     browseOffset = 0;
     browseMore = false;
     $("#browse-list").scrollTop = 0;
+    // Search is also the retry affordance for an initial list that failed.
+    // Successful lists stay cached, and concurrent retries share one request.
+    loadBrowseFilters();
   }
   browseNote(more ? "Fetching more…" : "Searching the directory…");
   renderBrowse();
   try {
+    const offset = browseOffset;
     const page = await invoke("browse_stations", {
       query: {
         name,
@@ -2128,7 +2143,7 @@ async function browseSearch(more) {
         codec: browseCodec,
         bitrate: browseBitrate,
         limit: BROWSE_PAGE,
-        offset: browseOffset,
+        offset,
       },
     });
     // A newer search started while this one was out: that one owns the list,
@@ -2137,24 +2152,33 @@ async function browseSearch(more) {
     // Step over what the directory offered, not over what survived the tidy:
     // an offset counted in survivors walks back over ground already covered.
     browseOffset += page.offered;
-    // Mirrors are edited while they are being paged through, so the page
-    // after this one can hand back something already on screen.
-    const fresh = page.stations.filter(
-      (st) => !browseResults.some((seen) => sameStream(seen.url, st.url))
-    );
-    browseResults = browseResults.concat(fresh).sort(byCountryThenName);
-    // A short page is the end of the directory's answer. A full one that
-    // added nothing new means the paging has stopped moving - which is what
-    // the offset cap at the far end of the catalogue looks like from here.
-    browseMore = page.offered >= BROWSE_PAGE && fresh.length > 0;
+    // A duplicate can land on a later page when another submission sorts by a
+    // different name. Keep one row, but let votes choose it across pages just
+    // as the backend already does within one page.
+    for (const station of page.stations) {
+      const at = browseResults.findIndex((seen) => sameStream(seen.url, station.url));
+      if (at < 0) browseResults.push(station);
+      else if ((Number(station.votes) || 0) > (Number(browseResults[at].votes) || 0)) {
+        browseResults[at] = station;
+      }
+    }
+    browseResults.sort(byCountryThenName);
+    // `offered` is counted before cleanup, so zero surviving rows cannot mean
+    // end-of-results. Rust applies the explicit offset cap and reports this.
+    browseMore = typeof page.hasMore === "boolean"
+      ? page.hasMore
+      : page.offered >= BROWSE_PAGE && offset < BROWSE_MAX_OFFSET;
     browseNote(
       browseResults.length
         ? `${browseResults.length} from radio-browser.info — press a row to listen, + to keep it`
-        : "Nothing in the directory matches that."
+        : browseMore
+          ? "Nothing usable was on this page — try More stations."
+          : "Nothing in the directory matches that."
     );
   } catch (e) {
     if (mine !== browseRequest) return;
-    browseMore = false;
+    // A transient failure on MORE leaves the same page available to retry.
+    browseMore = more && couldLoadMore;
     browseNote(String(e), "bad");
   } finally {
     if (mine === browseRequest) {
@@ -2172,22 +2196,32 @@ const asTag = (t) => [t.value, t.name, t.stations];
  * world nor the directory's busiest genres change while the app is open, and
  * both are a convenience - searching still works if they will not load.
  */
-async function loadBrowseFilters() {
+function loadBrowseFilters() {
+  if (browseFiltersLoading) return browseFiltersLoading;
+  const jobs = [];
   if (!browseCountries) {
-    try {
-      browseCountries = await invoke("browse_countries");
-    } catch {
-      say("could not load the country list", "bad");
-    }
+    jobs.push(
+      invoke("browse_countries")
+        .then((countries) => { browseCountries = countries; })
+        .catch(() => say("could not load the country list", "bad"))
+    );
   }
   if (!browseTags) {
-    try {
-      browseTags = await invoke("browse_tags");
-    } catch {
-      say("could not load the genre list", "bad");
-    }
+    jobs.push(
+      invoke("browse_tags")
+        .then((tags) => { browseTags = tags; })
+        .catch(() => say("could not load the genre list", "bad"))
+    );
   }
-  refreshBrowseFilters();
+  if (!jobs.length) return refreshBrowseFilters();
+
+  const loading = Promise.all(jobs)
+    .then(() => refreshBrowseFilters())
+    .finally(() => {
+      if (browseFiltersLoading === loading) browseFiltersLoading = null;
+    });
+  browseFiltersLoading = loading;
+  return loading;
 }
 
 /** What one filter leaves available to the other, worked out once and kept. */
@@ -2254,6 +2288,9 @@ async function refreshBrowseFilters() {
   } else if (browseTags) {
     invalidateBrowseNarrow("#browse-tag");
     setBrowseOptions("#browse-tag", browseTags, asTag, browseTag, browseTagLabel);
+  } else {
+    invalidateBrowseNarrow("#browse-tag");
+    setBrowseFallback("#browse-tag", [], asTag, browseTag, browseTagLabel);
   }
 
   if (browseTag || narrowed) {
@@ -2263,6 +2300,9 @@ async function refreshBrowseFilters() {
   } else if (browseCountries) {
     invalidateBrowseNarrow("#browse-country");
     setBrowseOptions("#browse-country", browseCountries, asCountry, browseCountry, browseCountryLabel);
+  } else {
+    invalidateBrowseNarrow("#browse-country");
+    setBrowseFallback("#browse-country", [], asCountry, browseCountry, browseCountryLabel);
   }
 
   // The fixed lists are only worth counting once something else is narrowing
@@ -2306,10 +2346,12 @@ function annotateFixed(selector, buckets, sampled) {
     if (index === 0) return;
     if (!option.dataset.label) option.dataset.label = option.textContent;
     const stations = counts.get(option.value) || 0;
-    option.textContent = `${option.dataset.label} (${stations}${sampled && stations ? "+" : ""})`;
+    option.textContent = `${option.dataset.label} (${stations}${sampled ? "+" : ""})`;
     // A filter still filtering stays selectable even at zero, or the dropdown
     // would refuse to offer what it is currently set to.
-    option.disabled = stations === 0 && option.value !== select.value;
+    // A sampled zero only says the option was absent from the first 5,000
+    // rows. It cannot prove the rest of the directory has none.
+    option.disabled = !sampled && stations === 0 && option.value !== select.value;
   });
 }
 
@@ -2360,11 +2402,37 @@ async function narrow(selector, query, pick, unpack, what) {
     setBrowseOptions(selector, pick(facets), unpack, chosen.value, chosen.label, facets.sampled);
   } catch {
     if (browseNarrows.get(selector) !== mine) return;
-    // Keep whatever the list already had rather than emptying it.
+    // The old list belongs to different filters. Replace its now-false counts
+    // with the global uncounted choices, while keeping the current selection.
+    const chosen = filterNow(selector);
+    const fallback = selector === "#browse-tag" ? browseTags : browseCountries;
+    setBrowseFallback(selector, fallback || [], unpack, chosen.value, chosen.label);
     say(`could not work out which ${what}s are available`, "bad");
   } finally {
     if (browseNarrows.get(selector) === mine) select.disabled = false;
   }
+}
+
+function setBrowseFallback(selector, entries, unpack, value, label) {
+  const select = $(selector);
+  while (select.options.length > 1) select.remove(1);
+  entries.forEach((entry) => {
+    const [optionValue, optionLabel] = unpack(entry);
+    const option = document.createElement("option");
+    option.value = optionValue;
+    option.dataset.label = optionLabel;
+    option.textContent = optionLabel;
+    select.append(option);
+  });
+  const known = Array.prototype.some.call(select.options, (option) => option.value === value);
+  if (value && !known) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.dataset.label = label || value;
+    option.textContent = label || value;
+    select.append(option);
+  }
+  select.value = value;
 }
 
 /**
@@ -2417,26 +2485,61 @@ function previewBrowse(st) {
   });
   // Nothing in the saved list is playing any more; both lists should say so.
   renderStations();
-  renderBrowse();
+  refreshBrowseIndicators();
 }
 
 function addBrowseStation(st) {
-  if (browseSaved(st.url)) return;
+  if (browseSaved(st.url) || browseSaving(st.url)) return;
   // The genre that was searched for beats the directory's own first tag: it
   // is what this station is to the person keeping it.
   const tag = browseTagLabel || st.tag;
-  state.stations.push({
+  const station = {
     id: newId(),
     name: st.name,
     url: st.url,
     tag,
     logo: st.favicon,
     favorite: false,
+  };
+  pendingBrowseAdds.add(station);
+  refreshBrowseIndicators();
+  return saveStations({
+    extraStation: station,
+    onSuccess: () => {
+      pendingBrowseAdds.delete(station);
+      if (!browseSaved(station.url)) state.stations.push(station);
+      renderStations();
+      renderAlarms();
+      refreshBrowseIndicators();
+      say(st.name + " added to your stations", "good");
+    },
+    onFailure: () => {
+      pendingBrowseAdds.delete(station);
+      refreshBrowseIndicators();
+    },
   });
-  saveStations();
-  renderStations();
-  renderBrowse();
-  say(st.name + " added to your stations", "good");
+}
+
+function updateBrowseAddButton(add, station) {
+  const saving = browseSaving(station.url);
+  const saved = !saving && browseSaved(station.url);
+  add.classList.toggle("done", saved);
+  add.textContent = saving ? "…" : saved ? "✓" : "+";
+  add.title = saving ? "Saving station" : saved ? "Already in your stations" : "Add to your stations";
+  add.disabled = saving || saved;
+  add.setAttribute("aria-label", add.title);
+}
+
+/** Update playback/save marks without replacing rows and throwing away focus. */
+function refreshBrowseIndicators() {
+  const rows = Array.from($("#browse-list").children).filter((row) => row.classList.contains("row"));
+  rows.forEach((row, index) => {
+    const station = browseResults[index];
+    if (!station) return;
+    row.classList.toggle("on", !!player.source && sameStream(player.source.url, station.url));
+    const add = row.children[row.children.length - 1];
+    if (add?.matches("button")) updateBrowseAddButton(add, station);
+  });
 }
 
 function renderBrowse() {
@@ -2446,12 +2549,13 @@ function renderBrowse() {
   if (!browseResults.length) {
     const li = document.createElement("li");
     li.className = "empty";
-    li.textContent = browseBusy ? "Searching…" : "Search for a station, or explore by country and genre.";
+    li.textContent = browseBusy
+      ? "Searching…"
+      : browseMore
+        ? "Nothing usable was on this page."
+        : "Search for a station, or explore by country and genre.";
     list.append(li);
-    return;
-  }
-
-  browseResults.forEach((st, i) => {
+  } else browseResults.forEach((st, i) => {
     const li = document.createElement("li");
     li.className = "row";
     if (player.source && sameStream(player.source.url, st.url)) li.classList.add("on");
@@ -2487,15 +2591,12 @@ function renderBrowse() {
       li.append(flag);
     }
 
-    const saved = browseSaved(st.url);
     const add = document.createElement("button");
-    add.className = "icon" + (saved ? " done" : "");
-    add.textContent = saved ? "✓" : "+";
-    add.title = saved ? "Already in your stations" : "Add to your stations";
-    add.setAttribute("aria-label", add.title);
+    add.className = "icon";
+    updateBrowseAddButton(add, st);
     add.addEventListener("click", (e) => {
       e.stopPropagation();
-      addBrowseStation(st);
+      return addBrowseStation(st);
     });
     li.append(add);
 
@@ -2530,9 +2631,10 @@ function renderBrowse() {
  * somebody else's server, and an app nobody browses should not be calling it.
  */
 function browseFirstLook() {
+  // Reopening the pane retries only whichever initial list is still missing.
+  loadBrowseFilters();
   if (browseLooked) return;
   browseLooked = true;
-  loadBrowseFilters();
   browseSearch(false);
 }
 
@@ -3144,9 +3246,54 @@ function renderSettings() {
 
 // ------------------------------------------------------------ persisting ---
 
-const saveStations = () => invoke("save_stations", { stations: state.stations })
-  .then(() => { if (IS_ANDROID) return syncAndroidAlarms(); })
-  .catch((e) => say(String(e), "bad"));
+let stationSaveTail = Promise.resolve();
+
+/**
+ * Station writes run in order and take their snapshot only at the head of the
+ * queue. A failed Browse addition therefore cannot leak into a later edit,
+ * while a successful one is committed to live state before that edit runs.
+ */
+function saveStations({ extraStation = null, onSuccess = null, onFailure = null } = {}) {
+  const run = async () => {
+    const stations = state.stations.map((station) => ({ ...station }));
+    if (extraStation && !stations.some((station) => sameStream(station.url, extraStation.url))) {
+      stations.push({ ...extraStation });
+    }
+    try {
+      await invoke("save_stations", { stations });
+    } catch (error) {
+      try {
+        if (onFailure) onFailure();
+      } catch (callbackError) {
+        say(String(callbackError), "bad");
+      }
+      say(String(error), "bad");
+      return false;
+    }
+
+    try {
+      if (onSuccess) onSuccess();
+    } catch (error) {
+      // Persistence already succeeded. Keep the queue moving even if a view
+      // refresh fails rather than replaying a durable write as though it did not.
+      say(String(error), "bad");
+    }
+    if (IS_ANDROID) {
+      try {
+        await syncAndroidAlarms();
+      } catch (error) {
+        // The stations are already durable; an alarm-sync problem must not
+        // roll back the saved row or make Add claim persistence failed.
+        say(String(error), "bad");
+      }
+    }
+    return true;
+  };
+
+  const result = stationSaveTail.then(run, run);
+  stationSaveTail = result.then(() => undefined, () => undefined);
+  return result;
+}
 const saveAlarms = () => (IS_ANDROID ? syncAndroidAlarms(true) : invoke("save_alarms", { alarms: state.alarms }))
   .then(() => { refreshNextAlarm(); refreshPowerStatus(); return true; })
   .catch((e) => { say(String(e), "bad", true); return false; });
@@ -3174,6 +3321,7 @@ function saveSettings(explicitAutostart = null) {
 async function loadState() {
   state = await invoke("get_state");
   renderStations();
+  refreshBrowseIndicators();
   renderSettings();
   if (IS_ANDROID) await refreshAndroidAlarms({ initialize: true });
   renderAlarms();
@@ -3825,6 +3973,7 @@ function wire() {
     saveStations();
     renderStations();
     renderAlarms();
+    refreshBrowseIndicators();
     closeStationEditor();
     say("station saved", "good");
   });
@@ -3835,6 +3984,7 @@ function wire() {
     saveStations();
     renderStations();
     renderAlarms();
+    refreshBrowseIndicators();
     closeStationEditor();
     say("station deleted");
   });
