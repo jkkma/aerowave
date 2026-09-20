@@ -1,7 +1,7 @@
 # Aerowave
 
 An internet radio player that is also an alarm clock, in Rust + Tauri v2:
-Frutiger Aero glass over a blue-green background, with a low-poly orb turning
+Frutiger Aero glass over a blue-green background, with a retro 3D orb turning
 slowly at the centre of it in WebGL. Click it and it hops.
 
 Wake up to a radio station, or to a random track out of a folder you point it at.
@@ -443,7 +443,7 @@ records the older local work that still needs reconciliation with this version.
 
 ```
 src/                 index.html, styles.css, app.js  — the face and playback
-  orb3d.js           the low-poly WebGL orb
+  orb3d.js           the retro, smoothly shaded WebGL orb
   vendor/            three.js, vendored
 src-tauri/src/
   lib.rs             commands, tray, window lifecycle
@@ -485,15 +485,19 @@ at, and prints its SHA-256.
   that entry when turned off.
 - The window is undecorated with its own titlebar, to get the glass look. It is
   draggable by the titlebar and resizable from the edges.
-- The orb is a flat-shaded icosahedron with a 64-pixel texture stretched over
-  its triangles. The facets are what make the rotation readable — a smooth
-  sphere cannot show that it is turning. It spins on one vertical axis, a
+- The orb uses smooth shading over a subdivided icosahedron, so lighting gives
+  it depth without visible triangular faces. Its 64-pixel, seven-colour aqua
+  wave texture and ordered dithering make the rotation readable and keep the
+  same crystal markings on every launch. It spins on one vertical axis, a
   little faster while something is playing, and a click gives it a
-  half-second spin-up and a hop. If WebGL will not start it stays hidden and
-  the painted CSS orb underneath carries on as before.
+  half-second spin-up and a short, stepped hop. Station artwork fits inside a
+  pale aqua-edged inset without cropping, with a faint rim light and no glare
+  over the logo. Reduced motion stops the spin, hop and ripple.
+  If WebGL will not start it stays hidden and the painted CSS orb underneath
+  carries on as before.
 - It renders into a 112x112 buffer that CSS scales up with `image-rendering:
-  pixelated`, and antialiasing is off: chunky pixels and stairstepped edges, a
-  PS2 running at native resolution on a screen far too big for it.
+  pixelated`, and antialiasing is off. Three-point texture filtering and a
+  limited palette keep the N64-inspired look.
 - The orb is decorative. It is not an audio analyser — routing a cross-origin
   stream through Web Audio taints it and Chromium outputs silence, so its motion
   is time-based on purpose.

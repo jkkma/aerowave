@@ -1,62 +1,305 @@
 <!doctype html>
 <!--
-  A standalone view of the orb, for working on how it looks without
-  rebuilding the app every time. Serve the repo root and open
-  /tools/orb-preview.html; tools/orb-shot.ps1 does both and screenshots it.
+  A standalone view of the real orb, for visual checks without rebuilding the
+  app. Serve the repo root and open /tools/orb-preview.html.
+
+  The orb, its animation and its station-art treatment all come from the app's
+  own styles and module. The generated pictures below are fictional test art;
+  they never leave this page.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>orb preview</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aerowave orb preview</title>
+<link rel="stylesheet" href="../src/styles.css">
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; }
-  body {
+  body.preview {
+    display: block;
+    min-height: 100%;
+    overflow: auto;
+  }
+
+  .preview-shell {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    gap: 0;
+    place-items: center;
+    min-height: 100%;
+    padding: 24px;
+    overflow: visible;
+  }
+
+  .preview-card {
+    display: grid;
+    grid-template-columns: minmax(250px, 340px) minmax(220px, 280px);
+    gap: 24px;
+    align-items: center;
+    width: min(720px, 100%);
+    padding: 24px;
+    border: 1px solid rgba(200, 246, 255, .24);
+    border-radius: 18px;
+    background: linear-gradient(145deg, rgba(8, 55, 72, .82), rgba(2, 22, 34, .9));
+    box-shadow: var(--frame), inset 0 1px 0 rgba(255, 255, 255, .18);
+    backdrop-filter: blur(12px) saturate(120%);
+  }
+
+  .preview-stage {
+    --orb-size: 230px;
     display: grid;
     place-items: center;
-    /* the same backdrop the orb sits on in the app */
-    background: radial-gradient(120% 96% at 20% 4%,
-      #a8f0f8 0%, #63cfe4 9%, #2ba5c6 21%, #10769a 38%,
-      #084c6d 56%, #063850 72%, #04222f 88%, #02131c 100%);
+    min-width: 0;
+    min-height: 286px;
   }
-  #stage {
-    position: relative;
-    width: 340px;
-    height: 340px;
-    border-radius: 50%;
-    box-shadow: 0 0 40px rgba(90, 220, 250, .28), 0 18px 34px rgba(0, 0, 0, .5);
+
+  .preview-stage .orbwrap {
+    min-height: calc(var(--orb-size) + 30px);
   }
-  #stage canvas { position: absolute; inset: -15%; width: 130%; height: 130%; image-rendering: pixelated; }
+
+  .preview-stage .orb {
+    width: var(--orb-size);
+    height: var(--orb-size);
+  }
+
+  .preview-controls {
+    display: grid;
+    gap: 17px;
+    min-width: 0;
+  }
+
+  .preview-heading {
+    margin: 0;
+    color: var(--foam);
+    font: 600 20px/1.1 var(--hud);
+    letter-spacing: .01em;
+  }
+
+  .preview-intro,
+  .preview-note {
+    margin: 0;
+    color: rgba(220, 245, 252, .78);
+    font-size: 12px;
+    line-height: 1.45;
+    user-select: text;
+  }
+
+  .preview-intro { margin-top: 7px; }
+
+  .preview-field {
+    display: grid;
+    gap: 6px;
+  }
+
+  .preview-label {
+    color: #c8edf5;
+    font: 600 11px/1 var(--hud);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+
+  .preview-select,
+  .preview-toggle button {
+    min-height: 38px;
+    border: 1px solid rgba(170, 226, 244, .28);
+    border-radius: 8px;
+    color: var(--foam);
+    background: linear-gradient(180deg, rgba(24, 89, 107, .75), rgba(3, 31, 44, .9));
+    font: 500 13px var(--body);
+  }
+
+  .preview-select {
+    width: 100%;
+    padding: 0 10px;
+  }
+
+  .preview-select option {
+    color: var(--foam);
+    background: var(--deep);
+  }
+
+  .preview-toggle {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+
+  .preview-toggle button {
+    padding: 0 12px;
+    cursor: pointer;
+  }
+
+  .preview-toggle button:hover,
+  .preview-toggle button:focus-visible,
+  .preview-select:focus-visible {
+    outline: none;
+    border-color: var(--aqua);
+    box-shadow: 0 0 0 2px rgba(111, 227, 245, .2);
+  }
+
+  .preview-toggle button[aria-pressed="true"] {
+    border-color: rgba(216, 251, 255, .72);
+    color: #03202c;
+    background: linear-gradient(180deg, #d7fbff, #75d6e5);
+    box-shadow: inset 0 1px 0 #fff;
+  }
+
+  @media (max-width: 620px) {
+    .preview-shell { padding: 12px; }
+    .preview-card {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 12px;
+      padding: 16px;
+    }
+    .preview-stage { min-height: calc(var(--orb-size) + 34px); }
+  }
 </style>
 </head>
-<body>
-<div id="stage"></div>
+<body class="preview">
+<div class="sky" aria-hidden="true">
+  <div class="bloom"></div>
+  <div class="shafts"></div>
+  <div class="horizon"></div>
+  <div class="grid"></div>
+</div>
+
+<main class="preview-shell">
+  <section class="preview-card" aria-labelledby="preview-title">
+    <div class="preview-stage" id="preview-stage">
+      <div class="orbwrap">
+        <div class="orb" id="orb" aria-label="Interactive Aerowave orb preview">
+          <div class="orb-body"></div>
+          <div class="orb-gloss"></div>
+          <div class="orb-glint"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="preview-controls">
+      <div>
+        <h1 class="preview-heading" id="preview-title">Orb visual QA</h1>
+        <p class="preview-intro">This page loads the app's real orb. Click either side of it to test the shove, hop and ripple.</p>
+      </div>
+
+      <div class="preview-field">
+        <span class="preview-label">Playback state</span>
+        <div class="preview-toggle" aria-label="Playback state">
+          <button type="button" data-playing="false" aria-pressed="true">Stopped</button>
+          <button type="button" data-playing="true" aria-pressed="false">Playing</button>
+        </div>
+      </div>
+
+      <label class="preview-field">
+        <span class="preview-label">Surface</span>
+        <select class="preview-select" id="surface">
+          <option value="crystal">Crystal</option>
+          <option value="wordmark">Demo wide transparent wordmark</option>
+          <option value="portrait">Demo portrait art</option>
+          <option value="square">Demo square art</option>
+        </select>
+      </label>
+
+      <label class="preview-field">
+        <span class="preview-label">Display size</span>
+        <select class="preview-select" id="orb-size">
+          <option value="230">Desktop — 230 px</option>
+          <option value="150">Compact desktop — 150 px</option>
+          <option value="108">Mobile — 108 px</option>
+          <option value="82">Mobile landscape — 82 px</option>
+        </select>
+      </label>
+
+      <p class="preview-note">The three station pictures are generated demo art. Their crop, backing, filtering and lighting are the same paths real station art uses.</p>
+    </div>
+  </section>
+</main>
+
 <script type="module">
-import * as THREE from "../src/vendor/three.module.min.js";
-import { buildOrb, lightScene, RENDER_SIZE } from "../src/orb3d.js";
+// The preview is used while orb3d.js is being edited; bypass the browser's
+// module cache so every reload exercises the source currently on disk.
+await import(`../src/orb3d.js?preview=${Date.now()}`);
 
-const stage = document.getElementById("stage");
-const canvas = document.createElement("canvas");
-stage.appendChild(canvas);
+function art(width, height, paint) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  paint(canvas.getContext("2d"), width, height);
+  return canvas.toDataURL("image/png");
+}
 
-const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: false });
-renderer.setPixelRatio(1);
-renderer.setSize(RENDER_SIZE, RENDER_SIZE, false);
-renderer.setClearAlpha(0);
+const samples = {
+  wordmark: art(360, 96, (ctx, width, height) => {
+    ctx.fillStyle = "#063850";
+    ctx.fillRect(18, 18, 60, 60);
+    ctx.fillStyle = "#6fe3f5";
+    ctx.fillRect(28, 28, 40, 40);
+    ctx.fillStyle = "#073044";
+    ctx.font = "700 45px system-ui, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText("DEMO FM", 92, height / 2);
+  }),
+  portrait: art(144, 240, (ctx, width, height) => {
+    const sky = ctx.createLinearGradient(0, 0, 0, height);
+    sky.addColorStop(0, "#ffcc69");
+    sky.addColorStop(.48, "#f05d75");
+    sky.addColorStop(1, "#392067");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "#fff4c9";
+    ctx.beginPath();
+    ctx.arc(width / 2, 76, 42, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#28184f";
+    ctx.fillRect(0, 152, width, 88);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "700 19px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("PORTRAIT", width / 2, 185);
+    ctx.font = "600 13px system-ui, sans-serif";
+    ctx.fillText("DEMO ART", width / 2, 207);
+  }),
+  square: art(192, 192, (ctx, width, height) => {
+    ctx.fillStyle = "#10254f";
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "#ffb02e";
+    ctx.beginPath();
+    ctx.moveTo(width / 2, 18);
+    ctx.lineTo(174, height / 2);
+    ctx.lineTo(width / 2, 174);
+    ctx.lineTo(18, height / 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#eafcff";
+    ctx.font = "800 28px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("SQUARE", width / 2, 85);
+    ctx.font = "600 16px system-ui, sans-serif";
+    ctx.fillText("DEMO", width / 2, 116);
+  }),
+};
 
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
-camera.position.z = 4.4;
-lightScene(scene, THREE);
-
-const orb = buildOrb();
-scene.add(orb);
-
-let t = 0;
-renderer.setAnimationLoop(() => {
-  t += 0.004;
-  for (const mesh of orb.userData.spinning) mesh.rotation.y = t;
-  renderer.render(scene, camera);
+const surface = document.getElementById("surface");
+surface.addEventListener("change", () => {
+  window.aerowaveOrb.setImage(samples[surface.value] || null);
 });
+
+const stage = document.getElementById("preview-stage");
+document.getElementById("orb-size").addEventListener("change", (event) => {
+  stage.style.setProperty("--orb-size", `${event.target.value}px`);
+});
+
+for (const button of document.querySelectorAll("[data-playing]")) {
+  button.addEventListener("click", () => {
+    const playing = button.dataset.playing === "true";
+    document.body.classList.toggle("playing", playing);
+    for (const peer of document.querySelectorAll("[data-playing]")) {
+      peer.setAttribute("aria-pressed", String(peer === button));
+    }
+  });
+}
 </script>
 </body>
 </html>

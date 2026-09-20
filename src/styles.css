@@ -277,7 +277,7 @@ main {
   width: 230px; height: 230px;
   border-radius: 50%;
   background: radial-gradient(circle at 34% 26%,
-      #cdfaff 0%, #79e6fb 14%, #34bcdd 34%, #10789e 58%, #06405c 78%, #03212f 100%);
+      #ddfff5 0%, #9cede9 14%, #27b3ce 34%, #1388aa 58%, #07384f 78%, #03212f 100%);
   box-shadow:
     0 0 40px rgba(90, 220, 250, .28),
     0 18px 34px rgba(0, 0, 0, .5),
@@ -298,8 +298,7 @@ body.playing .orb {
 
 .orb-body { position: absolute; inset: 0; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(230, 252, 255, .55); }
 
-/* orb3d.js adds .gl once WebGL is up: the painted sphere steps aside and the
-   real one takes over, keeping the glow, the ring and the arcs. */
+/* orb3d.js adds .gl once WebGL is up: the painted sphere steps aside. */
 #orb3d {
   position: absolute;
   inset: -6%;
@@ -313,7 +312,7 @@ body.playing .orb {
   cursor: pointer;
   /* No shadow or glow here: the container is larger than the ball drawn
      inside it, so anything painted on its edge reads as a capsule around
-     the orb. The glow is part of the WebGL scene instead. */
+     the orb. Its edge light belongs to the rendered surface instead. */
   box-shadow: none;
 }
 body.playing .orb.gl { box-shadow: none; }
@@ -326,21 +325,21 @@ body.playing .orb.gl { box-shadow: none; }
   opacity: 0;
   pointer-events: none;
 }
-.orb-kick.go { animation: kickring .5s cubic-bezier(.2, .7, .3, 1); }
+.orb-kick.go { animation: kickring .5s steps(8, end); }
 @keyframes kickring {
   0%   { transform: scale(.98);  opacity: .9; border-width: 3px; }
-  100% { transform: scale(1.55); opacity: 0;  border-width: 1px; }
+  100% { transform: scale(1.32); opacity: 0;  border-width: 1px; }
 }
 
 /* the hop: crouch, up, squash on landing, small rebound - half a second */
 .orb.gl,
 body.playing .orb.gl { animation: none; }
 .orb.gl.kick,
-body.playing .orb.gl.kick { animation: orbhop .5s cubic-bezier(.3, .8, .35, 1); }
+body.playing .orb.gl.kick { animation: orbhop .5s steps(3, end); }
 @keyframes orbhop {
   0%   { transform: translateY(0)     scale(1, 1); }
   12%  { transform: translateY(-3px)  scale(.96, 1.06); }
-  40%  { transform: translateY(-22px) scale(1.02, .98); }
+  40%  { transform: translateY(-12px) scale(1.02, .98); }
   72%  { transform: translateY(0)     scale(1.07, .93); }
   88%  { transform: translateY(-4px)  scale(.99, 1.02); }
   100% { transform: translateY(0)     scale(1, 1); }
@@ -1055,7 +1054,7 @@ select.field option { background: #062434; color: var(--foam); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .bloom, .shafts, .ringpulse, body.playing .orb { animation: none !important; }
+  .bloom, .shafts, .ringpulse, .orb, .orb-kick { animation: none !important; }
 }
 
 /* An alarm that could not find anything to play still has to be impossible
