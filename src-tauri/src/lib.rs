@@ -117,7 +117,7 @@ fn local_time(at_ms: Option<i64>) -> Result<LocalTime, String> {
 
 #[tauri::command]
 fn save_stations(state: State<AppState>, stations: Vec<Station>) -> Result<(), String> {
-    state.store.update(|d| d.stations = stations)
+    state.store.replace_stations(stations)
 }
 
 #[tauri::command]

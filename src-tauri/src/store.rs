@@ -303,10 +303,26 @@ impl Store {
         // One writer at a time, all the way through the rename.
         let _writing = self.write_lock.lock().unwrap();
         let data = self.snapshot();
-        let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
+        self.write_snapshot(&data)
+    }
+
+    fn write_snapshot(&self, data: &AppData) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
         let tmp = self.path.with_extension("json.tmp");
         fs::write(&tmp, json).map_err(|e| format!("write {}: {e}", tmp.display()))?;
         fs::rename(&tmp, &self.path).map_err(|e| format!("rename config: {e}"))
+    }
+
+    /// A failed Add must not enter memory and hitch a ride on the next save.
+    /// Hold both locks so no concurrent settings write can replace the candidate.
+    pub fn replace_stations(&self, stations: Vec<Station>) -> Result<(), String> {
+        let _writing = self.write_lock.lock().unwrap();
+        let mut data = self.data.lock().unwrap();
+        aerowave_core::persistence::update(
+            &mut *data,
+            |candidate| candidate.stations = stations,
+            |candidate| self.write_snapshot(candidate),
+        )
     }
 
     /// Mutate the data under lock, then persist.

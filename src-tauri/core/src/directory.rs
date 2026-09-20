@@ -6,6 +6,71 @@
 //! `url_resolved`. None of that needs the network, so it lives here where it
 //! can be tested.
 
+use std::collections::{HashMap, HashSet};
+
+/// Formats the Browse tab can hand to the player.
+pub const DIRECTORY_CODECS: [&str; 5] = ["MP3", "AAC", "AAC+", "OGG", "FLAC"];
+
+/// The last directory offset Browse deliberately exposes. The catalogue is
+/// for narrowing and searching rather than walking indefinitely.
+pub const DIRECTORY_MAX_OFFSET: u32 = 1000;
+
+/// The directory request derived from a caller's paging values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryPageWindow {
+    pub limit: u32,
+    pub offset: u32,
+}
+
+impl DirectoryPageWindow {
+    /// A next request can advance only while this page was full and the offset
+    /// cap has not been reached. In particular, a full page at the cap must not
+    /// invite the caller to request the same clamped page forever.
+    pub fn has_more(self, offered: u32) -> bool {
+        offered >= self.limit
+            && self.offset.saturating_add(offered) <= DIRECTORY_MAX_OFFSET
+    }
+}
+
+pub fn directory_page_window(limit: u32, offset: u32) -> DirectoryPageWindow {
+    DirectoryPageWindow {
+        limit: limit.clamp(1, 100),
+        offset: offset.min(DIRECTORY_MAX_OFFSET),
+    }
+}
+
+/// A selected tag is one concrete dropdown value. Radio Browser's ordinary
+/// `tag` search is a substring search, so it must travel with `tagExact=true`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryTagFilter {
+    pub value: String,
+    pub exact: bool,
+}
+
+pub fn exact_tag_filter(raw: &str) -> Option<DirectoryTagFilter> {
+    let value = raw.trim();
+    (!value.is_empty()).then(|| DirectoryTagFilter {
+        value: value.to_string(),
+        exact: true,
+    })
+}
+
+/// Which directory failures mean the session should choose another mirror.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectoryFailure {
+    Request,
+    HttpStatus(u16),
+    Body,
+    Json,
+}
+
+pub fn directory_failure_forgets_mirror(failure: DirectoryFailure) -> bool {
+    match failure {
+        DirectoryFailure::Request | DirectoryFailure::Body | DirectoryFailure::Json => true,
+        DirectoryFailure::HttpStatus(status) => (500..600).contains(&status),
+    }
+}
+
 /// Collapse a directory name onto one line and cap it at `max` characters.
 ///
 /// Control characters are turned into spaces rather than dropped: a name sent
@@ -165,6 +230,88 @@ pub fn stream_key(url: &str) -> String {
         None => lower.strip_prefix("http://").unwrap_or(lower.as_str()),
     };
     bare.trim_end_matches('/').to_string()
+}
+
+/// The directory fields one facet tally needs from a submitted station.
+pub struct DirectoryFacetEntry<'a> {
+    pub url: &'a str,
+    pub resolved_url: &'a str,
+    pub name: &'a str,
+    pub tags: &'a str,
+    pub country_code: &'a str,
+    pub country_name: &'a str,
+    pub codec: &'a str,
+    pub bitrate: u32,
+}
+
+/// Counts aligned with the Browse dropdowns after duplicate streams have been
+/// collapsed independently inside each target bucket.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DirectoryFacetTally {
+    pub tags: HashMap<String, u32>,
+    pub countries: HashMap<String, (String, u32)>,
+    pub codecs: Vec<u32>,
+    pub bitrates: Vec<u32>,
+}
+
+/// Count every stream once in each classification a corresponding filtered
+/// search can find. A public stream may have several submissions with different
+/// countries or tags. Discarding the later submission globally would erase a
+/// real target bucket even though filtering by that bucket still returns it.
+pub fn tally_directory_facets<'a>(
+    entries: impl IntoIterator<Item = DirectoryFacetEntry<'a>>,
+) -> DirectoryFacetTally {
+    let mut tally = DirectoryFacetTally {
+        codecs: vec![0; DIRECTORY_CODECS.len()],
+        bitrates: vec![0; BITRATE_BANDS.len()],
+        ..DirectoryFacetTally::default()
+    };
+    let mut seen_tags: HashSet<(String, String)> = HashSet::new();
+    let mut seen_countries: HashSet<(String, String)> = HashSet::new();
+    let mut seen_codecs: HashSet<(String, usize)> = HashSet::new();
+    let mut seen_bitrates: HashSet<(String, usize)> = HashSet::new();
+
+    for entry in entries {
+        let Some(url) = playable_url(entry.url, entry.resolved_url) else {
+            continue;
+        };
+        if clean_name(entry.name, 60).is_empty() {
+            continue;
+        }
+        let stream = stream_key(&url);
+
+        let codec = clean_name(entry.codec, 16).to_ascii_uppercase();
+        if let Some(slot) = DIRECTORY_CODECS.iter().position(|known| *known == codec) {
+            if seen_codecs.insert((stream.clone(), slot)) {
+                tally.codecs[slot] += 1;
+            }
+        }
+
+        if let Some(slot) = bitrate_band_index(entry.bitrate) {
+            if seen_bitrates.insert((stream.clone(), slot)) {
+                tally.bitrates[slot] += 1;
+            }
+        }
+
+        for tag in entry.tags.split(',') {
+            let value = tag.trim();
+            if !value.is_empty() && seen_tags.insert((stream.clone(), value.to_string())) {
+                *tally.tags.entry(value.to_string()).or_default() += 1;
+            }
+        }
+
+        let code = clean_name(entry.country_code, 2).to_ascii_uppercase();
+        let name = clean_name(entry.country_name, 60);
+        if is_country_code(&code)
+            && !name.is_empty()
+            && seen_countries.insert((stream.clone(), code.clone()))
+        {
+            let slot = tally.countries.entry(code).or_insert((name, 0));
+            slot.1 += 1;
+        }
+    }
+
+    tally
 }
 
 /// Does a directory entry describe one of the stream addresses the player
@@ -463,5 +610,113 @@ mod tests {
         assert!(bitrate_band_by_key("").is_none());
         assert!(bitrate_band_by_key("0").is_none());
         assert!(bitrate_band_by_key("nonsense").is_none());
+    }
+
+    #[test]
+    fn a_selected_directory_tag_is_always_exact() {
+        assert_eq!(
+            exact_tag_filter("  rock  "),
+            Some(DirectoryTagFilter {
+                value: "rock".into(),
+                exact: true,
+            })
+        );
+        assert_eq!(exact_tag_filter("  "), None);
+    }
+
+    #[test]
+    fn duplicate_streams_are_collapsed_inside_each_facet_bucket() {
+        let entries = [
+            DirectoryFacetEntry {
+                url: "http://radio.example/live",
+                resolved_url: "",
+                name: "Radio One",
+                tags: "dance,dance",
+                country_code: "MX",
+                country_name: "Mexico",
+                codec: "AAC",
+                bitrate: 0,
+            },
+            DirectoryFacetEntry {
+                url: "https://radio.example/live/",
+                resolved_url: "",
+                name: "Radio One UK",
+                tags: "dance,edm",
+                country_code: "GB",
+                country_name: "United Kingdom",
+                codec: "AAC",
+                bitrate: 128,
+            },
+            DirectoryFacetEntry {
+                url: "http://radio.example/live",
+                resolved_url: "",
+                name: "Radio One alternate",
+                tags: "dance",
+                country_code: "MX",
+                country_name: "Mexico",
+                codec: "MP3",
+                bitrate: 64,
+            },
+            DirectoryFacetEntry {
+                url: "https://other.example/stream",
+                resolved_url: "",
+                name: "Other",
+                tags: "dance",
+                country_code: "MX",
+                country_name: "Mexico",
+                codec: "AAC",
+                bitrate: 128,
+            },
+        ];
+
+        let tally = tally_directory_facets(entries);
+        assert_eq!(tally.tags.get("dance"), Some(&2));
+        assert_eq!(tally.tags.get("edm"), Some(&1));
+        assert_eq!(tally.countries.get("MX").map(|entry| entry.1), Some(2));
+        assert_eq!(tally.countries.get("GB").map(|entry| entry.1), Some(1));
+        assert_eq!(tally.codecs[0], 1); // MP3
+        assert_eq!(tally.codecs[1], 2); // AAC
+        assert_eq!(tally.bitrates[2], 1); // 64k
+        assert_eq!(tally.bitrates[4], 2); // 128k
+    }
+
+    #[test]
+    fn body_and_json_failures_release_a_directory_mirror() {
+        assert!(directory_failure_forgets_mirror(DirectoryFailure::Request));
+        assert!(directory_failure_forgets_mirror(
+            DirectoryFailure::HttpStatus(503)
+        ));
+        assert!(directory_failure_forgets_mirror(DirectoryFailure::Body));
+        assert!(directory_failure_forgets_mirror(DirectoryFailure::Json));
+        assert!(!directory_failure_forgets_mirror(
+            DirectoryFailure::HttpStatus(404)
+        ));
+        assert!(!directory_failure_forgets_mirror(
+            DirectoryFailure::HttpStatus(429)
+        ));
+    }
+
+    #[test]
+    fn a_full_page_at_the_offset_cap_has_no_next_page() {
+        let first = directory_page_window(40, 0);
+        assert_eq!(
+            first,
+            DirectoryPageWindow {
+                limit: 40,
+                offset: 0
+            }
+        );
+        assert!(first.has_more(40));
+        assert!(!first.has_more(39));
+
+        assert!(directory_page_window(40, 960).has_more(40));
+        assert!(!directory_page_window(40, 980).has_more(40));
+        let last = directory_page_window(40, DIRECTORY_MAX_OFFSET);
+        assert!(!last.has_more(40));
+        assert_eq!(directory_page_window(0, u32::MAX).limit, 1);
+        assert_eq!(
+            directory_page_window(500, u32::MAX).offset,
+            DIRECTORY_MAX_OFFSET
+        );
     }
 }
