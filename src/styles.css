@@ -405,8 +405,14 @@ body.playing .orb.gl.kick { animation: orbhop .5s ease-out; }
 .track {
   margin: 0;
   font-size: 14px;
+  line-height: 1.4;
   color: rgba(226, 250, 255, .88);
-  min-height: 1.2em;
+  min-height: 1.4em;
+  max-height: 2.8em;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
   overflow-wrap: anywhere;
 }
 

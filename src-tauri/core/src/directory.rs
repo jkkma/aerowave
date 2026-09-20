@@ -71,6 +71,54 @@ pub fn directory_failure_forgets_mirror(failure: DirectoryFailure) -> bool {
     }
 }
 
+/// Valid mirror names, once each and in the order the directory supplied.
+///
+/// The servers endpoint currently repeats a hostname when both its IPv4 and
+/// IPv6 addresses are healthy. Those are two routes to one mirror, not two
+/// useful retry choices. Hostnames compare without regard to ASCII case, so
+/// normalising here also prevents a differently-cased duplicate from slipping
+/// through.
+pub fn directory_host_candidates<I, S>(names: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen = HashSet::new();
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let name = name.as_ref();
+            if !is_hostname(name) {
+                return None;
+            }
+            let normalised = name.to_ascii_lowercase();
+            seen.insert(normalised.clone()).then_some(normalised)
+        })
+        .collect()
+}
+
+/// Choose from an already ordered mirror list, avoiding the failed host when
+/// another one is available. An empty discovery on a retry keeps the previous
+/// host: a temporary failure to list mirrors must not invent a second server.
+pub fn select_directory_host(
+    candidates: &[String],
+    failed_host: Option<&str>,
+    fallback_host: &str,
+) -> String {
+    if let Some(candidate) = candidates.iter().find(|candidate| {
+        failed_host
+            .map(|failed| !candidate.eq_ignore_ascii_case(failed))
+            .unwrap_or(true)
+    }) {
+        return candidate.clone();
+    }
+    candidates
+        .first()
+        .cloned()
+        .or_else(|| failed_host.map(str::to_string))
+        .unwrap_or_else(|| fallback_host.to_string())
+}
+
 /// Collapse a directory name onto one line and cap it at `max` characters.
 ///
 /// Control characters are turned into spaces rather than dropped: a name sent
@@ -694,6 +742,55 @@ mod tests {
         assert!(!directory_failure_forgets_mirror(
             DirectoryFailure::HttpStatus(429)
         ));
+    }
+
+    #[test]
+    fn mirror_candidates_are_valid_unique_hostnames() {
+        assert_eq!(
+            directory_host_candidates([
+                "de1.api.radio-browser.info",
+                "DE1.API.RADIO-BROWSER.INFO",
+                "https://not-a-host.example",
+                "nl1.api.radio-browser.info",
+                "de1.api.radio-browser.info",
+            ]),
+            vec![
+                "de1.api.radio-browser.info".to_string(),
+                "nl1.api.radio-browser.info".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn retry_prefers_another_mirror_but_never_invents_one() {
+        let discovered = vec![
+            "de1.api.radio-browser.info".to_string(),
+            "nl1.api.radio-browser.info".to_string(),
+        ];
+        assert_eq!(
+            select_directory_host(
+                &discovered,
+                Some("de1.api.radio-browser.info"),
+                "fallback.example",
+            ),
+            "nl1.api.radio-browser.info"
+        );
+        assert_eq!(
+            select_directory_host(
+                &["de1.api.radio-browser.info".to_string()],
+                Some("de1.api.radio-browser.info"),
+                "fallback.example",
+            ),
+            "de1.api.radio-browser.info"
+        );
+        assert_eq!(
+            select_directory_host(&[], Some("de1.api.radio-browser.info"), "fallback.example"),
+            "de1.api.radio-browser.info"
+        );
+        assert_eq!(
+            select_directory_host(&[], None, "fallback.example"),
+            "fallback.example"
+        );
     }
 
     #[test]

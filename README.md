@@ -99,6 +99,10 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   An explicit empty ICY or container title clears the previous song; a metadata
   heartbeat leaves it alone. Streams that provide no song information remain
   untitled rather than borrowing a title from another station.
+- Stations such as M80 can put a `RadioInfo` XML document inside their ICY
+  title. Its artist and song fields become the now-playing text instead of
+  exposing the document. Long track titles occupy at most two lines, with the
+  full text available on hover, so they cannot crowd out the playback controls.
 - HLS text honors UTF-16 byte order and ID3 frame flags before decoding. Song
   information follows its Settings switch on every playback path, and desktop
   media controls receive the same current title and station image as the page.
@@ -179,11 +183,11 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - Adding a station shows a pending state until its settings file is written.
   If the write fails, `+` becomes available to retry. Failed additions cannot
   be swept into a later settings save.
-- Results are listed by country, and alphabetically inside each one, with MORE
-  pages further in. The directory itself pages in name order, so the whole
-  list is sorted again as each page lands: that keeps one alphabet running
-  through a country rather than starting a fresh one at every page boundary.
-  A station the directory has no country for sorts last. The genre list is
+- Each page is listed by country, and alphabetically inside each one. MORE
+  appends the next page without moving the rows already loaded, so stations
+  without a country do not keep reappearing at the bottom as though they were
+  new. The directory itself pages in name order. A station the directory has no
+  country for sorts last within its page. The genre list is
   the busiest two hundred tags — the directory holds tens of thousands,
   nearly all of them one station's private label.
 - MORE keeps the submitted search even if you edit the name field before
@@ -197,6 +201,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   countries that carry it; and both are counted under whatever format and
   bitrate are also set, because "Paraguay (68)" beside a 320k filter promises
   stations the next search cannot find.
+  Counts include the submitted station name too. Editing the search field takes
+  effect when a new search starts, and outdated counts are cleared while their
+  replacements load. A selected filter with no matches stays visible with zero.
   A selected genre matches that individual tag exactly, so `rock` does not
   also count entries tagged only `hard rock`.
 - Format and bitrate are annotated rather than rebuilt. They are short fixed
@@ -242,7 +249,7 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   place the stream first appeared, so a page stays in the order it was paged
   in.
   A higher-voted submission on a later page replaces the earlier representative
-  before the visible list is sorted again.
+  in place.
 - Every count is of what the list will actually show, not of what the directory
   holds. The same station is submitted more than once all the time — Albania's
   two AAC+ stations were "Radio One - Tirana 95.2 FM" and "RadioOne", the same
@@ -264,8 +271,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   reach are left out, duplicate submissions of one stream are collapsed, and
   anything that is not an `http(s)` address is dropped rather than saved as a
   station that could only ever fail.
-  A mirror that returns a failed or malformed response is released so later
-  requests can discover a healthy one.
+  A connection failure, server error or malformed response gets one automatic
+  retry within the same time limit. The retry prefers another discovered mirror;
+  when only one is available, it tries that server again after a short pause.
 - HLS entries are flagged in the row and play through hls.js.
 - An added station is an ordinary station — editable, taggable, and usable as an
   alarm source like any other.

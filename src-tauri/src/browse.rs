@@ -3,22 +3,22 @@
 //! radio-browser is a community-run catalogue of internet radio stations,
 //! served by a handful of volunteer mirrors. The polite way to use it is to
 //! ask which mirrors exist, pick one at random and stay on it for the run,
-//! and to say who you are in the User-Agent - which `stream`'s client, shared
-//! with this module, already does.
+//! and to say who you are in the User-Agent. The directory client uses the
+//! same application identity as the stream client.
 //!
 //! Nothing here writes to the station list. A search hands the webview a list
 //! of candidates; saving one is a deliberate press of ADD, and what gets
 //! saved is an ordinary station like any other.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use aerowave_core::directory::{
-    bitrate_band_by_key, clean_name, directory_failure_forgets_mirror, directory_page_window,
-    exact_tag_filter, first_tag, image_kind, is_country_code, is_hostname, playable_url, sort_key,
-    stream_key, stream_matches, tally_directory_facets, DirectoryFacetEntry, DirectoryFailure,
-    BITRATE_BANDS, DIRECTORY_CODECS,
+    bitrate_band_by_key, clean_name, directory_failure_forgets_mirror, directory_host_candidates,
+    directory_page_window, exact_tag_filter, first_tag, image_kind, is_country_code, is_hostname,
+    playable_url, select_directory_host, sort_key, stream_key, stream_matches,
+    tally_directory_facets, DirectoryFacetEntry, DirectoryFailure, BITRATE_BANDS, DIRECTORY_CODECS,
 };
 use aerowave_core::network::public_http_destination_allowed;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -68,34 +68,274 @@ const MAX_ART_TRIES: usize = 4;
 /// of them one station's private label; the busiest couple of hundred are the
 /// ones worth putting in a list, and they reach down to around 150 stations.
 const TAG_LIMIT: u32 = 200;
+/// Mirror discovery is only a preface to the useful request. Leave the rest
+/// of the operation budget available for the documented fallback host when
+/// the round-robin endpoint itself is slow.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// A failed mirror gets one more attempt after a short pause. Long enough not
+/// to hammer a volunteer server, short enough that Browse still feels like a
+/// single request.
+const RETRY_BACKOFF: Duration = Duration::from_millis(250);
 
-/// The mirror this run settled on. Staying with one spreads the load the way
-/// the directory asks, and keeps paging honest: mirrors sync on their own
-/// schedule, so a second page from another one can repeat half of the first.
-static HOST: Mutex<Option<String>> = Mutex::new(None);
-static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static DIRECTORY_CLIENT: OnceLock<DirectoryClient> = OnceLock::new();
 static LOGO_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
-/// The directory gets its own client rather than borrowing `stream`'s.
+type OriginResolver = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
+/// One directory session, including the mirror it has settled on.
 ///
-/// That one sets a five-second read timeout, which is right for a radio
-/// server - it should start talking at once - and wrong for a mirror running
-/// a five-thousand-row query before it writes a status line. reqwest applies
-/// that timeout to the wait for the response head, so sharing the client
-/// would quietly cap every request here at five seconds no matter what the
-/// per-request budget below says.
-fn client() -> Result<reqwest::Client, String> {
-    if let Some(existing) = CLIENT.get() {
-        return Ok(existing.clone());
+/// The configurable endpoints are an internal seam for `directorycheck`: the
+/// app constructs only the HTTPS production form below, while the example can
+/// route validated pretend hostnames to loopback fixtures and exercise this
+/// exact retry loop.
+pub(crate) struct DirectoryClient {
+    http: reqwest::Client,
+    discovery_url: String,
+    fallback_host: String,
+    origin_for_host: OriginResolver,
+    /// Staying with one host spreads load as requested and keeps paging
+    /// coherent when mirrors are at slightly different points in their sync.
+    host: Mutex<Option<String>>,
+}
+
+impl DirectoryClient {
+    pub(crate) fn with_endpoints(
+        discovery_url: impl Into<String>,
+        fallback_host: impl Into<String>,
+        origin_for_host: OriginResolver,
+    ) -> Result<Self, String> {
+        let fallback_host = fallback_host.into();
+        if !is_hostname(&fallback_host) {
+            return Err("the directory fallback is not a hostname".into());
+        }
+        let http = reqwest::Client::builder()
+            .user_agent(UA)
+            .connect_timeout(Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::limited(4))
+            .build()
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            http,
+            discovery_url: discovery_url.into(),
+            fallback_host: fallback_host.to_ascii_lowercase(),
+            origin_for_host,
+            host: Mutex::new(None),
+        })
     }
-    let built = reqwest::Client::builder()
-        .user_agent(UA)
-        .connect_timeout(Duration::from_secs(8))
-        .read_timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(4))
-        .build()
-        .map_err(|e| e.to_string())?;
-    Ok(CLIENT.get_or_init(|| built).clone())
+
+    /// Clear only the host that actually failed. A slow request to an old
+    /// mirror must not erase a healthier mirror another request selected in
+    /// the meantime.
+    fn forget(&self, host: &str) {
+        let mut slot = self.host.lock().unwrap();
+        if slot
+            .as_deref()
+            .map(|current| current.eq_ignore_ascii_case(host))
+            .unwrap_or(false)
+        {
+            *slot = None;
+        }
+    }
+
+    async fn discover(&self, deadline: tokio::time::Instant) -> Vec<String> {
+        let discovery_cap = tokio::time::Instant::now() + DISCOVERY_TIMEOUT;
+        let discovery_deadline = if discovery_cap < deadline {
+            discovery_cap
+        } else {
+            deadline
+        };
+        let response = match tokio::time::timeout_at(
+            discovery_deadline,
+            self.http.get(&self.discovery_url).send(),
+        )
+        .await
+        {
+            Ok(Ok(response)) if response.status().is_success() => response,
+            _ => return Vec::new(),
+        };
+        let body = match tokio::time::timeout_at(
+            discovery_deadline,
+            read_capped(response, MAX_BODY_BYTES),
+        )
+        .await
+        {
+            Ok(Ok(body)) => body,
+            _ => return Vec::new(),
+        };
+        let mirrors: Vec<Mirror> = match serde_json::from_str(&body) {
+            Ok(mirrors) => mirrors,
+            Err(_) => return Vec::new(),
+        };
+        let mut names =
+            directory_host_candidates(mirrors.into_iter().filter_map(|mirror| mirror.name));
+        names.shuffle(&mut rand::thread_rng());
+        names
+    }
+
+    async fn host(&self, failed_host: Option<&str>, deadline: tokio::time::Instant) -> String {
+        // Drop the std guard before discovery. Holding it across an await
+        // would make the future unsendable, and Tauri requires Send futures.
+        let known = self.host.lock().unwrap().clone();
+        if let Some(known) = known {
+            if failed_host
+                .map(|failed| !known.eq_ignore_ascii_case(failed))
+                .unwrap_or(true)
+            {
+                return known;
+            }
+        }
+
+        let discovered = self.discover(deadline).await;
+        let picked = select_directory_host(&discovered, failed_host, &self.fallback_host);
+
+        // Searches racing through discovery must converge on the host already
+        // chosen after their await. The sole exception is the exact failed
+        // host when this discovery found a different mirror for the retry.
+        let mut slot = self.host.lock().unwrap();
+        match slot.as_ref() {
+            Some(current)
+                if failed_host
+                    .map(|failed| current.eq_ignore_ascii_case(failed))
+                    .unwrap_or(false)
+                    && !current.eq_ignore_ascii_case(&picked) =>
+            {
+                *slot = Some(picked.clone());
+                picked
+            }
+            Some(current) => current.clone(),
+            None => {
+                *slot = Some(picked.clone());
+                picked
+            }
+        }
+    }
+
+    async fn request_json_once<T: DeserializeOwned>(
+        &self,
+        host: &str,
+        path: &str,
+        params: &[(&str, String)],
+        deadline: tokio::time::Instant,
+        cap: usize,
+        description: &str,
+    ) -> Result<T, DirectoryAttemptFailure> {
+        // Hostnames remain validated even for the internal fixture seam. Only
+        // the origin mapping changes; production always resolves to HTTPS.
+        if !is_hostname(host) {
+            return Err(DirectoryAttemptFailure::new(
+                DirectoryFailure::Request,
+                "radio-browser selected an invalid mirror hostname",
+            ));
+        }
+        let origin = (self.origin_for_host)(host);
+        let url = format!("{}/json/{path}", origin.trim_end_matches('/'));
+        let response = tokio::time::timeout_at(deadline, self.http.get(url).query(params).send())
+            .await
+            .map_err(|_| {
+                DirectoryAttemptFailure::new(
+                    DirectoryFailure::Request,
+                    "radio-browser request exceeded its total time limit",
+                )
+            })?
+            .map_err(|error| {
+                DirectoryAttemptFailure::new(
+                    DirectoryFailure::Request,
+                    format!("radio-browser: {}", describe(&error)),
+                )
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(DirectoryAttemptFailure::new(
+                DirectoryFailure::HttpStatus(status.as_u16()),
+                format!("radio-browser answered {status} from {host}"),
+            ));
+        }
+
+        let body = tokio::time::timeout_at(deadline, read_capped(response, cap))
+            .await
+            .map_err(|_| {
+                DirectoryAttemptFailure::new(
+                    DirectoryFailure::Body,
+                    "radio-browser response exceeded its total time limit",
+                )
+            })?
+            .map_err(|message| DirectoryAttemptFailure::new(DirectoryFailure::Body, message))?;
+        serde_json::from_str(&body).map_err(|error| {
+            DirectoryAttemptFailure::new(DirectoryFailure::Json, format!("{description}: {error}"))
+        })
+    }
+
+    /// Fetch and decode one endpoint, retrying once when a mirror is
+    /// transiently unavailable or returns an unreadable response. Discovery,
+    /// both attempts, response bodies and the pause all share one deadline.
+    pub(crate) async fn get_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+        budget: Duration,
+        cap: usize,
+        description: &str,
+    ) -> Result<T, String> {
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut failed_host: Option<String> = None;
+
+        for attempt in 0..2 {
+            let host = self.host(failed_host.as_deref(), deadline).await;
+            if tokio::time::Instant::now() >= deadline {
+                return Err("radio-browser request exceeded its total time limit".into());
+            }
+            match self
+                .request_json_once(&host, path, params, deadline, cap, description)
+                .await
+            {
+                Ok(value) => return Ok(value),
+                Err(failure) => {
+                    let retryable = directory_failure_forgets_mirror(failure.kind);
+                    if retryable {
+                        self.forget(&host);
+                    }
+                    if !retryable || attempt == 1 {
+                        return Err(failure.message);
+                    }
+                    failed_host = Some(host);
+                    if deadline.saturating_duration_since(tokio::time::Instant::now())
+                        <= RETRY_BACKOFF
+                    {
+                        return Err(failure.message);
+                    }
+                    tokio::time::sleep(RETRY_BACKOFF).await;
+                }
+            }
+        }
+        unreachable!("the directory request loop has exactly two attempts")
+    }
+}
+
+struct DirectoryAttemptFailure {
+    kind: DirectoryFailure,
+    message: String,
+}
+
+impl DirectoryAttemptFailure {
+    fn new(kind: DirectoryFailure, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+fn directory_client() -> Result<&'static DirectoryClient, String> {
+    if let Some(existing) = DIRECTORY_CLIENT.get() {
+        return Ok(existing);
+    }
+    let built = DirectoryClient::with_endpoints(
+        SERVERS_URL,
+        FALLBACK_HOST,
+        Arc::new(|host| format!("https://{host}")),
+    )?;
+    Ok(DIRECTORY_CLIENT.get_or_init(|| built))
 }
 
 /// Artwork addresses come from a public directory and are therefore no more
@@ -110,16 +350,6 @@ fn logo_client() -> Result<reqwest::Client, String> {
         .build()
         .map_err(|e| e.to_string())?;
     Ok(LOGO_CLIENT.get_or_init(|| built).clone())
-}
-
-/// Stop asking a mirror that would not answer. Without this one bad draw -
-/// or one momentary network gap at startup - sticks for the whole run and
-/// every search, dropdown and tally after it fails the same way.
-fn forget(host: &str) {
-    let mut slot = HOST.lock().unwrap();
-    if slot.as_deref() == Some(host) {
-        *slot = None;
-    }
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -318,114 +548,18 @@ async fn read_capped(response: reqwest::Response, cap: usize) -> Result<String, 
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
-/// Ask which mirrors are up, and pick one.
-async fn discover() -> Option<String> {
-    let response = client()
-        .ok()?
-        .get(SERVERS_URL)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let body = read_capped(response, MAX_BODY_BYTES).await.ok()?;
-    let mirrors: Vec<Mirror> = serde_json::from_str(&body).ok()?;
-    let names: Vec<String> = mirrors
-        .into_iter()
-        .filter_map(|m| m.name)
-        .filter(|name| is_hostname(name))
-        .collect();
-    names.choose(&mut rand::thread_rng()).cloned()
-}
-
-/// The mirror to talk to: discovered once, then remembered.
-async fn host() -> String {
-    // Cloned out and the lock dropped before the await. A std guard held
-    // across one makes the whole future unsendable, and Tauri wants it sent.
-    let known = HOST.lock().unwrap().clone();
-    if let Some(host) = known {
-        return host;
-    }
-    let picked = discover().await.unwrap_or_else(|| FALLBACK_HOST.to_string());
-    // Two searches racing must still end up on one mirror: first past the
-    // post decides, and the other takes that answer rather than its own.
-    let mut slot = HOST.lock().unwrap();
-    slot.get_or_insert(picked).clone()
-}
-
-struct DirectoryResponse {
-    host: String,
-    body: String,
-}
-
-fn parse_directory_json<T: DeserializeOwned>(
-    response: DirectoryResponse,
-    description: &str,
-) -> Result<T, String> {
-    serde_json::from_str(&response.body).map_err(|error| {
-        if directory_failure_forgets_mirror(DirectoryFailure::Json) {
-            forget(&response.host);
-        }
-        format!("{description}: {error}")
-    })
-}
-
-/// Ask the directory for one of its JSON endpoints and hand back the body with
-/// the mirror that supplied it, so an unreadable answer can release that host.
-async fn get(
-    path: &str,
-    params: &[(&str, String)],
-    seconds: u64,
-    cap: usize,
-) -> Result<DirectoryResponse, String> {
-    let client = client()?;
-    let host = host().await;
-    let response = client
-        .get(format!("https://{host}/json/{path}"))
-        .query(params)
-        .timeout(Duration::from_secs(seconds))
-        .send()
-        .await
-        .map_err(|e| {
-            if directory_failure_forgets_mirror(DirectoryFailure::Request) {
-                forget(&host);
-            }
-            format!("radio-browser: {}", describe(&e))
-        })?;
-    if !response.status().is_success() {
-        if directory_failure_forgets_mirror(DirectoryFailure::HttpStatus(
-            response.status().as_u16(),
-        )) {
-            forget(&host);
-        }
-        return Err(format!(
-            "radio-browser answered {} from {host}",
-            response.status()
-        ));
-    }
-    let body = read_capped(response, cap).await.map_err(|error| {
-        if directory_failure_forgets_mirror(DirectoryFailure::Body) {
-            forget(&host);
-        }
-        error
-    })?;
-    Ok(DirectoryResponse { host, body })
-}
-
 /// The countries the directory has anything in, in the order a person would
 /// look through them.
 pub async fn countries() -> Result<Vec<Country>, String> {
-    let response = get(
-        "countries",
-        &[("hidebroken", "true".into())],
-        20,
-        MAX_BODY_BYTES,
-    )
-    .await?;
-    let raw: Vec<RawCountry> =
-        parse_directory_json(response, "radio-browser sent an unreadable country list")?;
+    let raw: Vec<RawCountry> = directory_client()?
+        .get_json(
+            "countries",
+            &[("hidebroken", "true".into())],
+            Duration::from_secs(20),
+            MAX_BODY_BYTES,
+            "radio-browser sent an unreadable country list",
+        )
+        .await?;
     let mut out: Vec<Country> = raw
         .into_iter()
         .filter_map(|entry| {
@@ -451,20 +585,20 @@ pub async fn countries() -> Result<Vec<Country>, String> {
 /// The genres worth offering as a filter, in the order a person would look
 /// through them.
 pub async fn tags() -> Result<Vec<Tag>, String> {
-    let response = get(
-        "tags",
-        &[
-            ("hidebroken", "true".into()),
-            ("order", "stationcount".into()),
-            ("reverse", "true".into()),
-            ("limit", TAG_LIMIT.to_string()),
-        ],
-        20,
-        MAX_BODY_BYTES,
-    )
-    .await?;
-    let raw: Vec<RawTag> =
-        parse_directory_json(response, "radio-browser sent an unreadable genre list")?;
+    let raw: Vec<RawTag> = directory_client()?
+        .get_json(
+            "tags",
+            &[
+                ("hidebroken", "true".into()),
+                ("order", "stationcount".into()),
+                ("reverse", "true".into()),
+                ("limit", TAG_LIMIT.to_string()),
+            ],
+            Duration::from_secs(20),
+            MAX_BODY_BYTES,
+            "radio-browser sent an unreadable genre list",
+        )
+        .await?;
     let mut out: Vec<Tag> = raw
         .into_iter()
         .filter_map(|entry| {
@@ -529,8 +663,15 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
     // count at all: it promises stations that the next search cannot find.
     quality_params(&query, &mut params);
 
-    let response = get("stations/search", &params, 60, MAX_FACET_BYTES).await?;
-    let raw: Vec<Raw> = parse_directory_json(response, "radio-browser sent something unreadable")?;
+    let raw: Vec<Raw> = directory_client()?
+        .get_json(
+            "stations/search",
+            &params,
+            Duration::from_secs(60),
+            MAX_FACET_BYTES,
+            "radio-browser sent something unreadable",
+        )
+        .await?;
     let sampled = raw.len() as u32 >= FACET_LIMIT;
 
     let counted = tally_directory_facets(raw.iter().map(|entry| DirectoryFacetEntry {
@@ -695,8 +836,15 @@ async fn art_candidates(
     requested_resolved: &str,
 ) -> Result<Vec<String>, String> {
     let params = &[("url", query_url.to_string())];
-    let response = get("stations/byurl", params, 20, MAX_BODY_BYTES).await?;
-    let raw: Vec<Raw> = parse_directory_json(response, "radio-browser sent something unreadable")?;
+    let raw: Vec<Raw> = directory_client()?
+        .get_json(
+            "stations/byurl",
+            params,
+            Duration::from_secs(20),
+            MAX_BODY_BYTES,
+            "radio-browser sent something unreadable",
+        )
+        .await?;
     Ok(raw
         .iter()
         .filter(|entry| {
@@ -814,8 +962,15 @@ pub async fn search(query: Query) -> Result<Page, String> {
     }
     quality_params(&query, &mut params);
 
-    let response = get("stations/search", &params, 20, MAX_BODY_BYTES).await?;
-    let raw: Vec<Raw> = parse_directory_json(response, "radio-browser sent something unreadable")?;
+    let raw: Vec<Raw> = directory_client()?
+        .get_json(
+            "stations/search",
+            &params,
+            Duration::from_secs(20),
+            MAX_BODY_BYTES,
+            "radio-browser sent something unreadable",
+        )
+        .await?;
     let offered = raw.len() as u32;
     let has_more = page.has_more(offered);
 
