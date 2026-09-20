@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-set-metadata-enabled"
+description = "Enables the set_metadata_enabled command without any pre-configured scope."
+commands.allow = ["set_metadata_enabled"]
+
+[[permission]]
+identifier = "deny-set-metadata-enabled"
+description = "Denies the set_metadata_enabled command without any pre-configured scope."
+commands.deny = ["set_metadata_enabled"]

@@ -10,6 +10,12 @@ pub struct PlayPayload {
     pub volume: f64,
     pub generation: i64,
     pub is_hls: bool,
+    #[serde(default = "enabled_by_default")]
+    pub show_metadata: bool,
+    /// A normalized, bounded PNG data URL. Native code validates this again
+    /// before exposing it to Media3 or persisting it for service restoration.
+    #[serde(default)]
+    pub artwork_data_url: Option<String>,
     #[serde(default)]
     pub sleep_revision: Option<u64>,
     /// A persisted Android document-tree URI. When present, Media3 advances
@@ -19,6 +25,31 @@ pub struct PlayPayload {
     /// A persisted document-tree URI used if a radio source cannot play.
     #[serde(default)]
     pub backup_folder: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtworkPayload {
+    pub generation: i64,
+    pub source_url: String,
+    #[serde(default)]
+    pub artwork_data_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataEnabledPayload {
+    pub generation: i64,
+    pub source_url: String,
+    pub enabled: bool,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StreamTitlePayload {
+    pub source_url: String,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -64,6 +95,7 @@ pub struct PlaybackState {
     pub track_title: Option<String>,
     pub source_folder: Option<String>,
     pub is_hls: bool,
+    pub show_metadata: bool,
     pub sleep_timer: SleepTimerSnapshot,
 }
 
@@ -81,6 +113,7 @@ impl Default for PlaybackState {
             track_title: None,
             source_folder: None,
             is_hls: false,
+            show_metadata: true,
             sleep_timer: SleepTimerSnapshot::default(),
         }
     }

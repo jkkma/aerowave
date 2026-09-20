@@ -93,6 +93,20 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   interleaves nothing, played for as long as you left it. The stripper is in
   `core/`, and its test feeds the same stream in at every chunk size from one
   byte up to check the audio out is unchanged.
+- Ogg Vorbis and Opus titles come from the container's comment packets, including
+  new packets at chained song boundaries. Native FLAC comment blocks are read too.
+  The relay observes these bytes without removing the headers the decoder needs.
+  An explicit empty ICY or container title clears the previous song; a metadata
+  heartbeat leaves it alone. Streams that provide no song information remain
+  untitled rather than borrowing a title from another station.
+- HLS text honors UTF-16 byte order and ID3 frame flags before decoding. Song
+  information follows its Settings switch on every playback path, and desktop
+  media controls receive the same current title and station image as the page.
+- Station artwork is decoded before its address is remembered. A failed saved
+  logo can fall back to another directory entry for the same submitted or resolved
+  stream URL; a shared station name alone is not a match. Temporary lookup failures
+  retry with a bounded delay. Artwork requests validate public destinations,
+  DNS answers and redirects, using the same direct-connection rules as HLS.
 - A short-lived second connection is still opened once when a station starts,
   for the bitrate, genre and station name — none of which change. It repeats
   once a minute only for a station the relay is not carrying, and gives up

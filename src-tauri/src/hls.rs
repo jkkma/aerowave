@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use aerowave_core::network::{hls_destination_allowed, public_addresses};
+use aerowave_core::network::{public_addresses, public_http_destination_allowed};
 use rand::Rng;
 
 use crate::stream;
@@ -112,7 +112,7 @@ pub(crate) fn client_builder() -> reqwest::ClientBuilder {
         .dns_resolver(Arc::new(PublicDns))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             let url = attempt.url();
-            if !hls_destination_allowed(url.scheme(), url.host_str().unwrap_or("")) {
+            if !public_http_destination_allowed(url.scheme(), url.host_str().unwrap_or("")) {
                 attempt.error("that redirect does not lead to a public HTTP address")
             } else if attempt.previous().len() >= 6 {
                 attempt.error("too many HLS redirects")
@@ -254,7 +254,7 @@ impl Hls {
             return Err("only http and https can be fetched".into());
         }
         self.admit(session, &parsed)?;
-        if !hls_destination_allowed(parsed.scheme(), parsed.host_str().unwrap_or("")) {
+        if !public_http_destination_allowed(parsed.scheme(), parsed.host_str().unwrap_or("")) {
             return Err("that address is not one to fetch on a page's say-so".into());
         }
         let fetched = stream::fetch_once(&client()?, parsed.as_str(), range, MAX_BODY).await?;

@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use aerowave_core::icy::MetaStrip;
 use aerowave_core::local_media;
+use aerowave_core::stream_tags::StreamTags;
 use futures_util::StreamExt;
 use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -273,7 +274,13 @@ impl Relay {
             source.content_type
         );
         socket.write_all(head.as_bytes()).await?;
-        let mut pipe = Pipe::new(&self.on_title, &url, source.metaint);
+        let mut pipe = Pipe::new(
+            &self.on_title,
+            &url,
+            source.metaint,
+            &source.content_type,
+            &source.metadata_url,
+        );
         match source.body {
             RelayBody::Http(resp) => {
                 // reqwest has already undone the chunked framing. Forwarding
@@ -322,27 +329,42 @@ struct Pipe<'a> {
     on_title: &'a TitleSink,
     url: &'a str,
     strip: Option<MetaStrip>,
+    tags: Option<StreamTags>,
     audio: Vec<u8>,
     last: Option<String>,
 }
 
 impl<'a> Pipe<'a> {
-    fn new(on_title: &'a TitleSink, url: &'a str, metaint: usize) -> Self {
+    fn new(
+        on_title: &'a TitleSink,
+        url: &'a str,
+        metaint: usize,
+        content_type: &str,
+        metadata_url: &str,
+    ) -> Self {
         Self {
             on_title,
             url,
             strip: (metaint > 0).then(|| MetaStrip::new(metaint)),
+            tags: StreamTags::for_stream(content_type, metadata_url),
             audio: Vec::new(),
             last: None,
         }
     }
 
     async fn write(&mut self, socket: &mut TcpStream, chunk: &[u8]) -> std::io::Result<()> {
-        let Some(strip) = self.strip.as_mut() else {
-            return socket.write_all(chunk).await;
-        };
         self.audio.clear();
-        for title in strip.push(chunk, &mut self.audio) {
+        let mut titles = match self.strip.as_mut() {
+            Some(strip) => strip.push(chunk, &mut self.audio),
+            None => {
+                self.audio.extend_from_slice(chunk);
+                Vec::new()
+            }
+        };
+        if let Some(tags) = self.tags.as_mut() {
+            titles.extend(tags.push(&self.audio));
+        }
+        for title in titles {
             // Not every server saves its breath between tracks; some repeat
             // the current title in every block. Only the changes are news.
             if self.last.as_deref() == Some(title.as_str()) {

@@ -79,6 +79,44 @@ class ChainedOpusExtractorsFactoryTest {
   }
 
   @Test
+  fun publishesMetadataFromSuppressedRepeatedOpusTagsAtTheLinkBoundary() {
+    val metadata = mutableListOf<OpusStreamMetadata>()
+    val output = ChainedOpusTrackOutput(
+      RecordingTrackOutput(),
+      onStreamMetadata = metadata::add,
+    )
+    output.format(opusFormat(OPUS_HEAD))
+    emit(output, audioPacket(1), 0)
+    val boundaryUs = 240_000L
+    emit(output, OPUS_HEAD, boundaryUs)
+    emit(
+      output,
+      opusTags("ARTIST=Some Artist", "TITLE=Some Song"),
+      boundaryUs + OpusUtil.getPacketDurationUs(OPUS_HEAD),
+    )
+
+    assertEquals(
+      listOf(OpusStreamMetadata(boundaryUs, "Some Song", "Some Artist")),
+      metadata,
+    )
+    assertEquals("Some Artist - Some Song", metadata.single().displayTitle())
+  }
+
+  @Test
+  fun ignoresMalformedOrUnlabelledOpusComments() {
+    assertEquals(null, parseOpusTags("OpusTags".toByteArray(), 0))
+    assertEquals(null, parseOpusTags(opusTags("COMMENT=hello"), 0))
+  }
+
+  @Test
+  fun preservesAnExplicitEmptyTitleSoThePreviousLinkCanBeCleared() {
+    val metadata = parseOpusTags(opusTags("TITLE=", "ARTIST=Old Artist"), 50_000)!!
+
+    assertEquals("", metadata.title)
+    assertEquals("", metadata.displayTitle())
+  }
+
+  @Test
   fun realOggExtractorEmitsSecondLinkHeadersAndWrapperRemovesThem() {
     val fixture = chainedOggFixture()
     val unwrapped = extract(OggExtractor(), fixture)
@@ -334,6 +372,19 @@ class ChainedOpusExtractorsFactoryTest {
   }
 
   private fun audioPacket(marker: Int): ByteArray = byteArrayOf(0x98.toByte(), marker.toByte())
+
+  private fun opusTags(vararg comments: String): ByteArray = ByteArrayOutputStream().apply {
+    write("OpusTags".toByteArray(Charsets.US_ASCII))
+    val vendor = "test".toByteArray(Charsets.UTF_8)
+    writeLittleEndian(vendor.size.toLong(), 4)
+    write(vendor)
+    writeLittleEndian(comments.size.toLong(), 4)
+    comments.forEach { comment ->
+      val bytes = comment.toByteArray(Charsets.UTF_8)
+      writeLittleEndian(bytes.size.toLong(), 4)
+      write(bytes)
+    }
+  }.toByteArray()
 
   private data class CapturedSample(val timeUs: Long, val bytes: ByteArray)
 

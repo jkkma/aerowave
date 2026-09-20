@@ -40,6 +40,8 @@ class PlayArgs {
   var volume: Double = 1.0
   var generation: Long = 0
   var isHls: Boolean = false
+  var showMetadata: Boolean = true
+  var artworkDataUrl: String? = null
   var sleepRevision: Long? = null
   var sourceFolder: String? = null
   var backupFolder: String? = null
@@ -52,6 +54,8 @@ class PlayArgs {
     volume = volume.coerceIn(0.0, 1.0).toFloat(),
     generation = generation,
     isHls = isHls,
+    showMetadata = showMetadata,
+    artworkDataUrl = PlaybackArtworkValidator.parse(artworkDataUrl)?.dataUrl,
     sleepRevision = sleepRevision,
     sourceFolder = sourceFolder,
     backupFolder = backupFolder,
@@ -61,6 +65,26 @@ class PlayArgs {
 @InvokeArg
 class SetVolumeArgs {
   var volume: Double = 1.0
+}
+
+@InvokeArg
+class ArtworkArgs {
+  var generation: Long = 0
+  lateinit var sourceUrl: String
+  var artworkDataUrl: String? = null
+}
+
+@InvokeArg
+class MetadataEnabledArgs {
+  var generation: Long = 0
+  lateinit var sourceUrl: String
+  var enabled: Boolean = true
+}
+
+@InvokeArg
+class StreamTitleArgs {
+  lateinit var sourceUrl: String
+  var title: String = ""
 }
 
 @InvokeArg
@@ -249,6 +273,41 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
     val volume = invoke.parseArgs(SetVolumeArgs::class.java).volume.coerceIn(0.0, 1.0).toFloat()
     AlarmPlaybackService.setVolume(volume)
     PlaybackService.setVolume(activity, volume) { state ->
+      invoke.resolve(state.toJsObject())
+    }
+  }
+
+  @Command
+  fun updateArtwork(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(ArtworkArgs::class.java)
+      val artwork = PlaybackArtworkValidator.parse(args.artworkDataUrl)
+      PlaybackService.updateArtwork(
+        activity,
+        args.generation,
+        args.sourceUrl,
+        artwork,
+      ) { state -> invoke.resolve(state.toJsObject()) }
+    } catch (error: Exception) {
+      invoke.reject(error.message ?: "Unable to update Android artwork")
+    }
+  }
+
+  @Command
+  fun setMetadataEnabled(invoke: Invoke) {
+    val args = invoke.parseArgs(MetadataEnabledArgs::class.java)
+    PlaybackService.setMetadataEnabled(
+      activity,
+      args.generation,
+      args.sourceUrl,
+      args.enabled,
+    ) { state -> invoke.resolve(state.toJsObject()) }
+  }
+
+  @Command
+  fun updateStreamTitle(invoke: Invoke) {
+    val args = invoke.parseArgs(StreamTitleArgs::class.java)
+    PlaybackService.updateStreamTitle(activity, args.sourceUrl, args.title) { state ->
       invoke.resolve(state.toJsObject())
     }
   }
@@ -474,6 +533,7 @@ private fun PlaybackSnapshot.toJsObject(): JSObject = JSObject().apply {
   put("sleepTimer", sleepTimer.toJsObject())
   put("sourceFolder", sourceFolder)
   put("isHls", isHls)
+  put("showMetadata", showMetadata)
 }
 
 private fun SleepTimerSnapshot.toJsObject(): JSObject = JSObject().apply {

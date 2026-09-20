@@ -28,6 +28,7 @@ import java.io.EOFException
  */
 internal class ChainedOpusExtractorsFactory(
   delegate: ExtractorsFactory = DefaultExtractorsFactory(),
+  private val onStreamMetadata: (OpusStreamMetadata) -> Unit = {},
 ) : ForwardingExtractorsFactory(delegate) {
   override fun createExtractors(): Array<Extractor> = wrap(super.createExtractors())
 
@@ -37,16 +38,19 @@ internal class ChainedOpusExtractorsFactory(
   ): Array<Extractor> = wrap(super.createExtractors(uri, responseHeaders))
 
   private fun wrap(extractors: Array<Extractor>): Array<Extractor> =
-    extractors.map { if (it is OggExtractor) ChainedOpusExtractor(it) else it }.toTypedArray()
+    extractors.map {
+      if (it is OggExtractor) ChainedOpusExtractor(it, onStreamMetadata) else it
+    }.toTypedArray()
 }
 
 private class ChainedOpusExtractor(
   delegate: Extractor,
+  private val onStreamMetadata: (OpusStreamMetadata) -> Unit,
 ) : ForwardingExtractor(delegate) {
   private var output: ChainedOpusExtractorOutput? = null
 
   override fun init(output: ExtractorOutput) {
-    val filtered = ChainedOpusExtractorOutput(output)
+    val filtered = ChainedOpusExtractorOutput(output, onStreamMetadata)
     this.output = filtered
     super.init(filtered)
   }
@@ -59,6 +63,7 @@ private class ChainedOpusExtractor(
 
 private class ChainedOpusExtractorOutput(
   delegate: ExtractorOutput,
+  private val onStreamMetadata: (OpusStreamMetadata) -> Unit,
 ) : ForwardingExtractorOutput(delegate) {
   private val tracks = mutableMapOf<Int, ChainedOpusTrackOutput>()
   private var filteringEnabled = false
@@ -67,13 +72,18 @@ private class ChainedOpusExtractorOutput(
     val delegate = super.track(id, type)
     if (type != C.TRACK_TYPE_AUDIO) return delegate
     return tracks.getOrPut(id) {
-      ChainedOpusTrackOutput(delegate, filteringEnabled) { chain, adjustmentUs ->
-        Log.i(
-          TAG,
-          "Handled chained Opus link $chain: suppressed OpusHead=1 OpusTags=1, " +
-            "adjusted timestamps by ${adjustmentUs}us",
-        )
-      }
+      ChainedOpusTrackOutput(
+        delegate,
+        filteringEnabled,
+        onChainHandled = { chain, adjustmentUs ->
+          Log.i(
+            TAG,
+            "Handled chained Opus link $chain: suppressed OpusHead=1 OpusTags=1, " +
+              "adjusted timestamps by ${adjustmentUs}us",
+          )
+        },
+        onStreamMetadata = onStreamMetadata,
+      )
     }
   }
 
@@ -94,6 +104,7 @@ internal class ChainedOpusTrackOutput(
   delegate: TrackOutput,
   filteringEnabled: Boolean = true,
   private val onChainHandled: (Int, Long) -> Unit = { _, _ -> },
+  private val onStreamMetadata: (OpusStreamMetadata) -> Unit = {},
 ) : ForwardingTrackOutput(delegate) {
   private val pending = ByteArrayOutputStream()
   private var initialHeader: ByteArray? = null
@@ -104,6 +115,7 @@ internal class ChainedOpusTrackOutput(
   private var chainCount = 0
   private var awaitingTags = false
   private var activeChainAdjustmentUs = 0L
+  private var activeChainBoundaryUs = 0L
   private var forwardedBytes = 0
 
   override fun format(format: Format) {
@@ -186,6 +198,7 @@ internal class ChainedOpusTrackOutput(
         if (!packet.contentEquals(configuredHeader)) {
           throw UnsupportedChainedOpusConfigurationException()
         }
+        activeChainBoundaryUs = timeUs - removedDurationUs
         val preSkipSamples = OpusUtil.getPreSkipSamples(packet)
         if (preSkipSamples != REQUIRED_PRE_SKIP_SAMPLES) {
           throw UnsupportedChainedOpusConfigurationException(
@@ -215,6 +228,7 @@ internal class ChainedOpusTrackOutput(
         activeChainAdjustmentUs += tagDurationUs
         removedDurationUs += tagDurationUs
         awaitingTags = false
+        parseOpusTags(packet, activeChainBoundaryUs)?.let(onStreamMetadata)
         onChainHandled(chainCount, activeChainAdjustmentUs)
       }
       else -> {
@@ -229,6 +243,7 @@ internal class ChainedOpusTrackOutput(
     removedDurationUs = 0L
     awaitingTags = false
     activeChainAdjustmentUs = 0L
+    activeChainBoundaryUs = 0L
     forwardedBytes = 0
   }
 
@@ -238,6 +253,7 @@ internal class ChainedOpusTrackOutput(
     removedDurationUs = 0L
     awaitingTags = false
     activeChainAdjustmentUs = 0L
+    activeChainBoundaryUs = 0L
     forwardedBytes = 0
     filteringEnabled = enabled
   }
@@ -319,6 +335,66 @@ internal class ChainedOpusTrackOutput(
     val OPUS_TAGS = "OpusTags".toByteArray(Charsets.US_ASCII)
   }
 }
+
+internal data class OpusStreamMetadata(
+  val timeUs: Long,
+  val title: String?,
+  val artist: String?,
+) {
+  fun displayTitle(): String? = when {
+    title == null -> null
+    title.isBlank() -> ""
+    !artist.isNullOrBlank() && !title.startsWith(artist, ignoreCase = true) -> "$artist - $title"
+    else -> title
+  }
+}
+
+internal fun parseOpusTags(packet: ByteArray, timeUs: Long): OpusStreamMetadata? {
+  if (packet.size < 16 || !packet.startsWithAscii("OpusTags")) return null
+  var cursor = 8
+  val vendorLength = packet.readLittleEndianUInt(cursor) ?: return null
+  cursor += 4
+  if (vendorLength > packet.size - cursor) return null
+  cursor += vendorLength
+  val commentCount = packet.readLittleEndianUInt(cursor) ?: return null
+  cursor += 4
+  if (commentCount > MAX_OPUS_COMMENTS) return null
+  var title: String? = null
+  var artist: String? = null
+  repeat(commentCount) {
+    val length = packet.readLittleEndianUInt(cursor) ?: return null
+    cursor += 4
+    if (length > packet.size - cursor) return null
+    val comment = packet.copyOfRange(cursor, cursor + length).toString(Charsets.UTF_8)
+    cursor += length
+    val separator = comment.indexOf('=')
+    if (separator <= 0) return@repeat
+    val value = comment.substring(separator + 1).trim().take(MAX_METADATA_CHARS)
+    when (comment.substring(0, separator).uppercase()) {
+      "TITLE" -> if (title == null) title = value
+      "ARTIST" -> if (artist == null && value.isNotBlank()) artist = value
+    }
+  }
+  if (title == null && artist == null) return null
+  return OpusStreamMetadata(timeUs.coerceAtLeast(0), title, artist)
+}
+
+private fun ByteArray.startsWithAscii(value: String): Boolean {
+  val prefix = value.toByteArray(Charsets.US_ASCII)
+  return size >= prefix.size && prefix.indices.all { this[it] == prefix[it] }
+}
+
+private fun ByteArray.readLittleEndianUInt(offset: Int): Int? {
+  if (offset < 0 || size - offset < 4) return null
+  val value = (this[offset].toLong() and 0xff) or
+    ((this[offset + 1].toLong() and 0xff) shl 8) or
+    ((this[offset + 2].toLong() and 0xff) shl 16) or
+    ((this[offset + 3].toLong() and 0xff) shl 24)
+  return value.takeIf { it <= Int.MAX_VALUE }?.toInt()
+}
+
+private const val MAX_OPUS_COMMENTS = 1_024
+private const val MAX_METADATA_CHARS = 512
 
 internal class UnsupportedChainedOpusConfigurationException(
   detail: String = "The Ogg stream changed its Opus decoder configuration between links",

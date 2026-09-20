@@ -10,6 +10,8 @@ Allows Aerowave to control its Android background radio player.
 - `allow-stop`
 - `allow-get-state`
 - `allow-set-volume`
+- `allow-update-artwork`
+- `allow-set-metadata-enabled`
 - `allow-set-sleep-timer`
 - `allow-cancel-sleep-timer`
 - `allow-get-sleep-timer`
@@ -347,6 +349,32 @@ Denies the resume command without any pre-configured scope.
 <tr>
 <td>
 
+`android-audio:allow-set-metadata-enabled`
+
+</td>
+<td>
+
+Enables the set_metadata_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-set-metadata-enabled`
+
+</td>
+<td>
+
+Denies the set_metadata_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `android-audio:allow-set-sleep-timer`
 
 </td>
@@ -496,6 +524,32 @@ Enables the test_alarm command without any pre-configured scope.
 <td>
 
 Denies the test_alarm command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-update-artwork`
+
+</td>
+<td>
+
+Enables the update_artwork command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-update-artwork`
+
+</td>
+<td>
+
+Denies the update_artwork command without any pre-configured scope.
 
 </td>
 </tr>

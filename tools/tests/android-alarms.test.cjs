@@ -175,7 +175,8 @@ test("a native playback error does not start a second frontend reconnect loop", 
   h.evaluate("applyAndroidPlaybackState({ status:'error', generation:3, error:'Backup folder access was revoked' })");
   assert.equal(h.evaluate("player.retryTimer"), null);
   assert.match(h.el("#status-msg").textContent, /revoked/);
-  assert.equal(h.calls.length, 0);
+  assert.equal(h.calls.some(c => /\|(play|resume|stop)$/.test(c.command) ||
+    ["relay_url", "probe_stream", "backup_track"].includes(c.command)), false);
 });
 
 test("an alarm edit carries its observed revision and refreshes after a native conflict", async () => {

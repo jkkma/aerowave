@@ -28,12 +28,15 @@ import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import java.util.concurrent.Executors
+import java.util.IdentityHashMap
 
 class PlaybackService : MediaSessionService(), Player.Listener {
   private val handler = Handler(Looper.getMainLooper())
   private lateinit var player: ExoPlayer
   private lateinit var mediaSession: MediaSession
   private var currentRequest: PlayRequest? = null
+  private var explicitTrackTitle: String? = null
+  private val pendingMetadataUpdates = mutableSetOf<Runnable>()
   private var reconnectAttempts = 0
   private var pendingReconnect: Runnable? = null
   private var wantsPlayback = false
@@ -85,7 +88,10 @@ class PlaybackService : MediaSessionService(), Player.Listener {
         .createDataSource()
     }
     val dataSourceFactory = DefaultDataSource.Factory(this, networkDataSourceFactory)
-    val mediaSourceFactory = DefaultMediaSourceFactory(this, ChainedOpusExtractorsFactory())
+    val extractors = ChainedOpusExtractorsFactory(onStreamMetadata = { metadata ->
+      handler.post { scheduleOpusMetadata(metadata) }
+    })
+    val mediaSourceFactory = DefaultMediaSourceFactory(this, extractors)
       .setDataSourceFactory(dataSourceFactory)
       // Reconnection is owned here so the attempt budget covers the whole
       // live stream rather than being reset independently for every segment.
@@ -108,6 +114,30 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
     @Suppress("DEPRECATION")
     val sessionPlayer = object : ForwardingPlayer(player) {
+      private val transformedListeners = IdentityHashMap<Player.Listener, Player.Listener>()
+
+      override fun addListener(listener: Player.Listener) {
+        val transformed = synchronized(transformedListeners) {
+          transformedListeners.getOrPut(listener) {
+            object : Player.Listener by listener {
+              override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+                listener.onMediaMetadataChanged(
+                  this@PlaybackService.sessionMetadata(mediaMetadata),
+                )
+              }
+            }
+          }
+        }
+        super.addListener(transformed)
+      }
+
+      override fun removeListener(listener: Player.Listener) {
+        val transformed = synchronized(transformedListeners) {
+          transformedListeners.remove(listener)
+        }
+        super.removeListener(transformed ?: listener)
+      }
+
       override fun play() {
         this@PlaybackService.resumePlayback()
       }
@@ -119,6 +149,9 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       override fun stop() {
         this@PlaybackService.stopPlayback()
       }
+
+      override fun getMediaMetadata(): MediaMetadata =
+        this@PlaybackService.sessionMetadata(super.getMediaMetadata())
     }
     val sessionBuilder = MediaSession.Builder(this, sessionPlayer)
     if (launchIntent != null) {
@@ -143,7 +176,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     when (intent?.action) {
-      ACTION_PLAY -> requestFromIntent(intent)?.let { playRequest(it, resetReconnects = true) }
+      ACTION_PLAY -> requestFromIntent(this, intent)?.let { playRequest(it, resetReconnects = true) }
       ACTION_PAUSE -> pausePlayback()
       ACTION_RESUME -> resumePlayback()
       ACTION_STOP -> stopPlayback()
@@ -171,15 +204,25 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       return
     }
     cancelReconnect()
+    cancelMetadataUpdates()
     folderResolutionToken++
     resolvingFolder = false
     if (resetFolderFailures) folderPickFailures = 0
     if (resetReconnects) reconnectAttempts = 0
+    val stored = AudioStateStore.snapshot(this)
+    val sameStoredSource = stored.generation == request.generation && stored.sourceUrl == request.sourceUrl
+    val restoredKnownTitle = if (sameStoredSource) {
+      if (request.showMetadata) stored.trackTitle else stored.hiddenTrackTitle
+    } else {
+      null
+    }
+    explicitTrackTitle = restoredKnownTitle
+      ?.takeIf { !request.isHls && request.sourceFolder == null }
     currentRequest = request
     wantsPlayback = true
     desiredVolume = request.volume.coerceIn(0f, 1f)
     applyOutputVolume()
-    player.setMediaItem(mediaItem(request))
+    player.setMediaItem(mediaItem(request, explicitTrackTitle))
     player.prepare()
     player.play()
     trace("play")
@@ -193,9 +236,12 @@ class PlaybackService : MediaSessionService(), Player.Listener {
         positionMs = 0,
         volume = desiredVolume,
         error = null,
-        trackTitle = null,
+        trackTitle = restoredKnownTitle.takeIf { request.showMetadata },
+        hiddenTrackTitle = restoredKnownTitle,
         playableUrl = request.url,
         isHls = request.isHls,
+        showMetadata = request.showMetadata,
+        artworkDataUrl = request.artworkDataUrl,
         sourceFolder = request.sourceFolder,
         backupFolder = request.backupFolder,
       )
@@ -241,11 +287,13 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       cancelSleepTimerTick()
     }
     cancelReconnect()
+    cancelMetadataUpdates()
     folderResolutionToken++
     resolvingFolder = false
     releaseRecoveryWakeLock()
     reconnectAttempts = 0
     currentRequest = null
+    explicitTrackTitle = null
     wantsPlayback = false
     player.stop()
     player.clearMediaItems()
@@ -320,11 +368,28 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     handler.removeCallbacks(sleepTimerTick)
   }
 
-  private fun mediaItem(request: PlayRequest): MediaItem {
-    val metadata = MediaMetadata.Builder()
-      .setTitle(request.title)
-      .setStation(request.title)
-      .build()
+  private fun mediaItem(request: PlayRequest, trackTitle: String? = null): MediaItem {
+    val isStation = request.sourceFolder == null
+    val metadata = MediaMetadata.Builder().apply {
+      if (isStation) {
+        setStation(request.title)
+        setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
+        // Media3 1.11.1 compares displayTitle but only compares whether extras
+        // is null. Changing this field therefore refreshes MediaSession while
+        // leaving title available for HLS and other in-stream metadata.
+        if (!request.showMetadata) setDisplayTitle(request.title)
+        if (request.showMetadata && !request.isHls && !trackTitle.isNullOrBlank()) {
+          setTitle(trackTitle)
+          setArtist(request.title)
+        }
+      } else {
+        setTitle(request.title)
+        setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+      }
+      PlaybackArtworkValidator.parse(request.artworkDataUrl)?.let { artwork ->
+        setArtworkData(artwork.bytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+      }
+    }.build()
     return MediaItem.Builder()
       .setUri(request.url)
       .setMediaId(request.sourceUrl)
@@ -333,6 +398,22 @@ class PlaybackService : MediaSessionService(), Player.Listener {
         if (request.isHls) setMimeType(MimeTypes.APPLICATION_M3U8)
       }
       .build()
+  }
+
+  private fun sessionMetadata(metadata: MediaMetadata): MediaMetadata {
+    val request = currentRequest ?: return metadata
+    if (request.sourceFolder != null) return metadata
+    val title = metadata.title?.toString()?.trim().orEmpty()
+    return when {
+      !request.showMetadata -> metadata.buildUpon()
+        .setTitle(request.title)
+        .setArtist(null)
+        .build()
+      title.isBlank() -> metadata.buildUpon().setTitle(request.title).build()
+      title != request.title && metadata.artist.isNullOrBlank() ->
+        metadata.buildUpon().setArtist(request.title).build()
+      else -> metadata
+    }
   }
 
   override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -395,14 +476,132 @@ class PlaybackService : MediaSessionService(), Player.Listener {
 
   override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
     val request = currentRequest ?: return
-    val title = mediaMetadata.title?.toString()?.trim().orEmpty()
-    val artist = mediaMetadata.artist?.toString()?.trim().orEmpty()
-    val track = when {
-      title.isBlank() || title == request.title -> null
-      artist.isNotBlank() && !title.startsWith(artist) -> "$artist - $title"
-      else -> title
+    if (request.sourceFolder != null) return
+    val title = normalizeMetadataText(mediaMetadata.title?.toString())
+    val artist = normalizeMetadataText(mediaMetadata.artist?.toString())
+    val published = explicitTrackTitle
+    if (published != null && (title.isBlank() || title == request.title || title == published)) {
+      // Replacing MediaItem metadata publishes relay/Opus titles to MediaSession.
+      // Ignore the resulting combined-metadata callback so it cannot clear the
+      // title that initiated the replacement.
+      AudioStateStore.update(this) { it.withIncomingTrackTitle(published) }
+      return
     }
-    AudioStateStore.update(this) { it.copy(trackTitle = track) }
+    val track = trackTitleFromMetadata(request, title, artist)
+    AudioStateStore.update(this) { it.withIncomingTrackTitle(track) }
+  }
+
+  private fun applyStreamTitle(sourceUrl: String, incomingTitle: String): PlaybackSnapshot {
+    val request = currentRequest ?: return AudioStateStore.snapshot(this)
+    if (request.sourceUrl != sourceUrl || request.isHls || request.sourceFolder != null) {
+      return actualSnapshot(checkExpiry = false)
+    }
+    val title = normalizeMetadataText(incomingTitle).ifBlank { null }
+    explicitTrackTitle = title
+    if (request.showMetadata) replaceCurrentMediaItem(request, title)
+    AudioStateStore.update(this) { it.withIncomingTrackTitle(title) }
+    return actualSnapshot(checkExpiry = false)
+  }
+
+  private fun updateArtwork(
+    generation: Long,
+    sourceUrl: String,
+    artwork: PlaybackArtwork?,
+  ): PlaybackSnapshot {
+    val request = currentRequest ?: return AudioStateStore.snapshot(this)
+    if (request.generation != generation || request.sourceUrl != sourceUrl) {
+      return actualSnapshot(checkExpiry = false)
+    }
+    val updated = request.copy(artworkDataUrl = artwork?.dataUrl)
+    currentRequest = updated
+    replaceCurrentMediaItem(updated, explicitTrackTitle)
+    AudioStateStore.update(this) { it.copy(artworkDataUrl = artwork?.dataUrl) }
+    return actualSnapshot(checkExpiry = false)
+  }
+
+  private fun setMetadataEnabled(
+    generation: Long,
+    sourceUrl: String,
+    enabled: Boolean,
+  ): PlaybackSnapshot {
+    val request = currentRequest ?: return AudioStateStore.snapshot(this)
+    if (request.generation != generation || request.sourceUrl != sourceUrl) {
+      return actualSnapshot(checkExpiry = false)
+    }
+    if (request.showMetadata == enabled) return actualSnapshot(checkExpiry = false)
+    val updated = request.copy(showMetadata = enabled)
+    val stored = AudioStateStore.snapshot(this)
+    val currentTitle = if (request.isHls) {
+      trackTitleFromMetadata(
+        request,
+        normalizeMetadataText(player.mediaMetadata.title?.toString()),
+        normalizeMetadataText(player.mediaMetadata.artist?.toString()),
+      ) ?: stored.hiddenTrackTitle ?: stored.trackTitle
+    } else {
+      explicitTrackTitle ?: stored.hiddenTrackTitle ?: stored.trackTitle
+    }
+    currentRequest = updated
+    explicitTrackTitle = currentTitle.takeIf { !request.isHls }
+    AudioStateStore.update(this) {
+      it.copy(showMetadata = enabled).withIncomingTrackTitle(currentTitle)
+    }
+    replaceCurrentMediaItem(updated, explicitTrackTitle)
+    return actualSnapshot(checkExpiry = false)
+  }
+
+  private fun replaceCurrentMediaItem(request: PlayRequest, trackTitle: String?) {
+    val index = player.currentMediaItemIndex
+    if (index == C.INDEX_UNSET || player.currentMediaItem == null) return
+    player.replaceMediaItem(index, mediaItem(request, trackTitle))
+  }
+
+  private fun scheduleOpusMetadata(metadata: OpusStreamMetadata) {
+    val request = currentRequest ?: return
+    val displayTitle = metadata.displayTitle() ?: return
+    val title = normalizeMetadataText(displayTitle)
+    if (request.isHls || request.sourceFolder != null) return
+    val expectedGeneration = request.generation
+    val expectedSource = request.sourceUrl
+    lateinit var publish: Runnable
+    publish = Runnable {
+      val active = currentRequest
+      if (active?.generation != expectedGeneration || active.sourceUrl != expectedSource) {
+        pendingMetadataUpdates.remove(publish)
+        return@Runnable
+      }
+      if (!wantsPlayback || !player.playWhenReady) {
+        handler.postDelayed(publish, METADATA_POLL_MS)
+        return@Runnable
+      }
+      val remainingMs = metadata.timeUs / 1_000 - playerPosition()
+      if (remainingMs > METADATA_TIMING_SLOP_MS) {
+        handler.postDelayed(publish, minOf(remainingMs, METADATA_POLL_MS))
+        return@Runnable
+      }
+      pendingMetadataUpdates.remove(publish)
+      applyStreamTitle(expectedSource, title)
+    }
+    pendingMetadataUpdates += publish
+    handler.post(publish)
+  }
+
+  private fun cancelMetadataUpdates() {
+    pendingMetadataUpdates.forEach(handler::removeCallbacks)
+    pendingMetadataUpdates.clear()
+  }
+
+  private fun normalizeMetadataText(value: String?): String =
+    value.orEmpty().trim().filterNot(Char::isISOControl).take(MAX_METADATA_CHARS)
+
+  private fun trackTitleFromMetadata(
+    request: PlayRequest,
+    title: String,
+    artist: String,
+  ): String? = when {
+    title.isBlank() || title == request.title -> null
+    artist.isNotBlank() && !title.startsWith(artist, ignoreCase = true) ->
+      "$artist - $title".take(MAX_METADATA_CHARS)
+    else -> title.take(MAX_METADATA_CHARS)
   }
 
   private fun updateStateFromPlayer() {
@@ -461,7 +660,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       // the item so every bounded attempt opens a fresh relay connection and
       // can either recover, fail into the next attempt, or reach the backup.
       trace("retry=$reconnectAttempts")
-      player.setMediaItem(mediaItem(request))
+      player.setMediaItem(mediaItem(request, explicitTrackTitle))
       player.prepare()
       player.play()
     }
@@ -586,6 +785,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       cancelSleepTimerTick()
     }
     cancelReconnect()
+    cancelMetadataUpdates()
     folderResolutionToken++
     resolvingFolder = false
     releaseRecoveryWakeLock()
@@ -627,7 +827,15 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     currentRequest = restoredRequest
     wantsPlayback = true
     applyOutputVolume()
-    val item = mediaItem(restoredRequest)
+    val storedTitle = AudioStateStore.snapshot(this)
+    val knownTitle = if (restoredRequest.showMetadata) {
+      storedTitle.trackTitle
+    } else {
+      storedTitle.hiddenTrackTitle
+    }
+    explicitTrackTitle = knownTitle
+      ?.takeIf { !restoredRequest.isHls && restoredRequest.sourceFolder == null }
+    val item = mediaItem(restoredRequest, explicitTrackTitle)
     if (restoredRequest.sourceFolder != null && interruption.positionMs > 0) {
       player.setMediaItem(item, interruption.positionMs)
     } else {
@@ -645,9 +853,12 @@ class PlaybackService : MediaSessionService(), Player.Listener {
         positionMs = interruption.positionMs,
         volume = desiredVolume,
         error = null,
-        trackTitle = null,
+        trackTitle = knownTitle.takeIf { restoredRequest.showMetadata },
+        hiddenTrackTitle = knownTitle,
         playableUrl = restoredRequest.url,
         isHls = restoredRequest.isHls,
+        showMetadata = restoredRequest.showMetadata,
+        artworkDataUrl = restoredRequest.artworkDataUrl,
         sourceFolder = restoredRequest.sourceFolder,
         backupFolder = restoredRequest.backupFolder,
       )
@@ -681,6 +892,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       publishSleepTimer()
     }
     cancelReconnect()
+    cancelMetadataUpdates()
     val state = AudioStateStore.snapshot(this)
     if (state.status == STATUS_PLAYING || state.status == STATUS_BUFFERING) {
       AudioStateStore.update(this) {
@@ -709,6 +921,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     private const val EXTRA_STATION_ID = "stationId"
     private const val EXTRA_GENERATION = "generation"
     private const val EXTRA_IS_HLS = "isHls"
+    private const val EXTRA_SHOW_METADATA = "showMetadata"
     private const val EXTRA_SLEEP_REVISION = "sleepRevision"
     private const val EXTRA_HAS_SLEEP_REVISION = "hasSleepRevision"
     private const val EXTRA_HAS_STATION_ID = "hasStationId"
@@ -718,6 +931,9 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     private const val MAX_FOLDER_FAILURES = 3
     private const val TIMER_GUARD_TICK_MS = 1_000L
     private const val FADE_TICK_MS = 250L
+    private const val METADATA_POLL_MS = 1_000L
+    private const val METADATA_TIMING_SLOP_MS = 100L
+    private const val MAX_METADATA_CHARS = 512
     private const val RECOVERY_WAKE_TIMEOUT_MS = 45_000L
     private val RECONNECT_DELAYS_MS = longArrayOf(1_000, 2_000, 4_000, 8_000)
 
@@ -798,6 +1014,86 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       }
     }
 
+    internal fun updateArtwork(
+      context: Context,
+      generation: Long,
+      sourceUrl: String,
+      artwork: PlaybackArtwork?,
+      callback: (PlaybackSnapshot) -> Unit,
+    ) {
+      val service = instance
+      if (service == null) {
+        val current = AudioStateStore.snapshot(context)
+        callback(if (
+          current.playableUrl.isNotBlank() &&
+          current.generation == generation &&
+          current.sourceUrl == sourceUrl
+        ) {
+          AudioStateStore.update(context) { it.copy(artworkDataUrl = artwork?.dataUrl) }
+        } else {
+          current
+        })
+        return
+      }
+      service.handler.post {
+        callback(service.updateArtwork(generation, sourceUrl, artwork))
+      }
+    }
+
+    internal fun setMetadataEnabled(
+      context: Context,
+      generation: Long,
+      sourceUrl: String,
+      enabled: Boolean,
+      callback: (PlaybackSnapshot) -> Unit,
+    ) {
+      val service = instance
+      if (service == null) {
+        val current = AudioStateStore.snapshot(context)
+        callback(if (
+          current.playableUrl.isNotBlank() &&
+          current.generation == generation &&
+          current.sourceUrl == sourceUrl
+        ) {
+          AudioStateStore.update(context) {
+            it.withMetadataEnabled(enabled)
+          }
+        } else {
+          current
+        })
+        return
+      }
+      service.handler.post {
+        callback(service.setMetadataEnabled(generation, sourceUrl, enabled))
+      }
+    }
+
+    internal fun updateStreamTitle(
+      context: Context,
+      sourceUrl: String,
+      title: String,
+      callback: (PlaybackSnapshot) -> Unit,
+    ) {
+      val service = instance
+      if (service == null) {
+        val current = AudioStateStore.snapshot(context)
+        val normalized = title.trim().filterNot(Char::isISOControl).take(MAX_METADATA_CHARS)
+        val matches = current.playableUrl.isNotBlank() &&
+          current.sourceUrl == sourceUrl &&
+          !current.isHls &&
+          current.sourceFolder == null
+        callback(if (matches) {
+          AudioStateStore.update(context) {
+            it.withIncomingTrackTitle(normalized.ifBlank { null })
+          }
+        } else {
+          current
+        })
+        return
+      }
+      service.handler.post { callback(service.applyStreamTitle(sourceUrl, title)) }
+    }
+
     internal fun snapshot(context: Context, callback: (PlaybackSnapshot) -> Unit) {
       val service = instance
       if (service == null) {
@@ -850,6 +1146,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
         putExtra(EXTRA_VOLUME, request.volume)
         putExtra(EXTRA_GENERATION, request.generation)
         putExtra(EXTRA_IS_HLS, request.isHls)
+        putExtra(EXTRA_SHOW_METADATA, request.showMetadata)
         putExtra(EXTRA_HAS_SLEEP_REVISION, request.sleepRevision != null)
         request.sleepRevision?.let { putExtra(EXTRA_SLEEP_REVISION, it) }
         putExtra(EXTRA_SOURCE_FOLDER, request.sourceFolder)
@@ -857,10 +1154,15 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       }
     }
 
-    private fun requestFromIntent(intent: Intent): PlayRequest? {
+    private fun requestFromIntent(context: Context, intent: Intent): PlayRequest? {
       val url = intent.getStringExtra(EXTRA_URL) ?: return null
       val sourceUrl = intent.getStringExtra(EXTRA_SOURCE_URL) ?: return null
       val title = intent.getStringExtra(EXTRA_TITLE) ?: return null
+      val generation = intent.getLongExtra(EXTRA_GENERATION, 0)
+      val stored = AudioStateStore.snapshot(context)
+      val artworkDataUrl = stored.artworkDataUrl.takeIf {
+        stored.generation == generation && stored.sourceUrl == sourceUrl
+      }
       return PlayRequest(
         url = url,
         sourceUrl = sourceUrl,
@@ -871,8 +1173,10 @@ class PlaybackService : MediaSessionService(), Player.Listener {
           null
         },
         volume = intent.getFloatExtra(EXTRA_VOLUME, 1f).coerceIn(0f, 1f),
-        generation = intent.getLongExtra(EXTRA_GENERATION, 0),
+        generation = generation,
         isHls = intent.getBooleanExtra(EXTRA_IS_HLS, false),
+        showMetadata = intent.getBooleanExtra(EXTRA_SHOW_METADATA, true),
+        artworkDataUrl = artworkDataUrl,
         sleepRevision = if (intent.getBooleanExtra(EXTRA_HAS_SLEEP_REVISION, false)) {
           intent.getLongExtra(EXTRA_SLEEP_REVISION, 0)
         } else {

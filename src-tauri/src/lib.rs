@@ -573,17 +573,26 @@ async fn browse_tags() -> Result<Vec<browse::Tag>, String> {
 /// has to be same-origin or CORS-cleared, which a broadcaster's logo host
 /// will not be.
 #[tauri::command]
-async fn station_logo(url: String) -> Result<String, String> {
+async fn station_logo(url: String) -> Result<String, browse::LogoFailure> {
     browse::logo(&url).await
 }
 
 /// Look a station's artwork up in the directory, for one saved without any.
 ///
-/// `None` means the directory has nothing usable for it, which is a perfectly
-/// ordinary answer - the webview remembers that and stops asking.
+/// Only matching stream identities are accepted. Failed image decodes can be
+/// excluded on the next attempt without confusing an outage with absent art.
 #[tauri::command]
-async fn station_art(name: String, url: String) -> Result<Option<browse::Art>, String> {
-    browse::art(&name, &url).await
+async fn station_art(
+    url: String,
+    resolved_url: Option<String>,
+    excluded_urls: Option<Vec<String>>,
+) -> Result<Option<browse::Art>, String> {
+    browse::art(
+        &url,
+        resolved_url.as_deref().unwrap_or(""),
+        &excluded_urls.unwrap_or_default(),
+    )
+    .await
 }
 
 /// What one filter leaves available to the other: the genres in a country, or
@@ -846,6 +855,12 @@ pub fn run() {
                 // how they reach the window.
                 let emitter = relay_handle.clone();
                 let on_title: relay::TitleSink = Arc::new(move |url: &str, title: &str| {
+                    #[cfg(target_os = "android")]
+                    tauri_plugin_android_audio::update_stream_title(
+                        &emitter,
+                        url.to_string(),
+                        title.to_string(),
+                    );
                     let _ = emitter.emit(
                         "icy-title",
                         IcyTitle {

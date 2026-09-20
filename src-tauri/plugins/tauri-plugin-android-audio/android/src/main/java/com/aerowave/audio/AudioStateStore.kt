@@ -10,6 +10,8 @@ internal data class PlayRequest(
   val volume: Float,
   val generation: Long,
   val isHls: Boolean,
+  val showMetadata: Boolean = true,
+  val artworkDataUrl: String? = null,
   val sleepRevision: Long? = null,
   val sourceFolder: String? = null,
   val backupFolder: String? = null,
@@ -25,8 +27,15 @@ internal data class PlaybackSnapshot(
   val volume: Float = 1f,
   val error: String? = null,
   val trackTitle: String? = null,
+  // Metadata continues to advance while display is disabled. Keeping that
+  // value private lets re-enabling restore the current song immediately.
+  val hiddenTrackTitle: String? = null,
   val playableUrl: String = "",
   val isHls: Boolean = false,
+  val showMetadata: Boolean = true,
+  // Kept out of the JS snapshot because even a bounded image is much too
+  // large for the one-second state poll. It remains persisted for restoration.
+  val artworkDataUrl: String? = null,
   val sourceFolder: String? = null,
   val backupFolder: String? = null,
   // Sleep state deliberately stays in process memory. Persisting elapsed
@@ -42,6 +51,8 @@ internal data class PlaybackSnapshot(
       volume,
       generation,
       isHls,
+      showMetadata,
+      artworkDataUrl,
       sleepTimer.revision,
       sourceFolder,
       backupFolder,
@@ -73,9 +84,12 @@ internal object AudioStateStore {
       volume = request.volume,
       error = null,
       trackTitle = null,
+      hiddenTrackTitle = null,
       positionMs = 0,
       playableUrl = request.url,
       isHls = request.isHls,
+      showMetadata = request.showMetadata,
+      artworkDataUrl = request.artworkDataUrl,
       sourceFolder = request.sourceFolder,
       backupFolder = request.backupFolder,
     )
@@ -107,8 +121,11 @@ internal object AudioStateStore {
       positionMs = 0,
       error = null,
       trackTitle = null,
+      hiddenTrackTitle = null,
       playableUrl = "",
       isHls = false,
+      showMetadata = true,
+      artworkDataUrl = null,
       sourceFolder = null,
       backupFolder = null,
     )
@@ -128,8 +145,11 @@ internal object AudioStateStore {
       volume = prefs.getFloat("volume", 1f),
       error = prefs.getString("error", null),
       trackTitle = prefs.getString("trackTitle", null),
+      hiddenTrackTitle = prefs.getString("hiddenTrackTitle", null),
       playableUrl = prefs.getString("playableUrl", "") ?: "",
       isHls = prefs.getBoolean("isHls", false),
+      showMetadata = prefs.getBoolean("showMetadata", true),
+      artworkDataUrl = prefs.getString("artworkDataUrl", null),
       sourceFolder = prefs.getString("sourceFolder", null),
       backupFolder = prefs.getString("backupFolder", null),
     )
@@ -147,10 +167,31 @@ internal object AudioStateStore {
       .putFloat("volume", state.volume)
       .putString("error", state.error)
       .putString("trackTitle", state.trackTitle)
+      .putString("hiddenTrackTitle", state.hiddenTrackTitle)
       .putString("playableUrl", state.playableUrl)
       .putBoolean("isHls", state.isHls)
+      .putBoolean("showMetadata", state.showMetadata)
+      .putString("artworkDataUrl", state.artworkDataUrl)
       .putString("sourceFolder", state.sourceFolder)
       .putString("backupFolder", state.backupFolder)
       .apply()
   }
 }
+
+internal fun PlaybackSnapshot.withMetadataEnabled(enabled: Boolean): PlaybackSnapshot =
+  if (enabled) {
+    copy(showMetadata = true, trackTitle = hiddenTrackTitle)
+  } else {
+    copy(
+      showMetadata = false,
+      trackTitle = null,
+      hiddenTrackTitle = trackTitle ?: hiddenTrackTitle,
+    )
+  }
+
+internal fun PlaybackSnapshot.withIncomingTrackTitle(title: String?): PlaybackSnapshot =
+  if (showMetadata) {
+    copy(trackTitle = title, hiddenTrackTitle = title)
+  } else {
+    copy(trackTitle = null, hiddenTrackTitle = title)
+  }

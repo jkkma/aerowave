@@ -4,9 +4,10 @@ use tauri::{
 };
 
 use crate::models::{
-    AlarmIdPayload, AlarmSettingsPayload, AlarmState, FolderInfo, FolderPathPayload, PlayPayload,
-    PlaybackState, RandomTrackPayload, SleepTimerPayload, SleepTimerSnapshot, SyncAlarmsPayload,
-    TestAlarmPayload, TrackPick, VolumePayload,
+    AlarmIdPayload, AlarmSettingsPayload, AlarmState, ArtworkPayload, FolderInfo,
+    FolderPathPayload, MetadataEnabledPayload, PlayPayload, PlaybackState, RandomTrackPayload,
+    SleepTimerPayload, SleepTimerSnapshot, StreamTitlePayload, SyncAlarmsPayload, TestAlarmPayload,
+    TrackPick, VolumePayload,
 };
 use serde::Serialize;
 
@@ -72,6 +73,28 @@ impl<R: Runtime> AndroidAudio<R> {
     pub fn set_volume(&self, payload: VolumePayload) -> Result<PlaybackState, String> {
         self.0
             .run_mobile_plugin("setVolume", payload)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn update_artwork(&self, payload: ArtworkPayload) -> Result<PlaybackState, String> {
+        self.0
+            .run_mobile_plugin("updateArtwork", payload)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn set_metadata_enabled(
+        &self,
+        payload: MetadataEnabledPayload,
+    ) -> Result<PlaybackState, String> {
+        self.0
+            .run_mobile_plugin("setMetadataEnabled", payload)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn update_stream_title(&self, payload: StreamTitlePayload) -> Result<(), String> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>("updateStreamTitle", payload)
+            .map(|_| ())
             .map_err(|error| error.to_string())
     }
 
