@@ -1,16 +1,14 @@
 /* =====================================================================
-   The orb: one low-poly ball, turning slowly on a vertical axis.
+   The orb: one smoothly lit ball, turning slowly on a vertical axis.
 
    A smooth-shaded sphere with a 64-pixel texture wrapped around it, rendered
-   into a small buffer and scaled up with hard pixel edges. It is faceted -
-   subdivided far enough that the outline is a circle, but flat shaded, so
-   each little triangle catches the light on its own as it turns.
+   into a small buffer and scaled up with hard pixel edges. Its aqua veins
+   make the rotation visible; the light follows the round surface without
+   exposing the triangles underneath.
 
-   The shine on it is the lighting's, not a highlight painted over the top: a
-   tight specular and a brightened rim, both worked out per pixel in the same
-   low buffer as everything else, so they are as coarse as the ball is rather
-   than sitting crisply above it. Both come off while it is wearing a station's
-   picture, which wants to be read rather than shone on.
+   Diffuse lighting and a brightened rim give it volume without a bright
+   specular spot. The rim is worked out in the same small buffer as the ball,
+   so its edge stays coarse. Station pictures keep only a faint rim.
 
    The texture is read through the N64's three-point filter rather than the
    hardware's own, so the softness is in the texture while the buffer it all
@@ -19,8 +17,8 @@
    It turns a little faster while something plays, and clicking a side
    shoves it that way and leaves it turning that way.
 
-   While a station with a picture is playing, that picture is what the facets
-   wear - repainted at the same hard pixel edges, on white wherever the
+   While a station with a picture is playing, that picture is what the surface
+   wears - repainted at the same hard pixel edges, on white wherever the
    station's own artwork is transparent.
 
    Three.js is vendored in src/vendor/ rather than fetched: the app has to
@@ -33,21 +31,15 @@ import * as THREE from "./vendor/three.module.min.js";
 
 /**
  * The orb is rendered into a small buffer and scaled up with hard pixel
- * edges, the way a PS2 game looks running at native resolution on a modern
- * screen: chunky pixels and stairstepped edges, no antialiasing.
+ * edges: chunky pixels and stairstepped edges, no antialiasing.
  */
 export const RENDER_SIZE = 112;
 
 /**
- * How many times each of the icosahedron's twenty faces is divided.
- *
- * 2 is 320 triangles: big enough that the facets read as facets right across
- * the ball, and enough of them that the outline is still a circle rather than
- * something you can count the corners of. 3 is 1280, which at this size only
- * shows up where the highlight happens to land - a few bright plates on what
- * otherwise looks smooth, which reads as a mistake rather than as a facet.
+ * Enough subdivisions for a round silhouette at the small render size.
+ * Smooth normals hide the triangle boundaries; the texture carries motion.
  */
-const FACETS = 2;
+const SURFACE_DETAIL = 3;
 
 const IDLE_SPIN = 0.26;   // radians per second
 const PLAYING_SPIN = 0.7;
@@ -60,20 +52,15 @@ const LOGO_SIZE = 128;
 const LOGO_BACKING = "#ffffff";
 /** How many times a picture is repeated around the ball, and top to bottom. */
 const LOGO_REPEAT = [2, 1];
-/** The glow inside the crystal, and the far dimmer one under a picture: a
- *  station's own colours are the point, and cyan light through them is not. */
-const CORE_EMISSIVE = 0x0c5e78;
+/** A subdued crystal glow and a neutral lift beneath station art, so its
+ *  colours remain readable on the shadow side without a cyan wash. */
+const CORE_EMISSIVE = 0x031b25;
 const LOGO_EMISSIVE = 0x0e1a20;
-/** The glint off the bare crystal. Nothing at all once it is wearing a
- *  picture: a highlight travelling over a station's logo reads as glare on a
- *  screen rather than as shine on a ball, and it hides half the logo doing
- *  it. */
-const CORE_SPECULAR = 0x63c2dd;
-
 /** The shove a click gives it, tuned to be spent in about half a second. */
 const KICK_SPEED = 6.5;
 const KICK_DECAY = 8;
 const KICK_MS = 500;
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 const state = {
   renderer: null,
@@ -94,7 +81,7 @@ const state = {
   crystal: null,
   /** The size of whatever the ball is wearing, for the filter to work from. */
   texSize: { value: new THREE.Vector2(1, 1) },
-  /** How much of the rim shine to keep: all of it, or none while a station's
+  /** How much of the rim shine to keep: all of it, or a trace while a station's
    *  picture is on. A uniform rather than a rebuild - it changes per station. */
   rim: { value: 1 },
 };
@@ -110,7 +97,7 @@ let logoToken = 0;
  * not afford in colours it made up in dithering - so the count is the look.
  */
 const CRYSTAL_RAMP = [
-  "#14607a", "#1d86a6", "#28a5c8", "#33bcdf", "#5ed3ec", "#90e7f8", "#c8f5ff",
+  "#07384f", "#0b5c7b", "#1388aa", "#27b3ce", "#59d5df", "#9cede9", "#ddfff5",
 ];
 
 /**
@@ -126,13 +113,6 @@ const BAYER = [
   [15, 7, 13, 5],
 ];
 
-/** How far the marbling is dragged sideways, in texels. */
-const WARP = 18;
-/** How hard the field is pushed towards the ends of the ramp. Noise piles up
- *  around its middle, and a texture that only ever uses the middle of its own
- *  palette is the washed-out one - this spends the dark end too. */
-const CONTRAST = 2.1;
-
 /**
  * One octave of value noise, `cells` across, read at any point in between.
  *
@@ -140,9 +120,13 @@ const CONTRAST = 2.1;
  * the way round a sphere and meets itself, and a field that did not tile
  * would leave a join down one side of the ball.
  */
-function noiseOctave(size, cells) {
+function noiseOctave(size, cells, seed) {
   const grid = [];
-  for (let i = 0; i < cells * cells; i++) grid.push(Math.random());
+  // A fixed grain keeps the crystal recognizable across launches.
+  for (let i = 0; i < cells * cells; i++) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    grid.push(seed / 4294967296);
+  }
   const at = (cx, cy) => {
     const x = ((cx % cells) + cells) % cells;
     const y = ((cy % cells) + cells) % cells;
@@ -164,17 +148,10 @@ function noiseOctave(size, cells) {
 }
 
 /**
- * The crystal the ball wears when nothing is playing: 64 pixels square, and
- * built the way a texture on that machine was built.
- *
- * Three octaves of value noise, dragged sideways by a fourth so it marbles
- * rather than clouds, then flattened onto a seven-colour palette through an
- * ordered dither. Nothing is axis-aligned and nothing is a flat block - the
- * whole point is that it should look painted and then squeezed into a palette,
- * which is what those textures were, rather than assembled out of squares.
- *
- * Handed back as a canvas rather than a texture so the texture wrapper below
- * is the one place that decides how a canvas is filtered.
+ * Broad, wandering aqua veins give the crystal a recognizable shape in motion.
+ * The noise only roughens those shapes; it does not obscure their movement.
+ * Whole periods around each axis keep the 64-pixel skin seamless, and ordered
+ * dithering joins its seven palette steps without adding a smooth gradient.
  */
 function crystalCanvas() {
   const size = 64;
@@ -182,11 +159,8 @@ function crystalCanvas() {
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext("2d");
 
-  const coarse = noiseOctave(size, 2);
-  const middle = noiseOctave(size, 5);
-  const fine = noiseOctave(size, 10);
-  const dragX = noiseOctave(size, 4);
-  const dragY = noiseOctave(size, 4);
+  const grain = noiseOctave(size, 6, 64);
+  const drift = noiseOctave(size, 3, 1996);
 
   const ramp = CRYSTAL_RAMP.map((hex) => [
     parseInt(hex.slice(1, 3), 16),
@@ -198,16 +172,15 @@ function crystalCanvas() {
   const image = ctx.createImageData(size, size);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      // Warped before it is sampled: the same noise read along a wandering
-      // line comes out in veins rather than in blobs.
-      const wx = x + (dragX(x, y) - 0.5) * WARP;
-      const wy = y + (dragY(x, y) - 0.5) * WARP;
-      const field =
-        coarse(wx, wy) * 0.6 + middle(wx, wy) * 0.28 + fine(wx, wy) * 0.12;
-
-      const pushed = (field - 0.5) * CONTRAST + 0.5;
+      const u = (x / size) * Math.PI * 2;
+      const v = (y / size) * Math.PI * 2;
+      const wave = Math.sin(v * 2 + Math.sin(u) * 1.35 + Math.cos(u * 2) * 0.4
+        + (drift(x, y) - 0.5) * 1.2);
+      const vein = Math.pow(1 - Math.abs(wave), 3);
+      const field = 0.34 + wave * 0.32 + vein * 0.55
+        + (grain(x, y) - 0.5) * 0.14;
       const dither = (BAYER[y & 3][x & 3] + 0.5) / 16 - 0.5;
-      const step = Math.min(top, Math.max(0, Math.round(pushed * top + dither)));
+      const step = Math.min(top, Math.max(0, Math.round(field * top + dither * 0.65)));
 
       const at = (y * size + x) * 4;
       image.data[at] = ramp[step][0];
@@ -261,14 +234,11 @@ vec4 texture3Point( sampler2D tex, vec2 uv ) {
  * always the brightest part of it - which is the half of "shine" a specular
  * highlight on its own cannot give you. Cheap here: the angle between the
  * normal and the eye, raised to a power, added to what the lighting worked
- * out. Both of those are already sitting in the fragment shader - `normal`
- * rather than the `vNormal` varying, because a flat-shaded material has no
- * such varying: it works the normal out from screen-space derivatives, and
- * only the local is there under both.
+ * out. Both vectors are already available in the material's fragment shader.
  */
 const RIM_GLSL = `
 float rim = 1.0 - abs( dot( normalize( normal ), normalize( vViewPosition ) ) );
-outgoingLight += vec3( 0.40, 0.84, 1.0 ) * pow( rim, 3.2 ) * 0.5 * uRim;
+outgoingLight += vec3( 0.38, 0.86, 0.79 ) * pow( rim, 3.8 ) * 0.28 * uRim;
 `;
 
 /**
@@ -335,11 +305,17 @@ function logoCanvas(image) {
   const ctx = canvas.getContext("2d");
   ctx.imageSmoothingEnabled = false;
 
-  ctx.fillStyle = LOGO_BACKING;
+  // A narrow aqua setting keeps the artwork part of the crystal. The pale
+  // inset preserves transparent wordmarks without cropping wide or tall art.
+  ctx.fillStyle = "#1388aa";
   ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = "#9cede9";
+  ctx.fillRect(3, 3, size - 6, size - 6);
+  ctx.fillStyle = LOGO_BACKING;
+  ctx.fillRect(6, 6, size - 12, size - 12);
 
-  // Cover, not fit: a letterboxed logo would show bands of bare backing.
-  const scale = Math.max(size / image.width, size / image.height);
+  const inset = 12;
+  const scale = Math.min((size - inset * 2) / image.width, (size - inset * 2) / image.height);
   const w = image.width * scale;
   const h = image.height * scale;
   ctx.drawImage(image, (size - w) / 2, (size - h) / 2, w, h);
@@ -388,11 +364,9 @@ function wear(texture, emissive) {
   material.map = texture;
   measure(texture);
   material.emissive.setHex(emissive);
-  // The crystal is glass and caught the light; a station's artwork is a
-  // picture, and both halves of the shine come off for it.
+  // Keep just enough edge light to describe the volume around the artwork.
   const bare = texture === state.crystal;
-  material.specular.setHex(bare ? CORE_SPECULAR : 0x000000);
-  state.rim.value = bare ? 1 : 0;
+  state.rim.value = bare ? 1 : 0.14;
   material.needsUpdate = true;
   if (old && old !== state.crystal) old.dispose();
 }
@@ -402,21 +376,15 @@ function wear(texture, emissive) {
  * Lit to match the CSS backdrop: bright sky above, deep water bounce from
  * below, and a key from the upper left.
  *
- * Kept deliberately dim. These four together used to sum well past full
- * brightness, so the whole lit side of the ball clipped to white and took the
- * texture with it - which is no good when the texture is the thing worth
- * looking at. A machine of that era barely had light to spare either: the
- * shading is in the palette, and this only says which side is which.
+ * A restrained sky fill leaves the right-hand side dark enough to read.
+ * One key and a mint bounce describe the volume without washing out the skin.
  */
 export function lightScene(scene) {
-  scene.add(new THREE.HemisphereLight(0xd8f9ff, 0x0a5a74, 1.0));
-  const key = new THREE.DirectionalLight(0xffffff, 1.3);
+  scene.add(new THREE.HemisphereLight(0xd8f9ff, 0x07384f, 0.65));
+  const key = new THREE.DirectionalLight(0xeefff8, 1.65);
   key.position.set(-2.2, 2.6, 3);
   scene.add(key);
-  const fill = new THREE.DirectionalLight(0x9fe4ff, 0.3);
-  fill.position.set(3, -1.4, -1.2);
-  scene.add(fill);
-  const bounce = new THREE.DirectionalLight(0x64ffe2, 0.42);
+  const bounce = new THREE.DirectionalLight(0x64ffe2, 0.24);
   bounce.position.set(0.4, -2.6, 1.2);
   scene.add(bounce);
 }
@@ -426,22 +394,17 @@ export function buildOrb() {
 
   state.crystal = pixelTexture(crystalCanvas());
 
-  // A ball with a 64-pixel texture wrapped around it, flat shaded so every
-  // facet reads on its own. Nothing behind it and nothing over it - no glow,
-  // no shell, no halo.
+  // The texture and coarse render keep the retro character. Smooth lighting
+  // supplies the volume, without a separate shell or halo around the ball.
   const orb = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(0.98, FACETS),
+    new THREE.IcosahedronGeometry(0.98, SURFACE_DETAIL),
     new THREE.MeshPhongMaterial({
       map: state.crystal,
       color: 0xffffff,
       emissive: CORE_EMISSIVE,
-      // Tight and tinted, not broad and white. The wide low-shine highlight
-      // this had before spread into a bloom across half the ball and washed
-      // the texture out; a small cool one sits on the surface and reads as
-      // something the ball is made of rather than something stuck on it.
-      specular: CORE_SPECULAR,
-      shininess: 55,
-      flatShading: true,
+      // Diffuse shading carries the depth without a bright reflected spot.
+      specular: 0x000000,
+      flatShading: false,
     })
   );
   patchOrbShader(orb.material);
@@ -459,6 +422,11 @@ export function buildOrb() {
 function frame(now) {
   const dt = Math.min(0.05, (now - state.last) / 1000) || 0;
   state.last = now;
+  if (reducedMotion.matches) {
+    state.kick = 0;
+    state.renderer.render(state.scene, state.camera);
+    return;
+  }
 
   // Ease towards the target speed instead of jumping when playback starts.
   // Signed: a shove to the left leaves it turning left rather than snapping
@@ -486,6 +454,7 @@ function wireClicks(host) {
   let flashTimer = null;
 
   host.addEventListener("pointerdown", (event) => {
+    if (reducedMotion.matches) return;
     const rect = host.getBoundingClientRect();
     const dir = event.clientX < rect.left + rect.width / 2 ? -1 : 1;
     // Shoving it again while it is still spinning adds to the shove.
