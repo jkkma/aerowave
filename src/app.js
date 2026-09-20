@@ -164,6 +164,8 @@ const player = {
   paused: false,      // held, with the source still on the element, so it can resume
   pendingPosition: null, // local position until its media URL has arrived
   nativeGeneration: null, // Android Media3 session this page is currently showing
+  trackTitle: null,
+  artwork: null,
   get playing() {
     return !!this.source;
   },
@@ -247,11 +249,14 @@ function stopPlayback(quiet, { skipNative = false } = {}) {
   player.triedDirect = false;
   stopHls();
   player.nativeGeneration = null;
+  player.trackTitle = null;
+  player.artwork = null;
+  if (!IS_ANDROID && "mediaSession" in navigator) navigator.mediaSession.metadata = null;
   androidHandledErrorGeneration = null;
   resetAndroidPositionSample();
   markPlaying(false);
+  setOrbArt(null);
   if (!quiet) {
-    setOrbArt(null);
     setStatus("Stopped", "");
     $("#np-station").textContent = "Ready to listen";
     $("#np-track").textContent = stoppedTrackHint();
@@ -277,6 +282,7 @@ function restoreAndroidSource(nativeState) {
     title: nativeState.title || stored?.name || "Live radio",
     subtitle: nativeState.status === "paused" ? "Paused — press Play to resume" : "Playing in the background",
     stationId: nativeState.stationId || stored?.id || null,
+    logo: local ? "" : stored?.logo || "",
     hls: nativeState.isHls ?? stored?.hls ?? /\.m3u8(?:\?|$)/i.test(nativeState.sourceUrl || ""),
     hlsUrl: nativeState.isHls ? nativeState.sourceUrl : stored?.hlsUrl,
     nativeRestored: true,
@@ -293,7 +299,8 @@ function restoreAndroidSource(nativeState) {
   player.paused = nativeState.status === "paused";
   player.retries = 0;
   player.lastProgress = 0;
-  showNowPlaying(source.title, nativeState.trackTitle || source.subtitle, "");
+  showNowPlaying(source.title, source.subtitle, "");
+  if (typeof nativeState.trackTitle === "string") setTrackTitle(nativeState.trackTitle);
   setOrbArt(source);
   renderStations();
   return true;
@@ -323,9 +330,9 @@ function applyAndroidPlaybackState(nativeState, { allowRestore = false } = {}) {
     $("#volume").style.setProperty("--fill", volume + "%");
   }
 
-  if (nativeState.trackTitle && state.settings.showMetadata !== false) {
-    player.streamTitle = true;
-    $("#np-track").textContent = nativeState.trackTitle;
+  if (Object.hasOwn(nativeState, "trackTitle")) {
+    player.streamTitle = typeof nativeState.trackTitle === "string";
+    setTrackTitle(nativeState.trackTitle || "");
   }
 
   if (nativeState.status === "idle") {
@@ -699,16 +706,47 @@ function showNowPlaying(title, sub, meta) {
   $("#np-station").textContent = title || "";
   $("#np-track").textContent = sub || "";
   if (meta !== undefined) $("#np-meta").textContent = meta || "";
-  // The same two lines the system's media overlay puts on screen when a media
-  // key is pressed. Without them it names the app and nothing else, which
-  // looks like the key missed. The track line holds an ellipsis until the
-  // stream names something, and an overlay reading "..." looks worse than one
-  // reading the station, so a placeholder counts as no track at all.
-  if ("mediaSession" in navigator && window.MediaMetadata) {
+  updateMediaMetadata();
+}
+
+function updateMediaMetadata() {
+  // Android's foreground service owns its media session even with no page.
+  if (!IS_ANDROID && "mediaSession" in navigator && window.MediaMetadata) {
+    const title = $("#np-station").textContent;
+    let sub = $("#np-track").textContent;
+    if (player.source?.kind === "station" && state.settings.showMetadata === false) sub = "";
     const track = /^[\s.…]*$/.test(sub || "") ? "" : sub;
-    navigator.mediaSession.metadata = title
-      ? new MediaMetadata({ title: track || title, artist: track ? title : "" })
+    navigator.mediaSession.metadata = player.source && title
+      ? new window.MediaMetadata({ title: track || title, artist: track ? title : "",
+          artwork: player.artwork ? [{ src: player.artwork, type: "image/png" }] : [] })
       : null;
+  }
+}
+
+function setTrackTitle(title) {
+  player.trackTitle = String(title || "").trim();
+  const source = player.source;
+  if (!source) return;
+  $("#np-track").textContent = source.kind === "station" && state.settings.showMetadata === false
+    ? source.url : player.trackTitle;
+  updateMediaMetadata();
+}
+
+function refreshMetadataPreference() {
+  const source = player.source;
+  if (source?.kind !== "station") return;
+  setTrackTitle(player.trackTitle);
+  if (IS_ANDROID && player.nativeGeneration !== null) {
+    androidCommand("set_metadata_enabled", {
+      generation: player.nativeGeneration, sourceUrl: player.resolved || source.url,
+      enabled: state.settings.showMetadata !== false,
+    }).catch(() => {});
+  }
+  if (state.settings.showMetadata === false) {
+    clearInterval(player.metaTimer);
+    player.metaTimer = null;
+  } else if (!player.hls) {
+    startMetadata(source);
   }
 }
 
@@ -799,18 +837,33 @@ function relayLoader(Base, base) {
  * or more and the rest of the tag is misread.
  */
 function id3Text(body) {
-  if (!body.length) return "";
+  if (!body.length || body[0] > 3) return null;
   const encoding = body[0];
-  const label =
-    encoding === 0 ? "iso-8859-1" : encoding === 1 ? "utf-16" : encoding === 2 ? "utf-16be" : "utf-8";
+  const bigEndian = encoding === 2 || (encoding === 1 && body[1] === 0xfe && body[2] === 0xff);
+  const label = encoding === 0 ? "iso-8859-1" : encoding === 3 ? "utf-8"
+    : bigEndian ? "utf-16be" : "utf-16le";
   const data = body.subarray(1);
-  let text;
-  try {
-    text = new TextDecoder(label).decode(data);
-  } catch {
-    text = new TextDecoder().decode(data);
+  return new TextDecoder(label).decode(data).replace(/\0+$/, "").replace(/\0+/g, " / ").trim();
+}
+
+function id3Size(bytes, at, sync = true, count = 4) {
+  if (at + count > bytes.length) return -1;
+  let size = 0;
+  for (let i = 0; i < count; i++) {
+    if (sync && bytes[at + i] > 127) return -1;
+    size = size * (sync ? 128 : 256) + bytes[at + i];
   }
-  return text.replace(/\0+$/, "").trim();
+  return size;
+}
+
+function id3Unescape(bytes) {
+  const out = new Uint8Array(bytes.length);
+  let n = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    out[n++] = bytes[i];
+    if (bytes[i] === 255 && bytes[i + 1] === 0) i++;
+  }
+  return out.subarray(0, n);
 }
 
 function readId3(bytes) {
@@ -820,31 +873,44 @@ function readId3(bytes) {
   // and then the broadcaster's own.
   while (at + 10 <= bytes.length && bytes[at] === 0x49 && bytes[at + 1] === 0x44 && bytes[at + 2] === 0x33) {
     const major = bytes[at + 3];
-    const size =
-      (bytes[at + 6] << 21) | (bytes[at + 7] << 14) | (bytes[at + 8] << 7) | bytes[at + 9];
-    const end = Math.min(at + 10 + size, bytes.length);
-    let p = at + 10;
-    if (bytes[at + 5] & 0x40) {
-      // Extended header: skip whatever it says it is.
-      const ext =
-        major >= 4
-          ? (bytes[p] << 21) | (bytes[p + 1] << 14) | (bytes[p + 2] << 7) | bytes[p + 3]
-          : ((bytes[p] << 24) | (bytes[p + 1] << 16) | (bytes[p + 2] << 8) | bytes[p + 3]) >>> 0;
-      p += major >= 4 ? ext : ext + 4;
+    const flags = bytes[at + 5];
+    const size = id3Size(bytes, at + 6);
+    const end = at + 10 + size;
+    if (size < 0 || end > bytes.length) break;
+    let body = bytes.subarray(at + 10, end);
+    at = end + (major === 4 && (flags & 0x10) ? 10 : 0);
+    if (major < 2 || major > 4 || size > 1024 * 1024 || (major === 2 && (flags & 0x40))) continue;
+    // v2.3 sizes describe the original frame; v2.4 sizes include escaping.
+    if (major < 4 && (flags & 0x80)) body = id3Unescape(body);
+    let p = 0;
+    if (major >= 3 && (flags & 0x40)) {
+      const ext = id3Size(body, 0, major === 4);
+      if (ext < 6) continue;
+      p = ext + (major === 3 ? 4 : 0);
+      if (p > body.length) continue;
     }
-    while (p + 10 <= end && bytes[p] !== 0) {
-      const id = String.fromCharCode(bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]);
-      const frameSize =
-        major >= 4
-          ? (bytes[p + 4] << 21) | (bytes[p + 5] << 14) | (bytes[p + 6] << 7) | bytes[p + 7]
-          : ((bytes[p + 4] << 24) | (bytes[p + 5] << 16) | (bytes[p + 6] << 8) | bytes[p + 7]) >>> 0;
-      if (frameSize <= 0 || p + 10 + frameSize > end) break;
-      if (id === "TIT2" || id === "TPE1") {
-        found[id] = id3Text(bytes.subarray(p + 10, p + 10 + frameSize));
+    const headerSize = major === 2 ? 6 : 10;
+    while (p + headerSize <= body.length && body[p] !== 0) {
+      const id = String.fromCharCode(...body.subarray(p, p + (major === 2 ? 3 : 4)));
+      const frameSize = id3Size(body, p + (major === 2 ? 3 : 4), major === 4, major === 2 ? 3 : 4);
+      if (frameSize <= 0 || p + headerSize + frameSize > body.length) break;
+      const format = major === 2 ? 0 : body[p + 9];
+      let frame = body.subarray(p + headerSize, p + headerSize + frameSize);
+      p += headerSize + frameSize;
+      // Compressed/encrypted frames need a decoder; never display their bytes.
+      if ((major === 3 && (format & 0xc0)) || (major === 4 && (format & 0x0c))) continue;
+      if (major === 4 && ((flags & 0x80) || (format & 2))) frame = id3Unescape(frame);
+      let skip = (format & (major === 4 ? 0x40 : 0x20)) ? 1 : 0;
+      if (major === 4 && (format & 1)) {
+        if (id3Size(frame, skip) < 0) continue;
+        skip += 4;
       }
-      p += 10 + frameSize;
+      const key = id === "TT2" ? "TIT2" : id === "TP1" ? "TPE1" : id;
+      if (key === "TIT2" || key === "TPE1") {
+        const text = id3Text(frame.subarray(skip));
+        if (text !== null) found[key] = text;
+      }
     }
-    at = end;
   }
   return found;
 }
@@ -928,7 +994,9 @@ async function startHls(source, url, generation) {
       // These arrive when the segment is parsed, which is up to half a minute
       // before it is audible, so they queue against the playback clock rather
       // than going straight on screen.
-      if (title) hlsTitles.push({ at: sample.pts, title });
+      if (Number.isFinite(sample.pts) && (Object.hasOwn(tags, "TIT2") || Object.hasOwn(tags, "TPE1"))) {
+        hlsTitles.push({ at: sample.pts, title });
+      }
     }
     hlsTitles.sort((a, b) => a.at - b.at);
   });
@@ -1020,6 +1088,8 @@ async function startAndroidPlayback(source, sourceUrl, useHls, generation, volum
       sleepRevision,
       sourceFolder: source.folder === BACKUP ? state.settings.backupFolder : source.folder || null,
       backupFolder: state.settings.backupFolder || null,
+      showMetadata: state.settings.showMetadata !== false,
+      artworkDataUrl: player.artwork,
     });
     if (superseded(generation) || player.source !== source || player.nativeGeneration !== generation) return false;
     if (nativeState?.status === "idle") {
@@ -1028,6 +1098,7 @@ async function startAndroidPlayback(source, sourceUrl, useHls, generation, volum
       return false;
     }
     applyAndroidPlaybackState(nativeState);
+    syncAndroidArtwork(source);
     return nativeState?.status !== "error" && nativeState?.status !== "idle";
   } catch (error) {
     if (!superseded(generation) && player.source === source) failure(String(error));
@@ -1062,7 +1133,7 @@ async function play(source, opts = {}) {
     : null;
 
   showNowPlaying(source.title, source.subtitle || "", source.meta || "");
-  setOrbArt(source);
+  setOrbArt(null);
   markPlaying(true);
 
   setStatus("Connecting", "busy");
@@ -1116,6 +1187,7 @@ async function play(source, opts = {}) {
   // pointed at the relay, which would only hand it back its own stream. It
   // is also what an `icy-title` event is matched against.
   if (source.kind === "station") player.resolved = url;
+  setOrbArt(source);
   if (IS_ANDROID) {
     if (!(await startAndroidPlayback(source, url, useHls, generation, volume, sleepRevision))) return;
     if (source.kind === "station" && !useHls) startMetadata(source, initialInfo);
@@ -1176,73 +1248,132 @@ async function play(source, opts = {}) {
  * WebGL demands before it will upload a cross-origin image as a texture.
  */
 
-/** Pictures already fetched, by the address they came from, oldest first. */
+/** Decoded pictures, keyed by station identity and the saved logo address. */
 const orbArt = new Map();
 /** How many to hold on to: a few hundred kilobytes each, so not many. */
 const ORB_ART_CACHE = 8;
-/** Stations already asked about, so one the directory has never heard of is
- *  not looked up again every time it is played. */
-const orbAsked = new Set();
+const orbArtMisses = new Map();
+const ORB_ART_RETRY_MS = 15000;
+const ORB_ART_MISS_MS = 5 * 60000;
 /** What the orb is showing, and which request owns it. */
 let orbArtKey = "";
+let orbArtSource = null;
 let orbArtRequest = 0;
+let orbArtTimer = null;
 
-async function setOrbArt(source) {
-  const orb = window.aerowaveOrb;
-  // No WebGL: the CSS orb underneath cannot wear anything.
-  if (!orb || !orb.ok) return;
-  // Only stations have artwork; a track off a folder puts the crystal back.
+async function decodedStationArt(picture) {
+  // Decode before caching or persisting an address. Magic bytes alone also
+  // accept truncated files, and the orb cannot tell the caller they failed.
+  if (typeof picture !== "string" || !/^data:image\/[a-z0-9.+-]+;base64,/i.test(picture)
+      || picture.length > 710000) throw new Error("Invalid station artwork");
+  const image = new Image();
+  image.src = picture;
+  await image.decode();
+  const w = image.naturalWidth, h = image.naturalHeight;
+  if (!w || !h || w > 8192 || h > 8192 || w * h > 16777216) throw new Error("Station artwork is too large");
+  const canvas = document.createElement("canvas");
+  const scale = Math.min(1, 256 / Math.max(w, h));
+  canvas.width = Math.max(1, Math.round(w * scale));
+  canvas.height = Math.max(1, Math.round(h * scale));
+  canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/png");
+}
+
+function syncAndroidArtwork(source) {
+  if (!IS_ANDROID || player.source !== source || source?.kind !== "station"
+      || player.nativeGeneration === null) return;
+  androidCommand("update_artwork", {
+    generation: player.nativeGeneration,
+    sourceUrl: player.resolved || source.url,
+    artworkDataUrl: player.artwork,
+  }).catch(() => {});
+}
+
+function showStationArt(source, picture) {
+  if (source && player.source !== source) return;
+  player.artwork = picture;
+  if (window.aerowaveOrb?.ok) window.aerowaveOrb.setImage(picture);
+  updateMediaMetadata();
+  if (source && picture) syncAndroidArtwork(source);
+}
+
+async function setOrbArt(source, retry = 0) {
   const station = source && source.kind === "station" ? source : null;
-  const key = station ? station.logo || station.url : "";
-  if (key === orbArtKey) return;
+  const stationUrl = station?.url;
+  const savedLogo = station?.logo || "";
+  const key = station ? JSON.stringify([stationUrl, savedLogo]) : "";
+  if (key && key === orbArtKey && source === orbArtSource && !retry) return;
+  clearTimeout(orbArtTimer);
+  orbArtTimer = null;
   orbArtKey = key;
+  orbArtSource = source;
   const mine = ++orbArtRequest;
-
+  const current = () => mine === orbArtRequest && player.source === source && station.url === stationUrl;
   if (!key) {
-    orb.setImage(null);
+    showStationArt(null, null);
     return;
   }
   if (orbArt.has(key)) {
-    orb.setImage(orbArt.get(key));
+    showStationArt(source, orbArt.get(key));
     return;
   }
-  // Back to the crystal while this one is on its way, rather than leaving the
-  // last station's picture up over the new station's name.
-  orb.setImage(null);
-
+  showStationArt(source, null);
+  if ((orbArtMisses.get(key) || 0) > Date.now()) return;
+  const excludedUrls = [];
   let picture = null;
-  let from = station.logo || "";
+  let from = savedLogo;
+  let temporaryFailure = false;
+  let confirmedMissing = false;
   try {
     if (from) {
-      picture = await invoke("station_logo", { url: from });
-    } else if (!orbAsked.has(key)) {
-      orbAsked.add(key);
-      const found = await invoke("station_art", { name: station.title, url: station.url });
-      if (found) {
-        from = found.url;
-        picture = found.picture;
-        // Written back so this costs one lookup ever, not one a play.
-        const saved = station.stationId ? stationById(station.stationId) : null;
-        if (saved) {
-          saved.logo = from;
-          saveStations();
-        }
+      let data = null;
+      try { data = await invoke("station_logo", { url: from }); }
+      catch (error) { temporaryFailure = error?.retryable !== false; }
+      if (data) {
+        try { picture = await decodedStationArt(data); }
+        catch { /* A permanent decode failure can still have a working replacement. */ }
       }
+      if (!picture) excludedUrls.push(from);
+    }
+    // Failed saved URLs and images the decoder rejected can still have a
+    // working duplicate entry. Only the backend may establish that identity.
+    for (let attempt = 0; !picture && attempt < 4 && current(); attempt++) {
+      const found = await invoke("station_art", {
+        url: stationUrl, resolvedUrl: player.resolved || null, excludedUrls: [...excludedUrls],
+      });
+      if (!found) { confirmedMissing = true; break; }
+      if (excludedUrls.includes(found.url)) break;
+      excludedUrls.push(found.url);
+      try {
+        picture = await decodedStationArt(found.picture);
+        from = found.url;
+      } catch { /* Try the next independently matched station image. */ }
     }
   } catch {
-    /* a station with no usable picture simply keeps the crystal */
+    temporaryFailure = true;
   }
-
-  if (picture) {
-    orbArt.set(key, picture);
-    // Under the address it was found at as well: the station now carries that
-    // one, so the next play looks itself up by it.
-    if (from && from !== key) orbArt.set(from, picture);
-    while (orbArt.size > ORB_ART_CACHE) orbArt.delete(orbArt.keys().next().value);
+  if (!current()) return;
+  if (!picture) {
+    if (temporaryFailure && retry < 2) {
+      orbArtTimer = setTimeout(() => { if (current()) setOrbArt(source, retry + 1); }, ORB_ART_RETRY_MS * (retry + 1));
+    } else if (confirmedMissing && !temporaryFailure) {
+      orbArtMisses.set(key, Date.now() + ORB_ART_MISS_MS);
+      while (orbArtMisses.size > 64) orbArtMisses.delete(orbArtMisses.keys().next().value);
+    }
+    return;
   }
-  // A station switched away from while this was in flight owns nothing now.
-  if (mine !== orbArtRequest) return;
-  if (picture) orb.setImage(picture);
+  orbArt.set(key, picture);
+  orbArt.set(JSON.stringify([stationUrl, from]), picture);
+  while (orbArt.size > ORB_ART_CACHE) orbArt.delete(orbArt.keys().next().value);
+  orbArtMisses.delete(key);
+  const saved = station.stationId ? stationById(station.stationId) : null;
+  // An edit or a newer lookup may have superseded this persisted identity.
+  if (saved && saved.url === stationUrl && (saved.logo || "") === savedLogo && saved.logo !== from) {
+    saved.logo = from;
+    saveStations();
+  }
+  station.logo = from;
+  showStationArt(source, picture);
 }
 
 function startMetadata(source, initialInfo = null) {
@@ -1261,11 +1392,11 @@ function startMetadata(source, initialInfo = null) {
         skipResolve: player.probed,
       });
       if (superseded(generation) || player.source !== source) return;
-      if (info.title) {
+      if (typeof info.title === "string") {
         titleless = 0;
         // Unless the stream has already said, on the connection that is
         // actually playing. This poll was in flight before that arrived.
-        if (!player.streamTitle) $("#np-track").textContent = info.title;
+        if (!player.streamTitle) setTrackTitle(info.title);
       } else if (!initial && ++titleless >= 3) {
         clearInterval(player.metaTimer);
         player.metaTimer = null;
@@ -1289,7 +1420,7 @@ function startMetadata(source, initialInfo = null) {
   // and the first one cancels this. The interval is what is left for a
   // station the relay is not carrying, and it is a whole connection to the
   // broadcaster each time, so once a minute.
-  player.metaTimer = setInterval(poll, 60000);
+  player.metaTimer = player.streamTitle ? null : setInterval(poll, 60000);
 }
 
 /**
@@ -1300,18 +1431,17 @@ function startMetadata(source, initialInfo = null) {
  * to a minute later, and showed the previous track until it did.
  */
 function onStreamTitle(payload) {
-  if (!payload || !payload.title) return;
-  if (state.settings.showMetadata === false) return;
+  if (!payload || typeof payload.title !== "string") return;
   const source = player.source;
   if (!source || source.kind !== "station") return;
   // A relay connection outlives by a moment the station that opened it, so a
   // title from the one we are no longer listening to is not ours.
   const mine = String(player.resolved || source.url || "").trim();
   const from = String(payload.url || "").trim();
-  if (mine && from && mine !== from) return;
+  if (!mine || !from || mine !== from) return;
 
   player.streamTitle = true;
-  $("#np-track").textContent = payload.title;
+  setTrackTitle(payload.title);
   // The stream is saying this for itself now. The poll opened a whole
   // connection a minute to ask the same question, and has nothing left to
   // add: the third line it fills is bitrate and genre, which do not change.
@@ -1514,7 +1644,7 @@ audio.addEventListener("timeupdate", () => {
   if (!hlsTitles.length) return;
   let due = null;
   while (hlsTitles.length && hlsTitles[0].at <= now + 0.25) due = hlsTitles.shift().title;
-  if (due) $("#np-track").textContent = due;
+  if (due !== null) setTrackTitle(due);
 });
 // Something outside the app paused the element - a media key this build did
 // not claim, or the system taking the audio away. `stopPlayback` drops the
@@ -3644,6 +3774,10 @@ function wire() {
       return;
     }
     if (editingStation) {
+      if (editingStation.url !== url) {
+        editingStation.logo = "";
+        editingStation.hls = false;
+      }
       Object.assign(editingStation, { name, url, tag: $("#st-tag").value.trim() });
     } else {
       state.stations.push({
@@ -3915,6 +4049,7 @@ function wire() {
       const was = row.dataset.setting === "clock24h" && !IS_ANDROID ? readEditorTime() : null;
       sw.setAttribute("aria-pressed", String(next));
       state.settings[row.dataset.setting] = next;
+      if (row.dataset.setting === "showMetadata") refreshMetadataPreference();
       if (row.dataset.setting === "clock24h") {
         tickClock();
         if (!IS_ANDROID) {

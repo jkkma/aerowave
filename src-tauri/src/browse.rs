@@ -16,8 +16,9 @@ use std::time::Duration;
 
 use aerowave_core::directory::{
     bitrate_band_by_key, bitrate_band_index, clean_name, first_tag, image_kind, is_country_code,
-    is_hostname, playable_url, sort_key, stream_key, BITRATE_BANDS,
+    is_hostname, playable_url, sort_key, stream_key, stream_matches, BITRATE_BANDS,
 };
+use aerowave_core::network::public_http_destination_allowed;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use futures_util::StreamExt;
@@ -70,6 +71,7 @@ const TAG_LIMIT: u32 = 200;
 /// schedule, so a second page from another one can repeat half of the first.
 static HOST: Mutex<Option<String>> = Mutex::new(None);
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static LOGO_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// The directory gets its own client rather than borrowing `stream`'s.
 ///
@@ -91,6 +93,20 @@ fn client() -> Result<reqwest::Client, String> {
         .build()
         .map_err(|e| e.to_string())?;
     Ok(CLIENT.get_or_init(|| built).clone())
+}
+
+/// Artwork addresses come from a public directory and are therefore no more
+/// trusted than HLS subresources. Reuse that path's checked DNS connector,
+/// redirect policy and no-proxy rule so neither an address nor a redirect can
+/// turn a logo load into a request to this machine or its private network.
+fn logo_client() -> Result<reqwest::Client, String> {
+    if let Some(existing) = LOGO_CLIENT.get() {
+        return Ok(existing.clone());
+    }
+    let built = crate::hls::client_builder()
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(LOGO_CLIENT.get_or_init(|| built).clone())
 }
 
 /// Stop asking a mirror that would not answer. Without this one bad draw -
@@ -580,6 +596,28 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
     })
 }
 
+#[derive(Debug, Serialize)]
+pub struct LogoFailure {
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl LogoFailure {
+    fn permanent(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+        }
+    }
+
+    fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+        }
+    }
+}
+
 /// Fetch a station's artwork and hand it back as a data URL.
 ///
 /// It has to come through here rather than being loaded by the webview: the
@@ -587,100 +625,169 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
 /// broadcaster's logo host does not send the CORS headers WebGL wants before
 /// it will accept a cross-origin picture as a texture. Reading it here and
 /// passing the bytes along inline sidesteps both.
-pub async fn logo(url: &str) -> Result<String, String> {
-    let url = playable_url(url, "").ok_or("that is not an http address")?;
-    let response = client()?
-        .get(&url)
+async fn fetch_logo(url: &str) -> Result<String, LogoFailure> {
+    let url = reqwest::Url::parse(url.trim())
+        .map_err(|_| LogoFailure::permanent("that is not an http address"))?;
+    if !public_http_destination_allowed(url.scheme(), url.host_str().unwrap_or("")) {
+        return Err(LogoFailure::permanent(
+            "that logo address is not a public HTTP address",
+        ));
+    }
+
+    let response = logo_client()
+        .map_err(LogoFailure::retryable)?
+        .get(url)
         .timeout(Duration::from_secs(10))
         .send()
         .await
-        .map_err(|e| describe(&e))?;
+        .map_err(|e| {
+            let message = describe(&e);
+            let detail = message.to_ascii_lowercase();
+            if e.is_redirect() || detail.contains("non-public address") {
+                LogoFailure::permanent(message)
+            } else {
+                LogoFailure::retryable(message)
+            }
+        })?;
     if !response.status().is_success() {
-        return Err(format!("the logo host answered {}", response.status()));
+        let status = response.status();
+        let message = format!("the logo host answered {status}");
+        return Err(
+            if status.is_server_error()
+                || status == reqwest::StatusCode::REQUEST_TIMEOUT
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            {
+                LogoFailure::retryable(message)
+            } else {
+                LogoFailure::permanent(message)
+            },
+        );
     }
 
     let mut bytes: Vec<u8> = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| describe(&e))?;
+        let chunk = chunk.map_err(|e| LogoFailure::retryable(describe(&e)))?;
         if bytes.len() + chunk.len() > MAX_LOGO_BYTES {
-            return Err("that is far larger than a station logo".into());
+            return Err(LogoFailure::permanent(
+                "that is far larger than a station logo",
+            ));
         }
         bytes.extend_from_slice(&chunk);
     }
 
     // By what it is, not by what it was labelled: half of these are served as
     // octet-stream, and a fair few links have rotted into an error page.
-    let kind = image_kind(&bytes).ok_or("that address is not a picture")?;
+    let kind = image_kind(&bytes)
+        .ok_or_else(|| LogoFailure::permanent("that address is not a picture"))?;
     Ok(format!("data:{kind};base64,{}", BASE64.encode(&bytes)))
 }
 
-/// The artwork addresses one directory search offers, in the order given.
-async fn art_candidates(path: &str, params: &[(&str, String)]) -> Vec<String> {
-    let Ok(body) = get(path, params, 20, MAX_BODY_BYTES).await else {
-        return Vec::new();
-    };
-    let Ok(raw) = serde_json::from_str::<Vec<Raw>>(&body) else {
-        return Vec::new();
-    };
-    raw.iter()
-        .filter_map(|entry| playable_url(text(&entry.favicon), ""))
-        .collect()
+pub async fn logo(url: &str) -> Result<String, LogoFailure> {
+    fetch_logo(url).await
 }
 
-/// Find a station's artwork in the directory, for one that has none on file.
+/// Artwork submitted for one exact stream URL, still carrying both URL forms
+/// long enough to verify the directory did not answer with a namesake.
+async fn art_candidates(
+    query_url: &str,
+    requested_url: &str,
+    requested_resolved: &str,
+) -> Result<Vec<String>, String> {
+    let params = &[("url", query_url.to_string())];
+    let body = get("stations/byurl", params, 20, MAX_BODY_BYTES).await?;
+    let raw: Vec<Raw> = serde_json::from_str(&body)
+        .map_err(|e| format!("radio-browser sent something unreadable: {e}"))?;
+    Ok(raw
+        .iter()
+        .filter(|entry| {
+            stream_matches(
+                text(&entry.url),
+                text(&entry.url_resolved),
+                requested_url,
+                requested_resolved,
+            )
+        })
+        .filter_map(|entry| playable_url(text(&entry.favicon), ""))
+        .collect())
+}
+
+/// Find artwork only on directory entries for this exact stream.
 ///
-/// Stations kept from BROWSE arrive with their own; the ones this app ships
-/// with, and anything typed in by hand, do not. Asked in order of how sure
-/// the answer is: the exact stream first, then the exact name, then the
-/// closest name the directory knows. Every candidate is fetched before it is
-/// offered, so an address that has rotted - and plenty have - is passed over
-/// rather than remembered as this station's picture.
-pub async fn art(name: &str, url: &str) -> Result<Option<Art>, String> {
-    let name = clean_name(name, 60);
-    let url = url.trim().to_string();
-    let listing = |extra: Vec<(&'static str, String)>| {
-        let mut params: Vec<(&'static str, String)> = vec![
-            ("hidebroken", "true".into()),
-            ("order", "votes".into()),
-            ("reverse", "true".into()),
-            ("limit", "20".into()),
-        ];
-        params.extend(extra);
-        params
-    };
-
-    let mut searches: Vec<(&str, Vec<(&'static str, String)>)> = Vec::new();
-    if !url.is_empty() {
-        searches.push(("stations/byurl", vec![("url", url)]));
+/// The submitted and resolved addresses are both searched and matched. A
+/// station name is not an identity: the directory contains many unrelated
+/// broadcasters called "Radio One", and borrowing the first one's logo is
+/// worse than leaving the crystal bare. Previously failed or decode-rejected
+/// addresses may be excluded so another submission for the stream can win.
+pub async fn art(
+    url: &str,
+    resolved_url: &str,
+    excluded_urls: &[String],
+) -> Result<Option<Art>, String> {
+    let requested_url = url.trim();
+    let requested_resolved = resolved_url.trim();
+    let mut queries: Vec<String> = Vec::new();
+    for candidate in [requested_url, requested_resolved] {
+        let Some(candidate) = playable_url(candidate, "") else {
+            continue;
+        };
+        if !queries.iter().any(|seen| seen == &candidate) {
+            queries.push(candidate);
+        }
     }
-    if !name.is_empty() {
-        searches.push((
-            "stations/search",
-            listing(vec![("name", name.clone()), ("nameExact", "true".into())]),
-        ));
-        searches.push(("stations/search", listing(vec![("name", name)])));
+    if queries.is_empty() {
+        return Ok(None);
     }
 
-    let mut tried: Vec<String> = Vec::new();
-    for (path, params) in searches {
-        for favicon in art_candidates(path, &params).await {
-            if tried.iter().any(|seen| seen == &favicon) {
-                continue;
+    let excluded: HashSet<&str> = excluded_urls
+        .iter()
+        .map(|url| url.trim())
+        .filter(|url| !url.is_empty())
+        .collect();
+    let mut candidates: Vec<String> = Vec::new();
+    let mut lookup_failure: Option<String> = None;
+    for query in queries {
+        match art_candidates(&query, requested_url, requested_resolved).await {
+            Ok(found) => candidates.extend(found),
+            Err(error) => {
+                if lookup_failure.is_none() {
+                    lookup_failure = Some(error);
+                }
             }
-            if tried.len() >= MAX_ART_TRIES {
-                return Ok(None);
-            }
-            tried.push(favicon.clone());
-            if let Ok(picture) = logo(&favicon).await {
+        }
+    }
+
+    let mut tried: HashSet<String> = HashSet::new();
+    let mut fetch_failure: Option<String> = None;
+    for favicon in candidates {
+        if excluded.contains(favicon.trim()) || tried.contains(&favicon) {
+            continue;
+        }
+        if tried.len() >= MAX_ART_TRIES {
+            break;
+        }
+        tried.insert(favicon.clone());
+        match fetch_logo(&favicon).await {
+            Ok(picture) => {
                 return Ok(Some(Art {
                     url: favicon,
                     picture,
                 }));
             }
+            Err(failure) if failure.retryable => {
+                if fetch_failure.is_none() {
+                    fetch_failure = Some(failure.message);
+                }
+            }
+            Err(_) => {}
         }
     }
-    Ok(None)
+
+    if let Some(error) = fetch_failure.or(lookup_failure) {
+        Err(error)
+    } else {
+        Ok(None)
+    }
 }
 
 pub async fn search(query: Query) -> Result<Page, String> {

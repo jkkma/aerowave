@@ -3,9 +3,10 @@ use std::marker::PhantomData;
 use tauri::{plugin::PluginApi, AppHandle, Runtime};
 
 use crate::models::{
-    AlarmIdPayload, AlarmSettingsPayload, AlarmState, FolderInfo, FolderPathPayload, PlayPayload,
-    PlaybackState, RandomTrackPayload, SleepTimerPayload, SleepTimerSnapshot, SyncAlarmsPayload,
-    TestAlarmPayload, TrackPick, VolumePayload,
+    AlarmIdPayload, AlarmSettingsPayload, AlarmState, ArtworkPayload, FolderInfo,
+    FolderPathPayload, MetadataEnabledPayload, PlayPayload, PlaybackState, RandomTrackPayload,
+    SleepTimerPayload, SleepTimerSnapshot, SyncAlarmsPayload, TestAlarmPayload, TrackPick,
+    VolumePayload,
 };
 
 pub struct AndroidAudio<R: Runtime>(PhantomData<fn() -> R>);
@@ -39,6 +40,17 @@ impl<R: Runtime> AndroidAudio<R> {
     }
 
     pub fn set_volume(&self, _payload: VolumePayload) -> Result<PlaybackState, String> {
+        Ok(PlaybackState::default())
+    }
+
+    pub fn update_artwork(&self, _payload: ArtworkPayload) -> Result<PlaybackState, String> {
+        Ok(PlaybackState::default())
+    }
+
+    pub fn set_metadata_enabled(
+        &self,
+        _payload: MetadataEnabledPayload,
+    ) -> Result<PlaybackState, String> {
         Ok(PlaybackState::default())
     }
 

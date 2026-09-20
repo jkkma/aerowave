@@ -167,6 +167,36 @@ pub fn stream_key(url: &str) -> String {
     bare.trim_end_matches('/').to_string()
 }
 
+/// Does a directory entry describe one of the stream addresses the player
+/// actually reached?
+///
+/// Both sides keep their submitted and resolved forms. A playlist wrapper is
+/// often what the person saved while the directory only carries its final
+/// stream, or vice versa; matching only the preferred form would miss that
+/// identity. Names and homepages are deliberately absent from this rule: two
+/// unrelated broadcasters routinely share either one.
+pub fn stream_matches(
+    entry_url: &str,
+    entry_resolved: &str,
+    requested_url: &str,
+    requested_resolved: &str,
+) -> bool {
+    let requested: Vec<String> = [requested_url, requested_resolved]
+        .into_iter()
+        .filter_map(|url| playable_url(url, ""))
+        .map(|url| stream_key(&url))
+        .collect();
+    if requested.is_empty() {
+        return false;
+    }
+
+    [entry_url, entry_resolved]
+        .into_iter()
+        .filter_map(|url| playable_url(url, ""))
+        .map(|url| stream_key(&url))
+        .any(|candidate| requested.iter().any(|wanted| wanted == &candidate))
+}
+
 /// One entry in the bitrate dropdown, and the reported rates it stands for.
 ///
 /// Most bands are a single round number, because that is what encoders are set
@@ -347,6 +377,33 @@ mod tests {
         // Not normalised, because the sample said neither ever fires.
         assert_ne!(stream_key("http://a.example:8000/x"), stream_key("http://a.example/x"));
         assert_ne!(stream_key("http://www.a.example/x"), stream_key("http://a.example/x"));
+    }
+
+    #[test]
+    fn artwork_matching_uses_submitted_and_resolved_stream_addresses() {
+        assert!(stream_matches(
+            "https://radio.example/listen.pls",
+            "https://cdn.example/live.mp3",
+            "https://radio.example/listen.pls",
+            ""
+        ));
+        assert!(stream_matches(
+            "https://radio.example/listen.pls",
+            "https://cdn.example/live.mp3",
+            "https://elsewhere.example/wrapper.m3u",
+            "http://cdn.example/live.mp3"
+        ));
+    }
+
+    #[test]
+    fn artwork_matching_never_uses_a_shared_name_or_host_as_identity() {
+        assert!(!stream_matches(
+            "https://radio.example/one",
+            "",
+            "https://radio.example/two",
+            ""
+        ));
+        assert!(!stream_matches("", "file:///station", "", "rtsp://station"));
     }
 
     fn band_of(kbps: u32) -> Option<&'static str> {

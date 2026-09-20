@@ -1,4 +1,4 @@
-//! Destination rules for broadcaster-controlled HLS subresources.
+//! Destination rules for broadcaster-controlled HTTP resources.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -31,7 +31,7 @@ pub fn is_public_address(ip: &IpAddr) -> bool {
 
 /// Literal addresses bypass a client's DNS resolver, so both the initial URL
 /// and every redirect must pass this check as well as DNS validation.
-pub fn hls_destination_allowed(scheme: &str, host: &str) -> bool {
+pub fn public_http_destination_allowed(scheme: &str, host: &str) -> bool {
     if !matches!(scheme, "http" | "https") || host.is_empty() {
         return false;
     }
@@ -79,10 +79,10 @@ mod tests {
             "radio.localhost",
             "radio.localhost.",
         ] {
-            assert!(!hls_destination_allowed("https", host), "{host}");
+            assert!(!public_http_destination_allowed("https", host), "{host}");
         }
-        assert!(!hls_destination_allowed("file", "example.com"));
-        assert!(!hls_destination_allowed("https", ""));
+        assert!(!public_http_destination_allowed("file", "example.com"));
+        assert!(!public_http_destination_allowed("https", ""));
     }
 
     #[test]
@@ -93,7 +93,16 @@ mod tests {
             "[2606:4700:4700::1111]",
             "[::ffff:8.8.8.8]",
         ] {
-            assert!(hls_destination_allowed("https", host), "{host}");
+            assert!(public_http_destination_allowed("https", host), "{host}");
+        }
+    }
+
+    #[test]
+    fn artwork_initial_and_redirect_destinations_use_the_same_public_rule() {
+        assert!(public_http_destination_allowed("https", "images.example.com"));
+        for private_target in ["127.0.0.1", "169.254.169.254", "radio.localhost"] {
+            assert!(!public_http_destination_allowed("http", private_target));
+            assert!(!public_http_destination_allowed("https", private_target));
         }
     }
 

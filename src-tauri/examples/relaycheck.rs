@@ -89,41 +89,66 @@ async fn fetch(url: &str, want: usize) -> Result<(String, Vec<u8>), String> {
 /// anything else that is not MPEG audio is not walked - `None` means "not
 /// something this check understands", not "bad".
 fn mpeg_frames(audio: &[u8]) -> Option<(usize, Option<usize>)> {
-    const RATES: [u32; 15] = [
-        0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
-    ];
-    const FREQS: [u32; 3] = [44100, 48000, 32000];
+    fn frame_len(header: &[u8]) -> Option<usize> {
+        const MPEG1_RATES: [u32; 16] = [
+            0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+        ];
+        const MPEG2_RATES: [u32; 16] = [
+            0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
+        ];
+        const FREQS: [u32; 3] = [44100, 48000, 32000];
 
-    // Frames need not start at byte zero: a stream is joined mid-song.
-    let start = (0..audio.len().saturating_sub(4))
-        .find(|&i| audio[i] == 0xff && audio[i + 1] & 0xe0 == 0xe0)?;
+        if header.len() < 4 || header[0] != 0xff || header[1] & 0xe0 != 0xe0 {
+            return None;
+        }
+        let version = (header[1] >> 3) & 0x03;
+        let layer = (header[1] >> 1) & 0x03;
+        if version == 1 || layer != 1 {
+            // Reserved MPEG version, or not Layer III. In particular, an AAC
+            // ADTS sync word starts with the same eleven one-bits but has layer
+            // zero and must not be called a broken MP3 stream.
+            return None;
+        }
+        let rate_index = ((header[2] >> 4) & 0x0f) as usize;
+        let frequency_index = ((header[2] >> 2) & 0x03) as usize;
+        let base_frequency = *FREQS.get(frequency_index)?;
+        let bitrate = if version == 3 {
+            MPEG1_RATES[rate_index]
+        } else {
+            MPEG2_RATES[rate_index]
+        };
+        if bitrate == 0 {
+            return None;
+        }
+        let frequency = match version {
+            3 => base_frequency,
+            2 => base_frequency / 2,
+            0 => base_frequency / 4,
+            _ => return None,
+        };
+        let coefficient = if version == 3 { 144 } else { 72 };
+        let padding = ((header[2] >> 1) & 1) as u32;
+        let length = (coefficient * bitrate * 1000 / frequency + padding) as usize;
+        (length >= 4).then_some(length)
+    }
+
+    // Frames need not start at byte zero: a stream is joined mid-song. Require
+    // two consecutive valid headers so random bytes in Ogg or FLAC do not turn
+    // those formats into a failed MPEG-frame verdict.
+    let start = (0..audio.len().saturating_sub(4)).find(|&at| {
+        let Some(length) = frame_len(&audio[at..]) else {
+            return false;
+        };
+        at + length + 4 <= audio.len() && frame_len(&audio[at + length..]).is_some()
+    })?;
 
     let mut at = start;
     let mut frames = 0;
     while at + 4 <= audio.len() {
-        let h = &audio[at..at + 4];
-        if h[0] != 0xff || h[1] & 0xe0 != 0xe0 {
-            return Some((frames, Some(at)));
-        }
-        // Layer III, MPEG 1 or 2, and a bitrate and sample rate that exist.
-        let version = (h[1] >> 3) & 0x03;
-        let bitrate = RATES[((h[2] >> 4) & 0x0f) as usize];
-        let freq = FREQS.get(((h[2] >> 2) & 0x03) as usize).copied();
-        let (Some(freq), true) = (freq, bitrate > 0) else {
+        let Some(length) = frame_len(&audio[at..]) else {
             return Some((frames, Some(at)));
         };
-        // MPEG 2 and 2.5 halve both.
-        let (bitrate, freq) = if version == 3 {
-            (bitrate, freq)
-        } else {
-            (bitrate / 2, freq / 2)
-        };
-        let padding = ((h[2] >> 1) & 1) as u32;
-        let len = (144 * bitrate * 1000 / freq + padding) as usize;
-        if len < 4 {
-            return Some((frames, Some(at)));
-        }
-        at += len;
+        at += length;
         frames += 1;
     }
     Some((frames, None))

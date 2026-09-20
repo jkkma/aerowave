@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use aerowave_core::icy::{
     decode_text, first_url_in_playlist, head_end, is_hls, looks_like_playlist, metadata_interval,
-    parse_head, scan_metadata, Head,
+    parse_head, Head, MetaStrip,
 };
+use aerowave_core::stream_tags::StreamTags;
 use futures_util::StreamExt;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -134,6 +135,23 @@ enum Resolved {
     },
 }
 
+/// An HTTP attempt that may still have reached a plaintext Shoutcast-v1
+/// endpoint. `raw_url` is the last playlist candidate or redirect destination,
+/// rather than necessarily the wrapper address the user supplied.
+struct ResolveError {
+    message: String,
+    raw_url: String,
+}
+
+impl ResolveError {
+    fn new(message: impl Into<String>, raw_url: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            raw_url: raw_url.into(),
+        }
+    }
+}
+
 /// Read a playlist body, refusing to buffer more than the cap.
 async fn read_capped(resp: reqwest::Response) -> Result<String, String> {
     if let Some(len) = resp.content_length() {
@@ -193,7 +211,7 @@ async fn resolve(
     client: &reqwest::Client,
     url: &str,
     want_metadata: bool,
-) -> Result<Resolved, String> {
+) -> Result<Resolved, ResolveError> {
     let mut current = url.trim().to_string();
 
     for _ in 0..3 {
@@ -201,12 +219,19 @@ async fn resolve(
         if want_metadata {
             request = request.header("Icy-MetaData", "1");
         }
-        let resp = request
-            .send()
-            .await
-            .map_err(|e| format!("{current}: {}", describe(&e)))?;
+        let resp = request.send().await.map_err(|e| {
+            let raw_url = e
+                .url()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| current.clone());
+            ResolveError::new(format!("{current}: {}", describe(&e)), raw_url)
+        })?;
         if !resp.status().is_success() {
-            return Err(format!("HTTP {} from {current}", resp.status()));
+            let raw_url = resp.url().to_string();
+            return Err(ResolveError::new(
+                format!("HTTP {} from {current}", resp.status()),
+                raw_url,
+            ));
         }
         let content_type = content_type_of(&resp);
         let final_url = resp.url().to_string();
@@ -219,7 +244,9 @@ async fn resolve(
             });
         }
 
-        let body = read_capped(resp).await?;
+        let body = read_capped(resp)
+            .await
+            .map_err(|message| ResolveError::new(message, final_url.clone()))?;
         if is_hls(&body) {
             // Not a failure - a fork. The caller is told it is HLS so the
             // front end can hand it to hls.js instead of to <audio>.
@@ -230,10 +257,18 @@ async fn resolve(
         }
         match first_url_in_playlist(&body) {
             Some(next) => current = next,
-            None => return Err(format!("{final_url} is a playlist with no stream URL in it")),
+            None => {
+                return Err(ResolveError::new(
+                    format!("{final_url} is a playlist with no stream URL in it"),
+                    final_url,
+                ))
+            }
         }
     }
-    Err("playlist links went round in circles".into())
+    Err(ResolveError::new(
+        "playlist links went round in circles",
+        current,
+    ))
 }
 
 /// One response header, decoded the way ICY text has to be.
@@ -260,7 +295,7 @@ fn header(resp: &reqwest::Response, key: &str) -> Option<String> {
 async fn probe_inner(url: &str, want_title: bool, skip_resolve: bool) -> Result<StreamInfo, String> {
     match http_probe(url, want_title, skip_resolve).await {
         Ok(info) => Ok(info),
-        Err(http_error) => match icy_probe(url, want_title).await {
+        Err(http_error) => match icy_probe(&http_error.raw_url, want_title).await {
             Ok(info) => Ok(info),
             // Past the head, the server has shown it really is speaking ICY
             // and has said something specific - "ICY 401", the station is
@@ -269,7 +304,7 @@ async fn probe_inner(url: &str, want_title: bool, skip_resolve: bool) -> Result<
             Err(icy) if icy.proven => Err(icy.message),
             // Before that point it has proved nothing, so the HTTP error is
             // still the one worth showing.
-            Err(_) => Err(http_error),
+            Err(_) => Err(http_error.message),
         },
     }
 }
@@ -295,7 +330,7 @@ fn unproven(message: impl Into<String>) -> IcyFailure {
 /// Plaintext only. ICY predates TLS by decades and the servers still speaking
 /// it are `http://` to a one, so an `https://` failure is a real failure and
 /// is left to stand.
-async fn icy_connect(
+async fn icy_connect_once(
     url: &str,
     want_metadata: bool,
 ) -> Result<(tokio::net::TcpStream, Head, Vec<u8>), IcyFailure> {
@@ -369,69 +404,164 @@ async fn icy_connect(
         let text = decode_text(&buf[..head_len]);
         parse_head(&text).ok_or_else(|| unproven(format!("{host} sent no status line")))?
     };
-    // Only a station that really is speaking ICY. Anything answering HTTP was
-    // reqwest's job, and it has already failed for a reason this cannot mend -
-    // claiming it here would bury the real error under a worse one.
-    if !head.icy {
-        return Err(unproven(format!("{host} answered HTTP after all")));
-    }
-    // Past this point the server has shown what it is, so what it says about
-    // itself is worth reporting in place of the HTTP client's guess.
-    if head.code != 200 {
-        return Err(IcyFailure {
-            proven: true,
-            message: format!("ICY {} from {host}", head.code),
-        });
-    }
-
     // Whatever audio arrived alongside the head belongs to the caller.
     let body = buf.split_off(body_at);
     Ok((socket, head, body))
 }
 
+async fn icy_connect(
+    url: &str,
+    want_metadata: bool,
+) -> Result<(tokio::net::TcpStream, Head, Vec<u8>, String), IcyFailure> {
+    let mut current = url.trim().to_string();
+    for _ in 0..=6 {
+        let (socket, head, body) = icy_connect_once(&current, want_metadata).await?;
+        if head.icy {
+            // Past this point the server has shown what it is, so what it says
+            // about itself is worth reporting over the HTTP client's guess.
+            if head.code != 200 {
+                let host = reqwest::Url::parse(&current)
+                    .ok()
+                    .and_then(|url| url.host_str().map(str::to_string))
+                    .unwrap_or_else(|| current.clone());
+                return Err(IcyFailure {
+                    proven: true,
+                    message: format!("ICY {} from {host}", head.code),
+                });
+            }
+            return Ok((socket, head, body, current));
+        }
+
+        // Usually reqwest has already followed this. Keeping redirects here
+        // covers a plaintext wrapper when its final response is `ICY 200 OK`,
+        // which prevents the HTTP stack from handing back a normal Response.
+        if (300..400).contains(&head.code) {
+            let Some(location) = head.get("location") else {
+                return Err(unproven("the stream redirect had no Location header"));
+            };
+            let base = reqwest::Url::parse(&current)
+                .map_err(|e| unproven(format!("{current}: {e}")))?;
+            let next = base
+                .join(location)
+                .map_err(|e| unproven(format!("invalid stream redirect: {e}")))?;
+            if next.scheme() != "http" {
+                return Err(unproven("the raw ICY redirect was not plaintext HTTP"));
+            }
+            current = next.to_string();
+            continue;
+        }
+
+        let host = reqwest::Url::parse(&current)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            .unwrap_or(current);
+        return Err(unproven(format!("{host} answered HTTP after all")));
+    }
+    Err(unproven("too many redirects while reaching the ICY stream"))
+}
+
+fn metadata_readers_done(strip: &Option<MetaStrip>, tags: &Option<StreamTags>) -> bool {
+    let icy_done = match strip {
+        Some(strip) => strip.blocks() >= 2,
+        None => true,
+    };
+    let native_done = match tags {
+        Some(tags) => tags.initial_done(),
+        None => true,
+    };
+    icy_done && native_done
+}
+
+/// Observe one run of upstream bytes. ICY blocks are removed before native
+/// container tags see the audio, matching the order used by the live relay.
+fn metadata_updates(
+    strip: &mut Option<MetaStrip>,
+    tags: &mut Option<StreamTags>,
+    chunk: &[u8],
+    audio: &mut Vec<u8>,
+) -> Vec<String> {
+    audio.clear();
+    let mut updates = match strip {
+        Some(strip) => strip.push(chunk, audio),
+        None => {
+            audio.extend_from_slice(chunk);
+            Vec::new()
+        }
+    };
+    if let Some(tags) = tags {
+        updates.extend(tags.push(audio));
+    }
+    updates
+}
+
 /// The Shoutcast v1 probe: connect as above, then read far enough into the
-/// audio to catch a title.
+/// audio to catch either an ICY title or the container's initial native tags.
 async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure> {
-    let (mut socket, head, mut body) = icy_connect(url, true).await?;
+    let (mut socket, head, mut body, final_url) = icy_connect(url, true).await?;
+
+    let content_type = head
+        .get("content-type")
+        .map(|content_type| content_type.to_ascii_lowercase());
 
     let mut info = StreamInfo {
-        url: url.trim().to_string(),
+        url: final_url.clone(),
         name: head.get("icy-name").map(str::to_string),
         genre: head.get("icy-genre").map(str::to_string),
         bitrate: head.get("icy-br").map(str::to_string),
-        content_type: head.get("content-type").map(|c| c.to_ascii_lowercase()),
+        content_type: content_type.clone(),
         title: None,
         warning: None,
         hls: false,
     };
 
-    let metaint: usize = match head.get("icy-metaint").and_then(|v| v.parse().ok()) {
-        Some(n) if want_title && n > 0 && n < MAX_META_BYTES => n,
-        _ => return Ok(info),
-    };
+    if !want_title {
+        return Ok(info);
+    }
+    let metaint = head
+        .get("icy-metaint")
+        .and_then(|value| value.trim().parse().ok())
+        .filter(|&interval| interval > 0 && interval < MAX_META_BYTES)
+        .unwrap_or(0);
+    let mut strip = (metaint > 0).then(|| MetaStrip::new(metaint));
+    let mut tags = StreamTags::for_stream(content_type.as_deref().unwrap_or(""), &final_url);
+    if strip.is_none() && tags.is_none() {
+        return Ok(info);
+    }
 
-    let mut cursor = 0usize;
-    let mut blocks_read = 0;
-    while body.len() < MAX_META_BYTES && blocks_read < 2 {
-        let scan = scan_metadata(&body, metaint, cursor);
-        cursor = scan.cursor;
-        blocks_read += scan.blocks;
-        if scan.title.is_some() {
-            info.title = scan.title;
+    let mut total = 0usize;
+    let mut audio = Vec::new();
+    loop {
+        if body.is_empty() {
+            let mut chunk = [0u8; 8192];
+            // The head is already in hand at this point, so a stream that
+            // stops mid-metadata still hands back its static headers.
+            let read = match tokio::time::timeout(Duration::from_secs(5), socket.read(&mut chunk))
+                .await
+            {
+                Ok(Ok(read)) => read,
+                _ => break,
+            };
+            if read == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..read]);
+        }
+        let take = body.len().min(MAX_META_BYTES - total);
+        let updates = metadata_updates(
+            &mut strip,
+            &mut tags,
+            &body[..take],
+            &mut audio,
+        );
+        total += take;
+        body.clear();
+        if let Some(title) = updates.into_iter().next() {
+            info.title = Some(title);
             return Ok(info);
         }
-        let mut chunk = [0u8; 8192];
-        // The head is already in hand at this point, so a stream that stops
-        // mid-metadata still hands back the bitrate and genre it gave us.
-        let read = match tokio::time::timeout(Duration::from_secs(5), socket.read(&mut chunk)).await
-        {
-            Ok(Ok(read)) => read,
-            _ => break,
-        };
-        if read == 0 {
+        if total >= MAX_META_BYTES || metadata_readers_done(&strip, &tags) {
             break;
         }
-        body.extend_from_slice(&chunk[..read]);
     }
     Ok(info)
 }
@@ -441,22 +571,35 @@ async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure
 /// `skip_resolve` is for the now-playing poll, which already holds the direct
 /// URL from the first probe: following the playlist chain again every time
 /// would ask the broadcaster for the same file over and over for nothing.
-async fn http_probe(url: &str, want_title: bool, skip_resolve: bool) -> Result<StreamInfo, String> {
+async fn http_probe(
+    url: &str,
+    want_title: bool,
+    skip_resolve: bool,
+) -> Result<StreamInfo, ResolveError> {
     let (resp, direct, content_type) = if skip_resolve {
-        let resp = client()?
+        let http_client = client().map_err(|message| ResolveError::new(message, url.trim()))?;
+        let resp = http_client
             .get(url.trim())
             .header("Icy-MetaData", "1")
             .send()
             .await
-            .map_err(|e| describe(&e))?;
+            .map_err(|e| {
+                let raw_url = e
+                    .url()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| url.trim().to_string());
+                ResolveError::new(describe(&e), raw_url)
+            })?;
         if !resp.status().is_success() {
-            return Err(format!("HTTP {}", resp.status()));
+            let raw_url = resp.url().to_string();
+            return Err(ResolveError::new(format!("HTTP {}", resp.status()), raw_url));
         }
         let content_type = content_type_of(&resp);
         let final_url = resp.url().to_string();
         (resp, final_url, content_type)
     } else {
-        match resolve(&client()?, url, true).await? {
+        let http_client = client().map_err(|message| ResolveError::new(message, url.trim()))?;
+        match resolve(&http_client, url, true).await? {
             Resolved::Hls {
                 final_url,
                 content_type,
@@ -477,47 +620,62 @@ async fn http_probe(url: &str, want_title: bool, skip_resolve: bool) -> Result<S
     };
 
     if !is_playable_type(&content_type) {
-        return Err(format!(
-            "that address answers with {content_type}, not audio - the station \
-             is probably down, full, or has moved"
+        return Err(ResolveError::new(
+            format!(
+                "that address answers with {content_type}, not audio - the station \
+                 is probably down, full, or has moved"
+            ),
+            direct,
         ));
     }
 
     let mut info = StreamInfo {
-        url: direct,
+        url: direct.clone(),
         name: header(&resp, "icy-name"),
         genre: header(&resp, "icy-genre"),
         bitrate: header(&resp, "icy-br"),
-        content_type: Some(content_type).filter(|c| !c.is_empty()),
+        content_type: Some(content_type.clone()).filter(|c| !c.is_empty()),
         title: None,
         warning: None,
         hls: false,
     };
 
-    let metaint: usize = match header(&resp, "icy-metaint").and_then(|v| v.parse().ok()) {
-        Some(n) if want_title && n > 0 && n < MAX_META_BYTES => n,
-        _ => return Ok(info),
-    };
+    if !want_title {
+        return Ok(info);
+    }
+    let metaint = header(&resp, "icy-metaint")
+        .and_then(|value| value.trim().parse().ok())
+        .filter(|&interval| interval > 0 && interval < MAX_META_BYTES)
+        .unwrap_or(0);
+    let mut strip = (metaint > 0).then(|| MetaStrip::new(metaint));
+    let mut tags = StreamTags::for_stream(&content_type, &direct);
+    if strip.is_none() && tags.is_none() {
+        return Ok(info);
+    }
 
-    // Read up to two blocks: servers often send an empty first block and the
-    // real title only on the next boundary.
-    let mut buf: Vec<u8> = Vec::with_capacity(metaint * 2);
     let mut body = resp.bytes_stream();
-    let mut cursor = 0usize;
-    let mut blocks_read = 0;
-
-    while buf.len() < MAX_META_BYTES && blocks_read < 2 {
+    let mut total = 0usize;
+    let mut audio = Vec::new();
+    while total < MAX_META_BYTES && !metadata_readers_done(&strip, &tags) {
         match body.next().await {
-            Some(Ok(chunk)) => buf.extend_from_slice(&chunk),
-            Some(Err(e)) => return Err(describe(&e)),
+            Some(Ok(chunk)) => {
+                let take = chunk.len().min(MAX_META_BYTES - total);
+                let updates = metadata_updates(
+                    &mut strip,
+                    &mut tags,
+                    &chunk[..take],
+                    &mut audio,
+                );
+                total += take;
+                if let Some(title) = updates.into_iter().next() {
+                    info.title = Some(title);
+                    return Ok(info);
+                }
+            }
+            Some(Err(e)) => {
+                return Err(ResolveError::new(describe(&e), direct.clone()));
+            }
             None => break,
-        }
-        let scan = scan_metadata(&buf, metaint, cursor);
-        cursor = scan.cursor;
-        blocks_read += scan.blocks;
-        if scan.title.is_some() {
-            info.title = scan.title;
-            return Ok(info);
         }
     }
     Ok(info)
@@ -535,6 +693,9 @@ pub enum RelayBody {
 
 pub struct RelaySource {
     pub content_type: String,
+    /// The final upstream address identifies a native Ogg/FLAC container even
+    /// when the user supplied a playlist wrapper with no useful extension.
+    pub metadata_url: String,
     pub body: RelayBody,
     /// What `icy-metaint` said, or 0 for a server interleaving nothing. The
     /// relay strips the blocks this far apart back out; see `MetaStrip`.
@@ -563,9 +724,12 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
     // Stripping is what a player is supposed to do with them, and it is worth
     // the care: it is the connection the audio is already on, so a title
     // changes when the song does rather than whenever a poll next came round.
-    let http = match resolve(&relay_client()?, url, true).await {
+    let relay_http_client = relay_client()?;
+    let http = match resolve(&relay_http_client, url, true).await {
         Ok(Resolved::Stream {
-            resp, content_type, ..
+            resp,
+            final_url,
+            content_type,
         }) => {
             if !is_playable_type(&content_type) {
                 return Err(format!(
@@ -580,6 +744,7 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
             };
             return Ok(RelaySource {
                 content_type,
+                metadata_url: final_url,
                 metaint: metadata_interval(header(&resp, "icy-metaint").as_deref())?,
                 body: RelayBody::Http(resp),
             });
@@ -587,21 +752,22 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
         Ok(Resolved::Hls { .. }) => {
             return Err("HLS - this plays through hls.rs, not the relay".into())
         }
-        Err(e) => e,
+        Err(error) => error,
     };
     // Same order as `probe_inner`: HTTP first, and the hand-rolled ICY path
     // only once the HTTP client has failed.
-    match icy_connect(url, true).await {
-        Ok((socket, head, primed)) => Ok(RelaySource {
+    match icy_connect(&http.raw_url, true).await {
+        Ok((socket, head, primed, final_url)) => Ok(RelaySource {
             content_type: head
                 .get("content-type")
                 .map(|c| c.to_ascii_lowercase())
                 .unwrap_or_else(|| "audio/mpeg".to_string()),
+            metadata_url: final_url,
             metaint: metadata_interval(head.get("icy-metaint"))?,
             body: RelayBody::Icy { socket, primed },
         }),
         Err(icy) if icy.proven => Err(icy.message),
-        Err(_) => Err(http),
+        Err(_) => Err(http.message),
     }
 }
 

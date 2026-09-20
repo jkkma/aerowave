@@ -73,6 +73,172 @@ async fn icy_fixture(
     format!("http://127.0.0.1:{port}/stream")
 }
 
+fn vorbis_comments(fields: &[&str]) -> Vec<u8> {
+    let vendor = b"Aerowave network fixture";
+    let mut out = Vec::new();
+    out.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+    out.extend_from_slice(vendor);
+    out.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+    for field in fields {
+        out.extend_from_slice(&(field.len() as u32).to_le_bytes());
+        out.extend_from_slice(field.as_bytes());
+    }
+    out
+}
+
+fn opus_tags_page(serial: u32, fields: &[&str]) -> Vec<u8> {
+    let mut packet = b"OpusTags".to_vec();
+    packet.extend(vorbis_comments(fields));
+    let mut laces = vec![255; packet.len() / 255];
+    laces.push((packet.len() % 255) as u8);
+    let mut page = vec![0; 27];
+    page[..4].copy_from_slice(b"OggS");
+    page[5] = 2;
+    page[14..18].copy_from_slice(&serial.to_le_bytes());
+    page[26] = laces.len() as u8;
+    page.extend(laces);
+    page.extend(packet);
+    page
+}
+
+async fn http_stream_fixture(content_type: &'static str, body: Vec<u8>) -> String {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let body = body.clone();
+            tokio::spawn(async move {
+                let head = request(&mut socket).await.to_ascii_lowercase();
+                assert!(head.contains("icy-metadata: 1"));
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}/stream")
+}
+
+async fn native_container_metadata() {
+    let mut body = opus_tags_page(1, &["ARTIST=Fixture Artist", "TITLE=Native One"]);
+    body.extend(opus_tags_page(2, &["TITLE="]));
+    let source = http_stream_fixture("application/ogg", body.clone()).await;
+
+    let info = stream::probe(&source, true, false).await.unwrap();
+    assert_eq!(info.title.as_deref(), Some("Fixture Artist — Native One"));
+
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let sink = heard.clone();
+    let relay = relay::Relay::start(Arc::new(move |_, title| {
+        sink.lock().unwrap().push(title.to_string());
+    }))
+    .await
+    .unwrap();
+    let response = reqwest::get(relay.route(&source)).await.unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(response.bytes().await.unwrap().as_ref(), body);
+    assert_eq!(
+        *heard.lock().unwrap(),
+        ["Fixture Artist — Native One", ""]
+    );
+    println!("PASS: native Ogg tags reach probes and the relay, chained clears included, without changing container bytes");
+}
+
+async fn wrapped_icy_fixture() -> (String, String) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let head = request(&mut socket).await;
+                let path = head.split_whitespace().nth(1).unwrap_or("/");
+                match path {
+                    "/list.m3u" => {
+                        let body = format!("http://127.0.0.1:{port}/redirect\n");
+                        socket
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    "/redirect" => {
+                        socket
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/live\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                                )
+                                .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    "/live" => {
+                        assert!(head.to_ascii_lowercase().contains("icy-metadata: 1"));
+                        let mut block = b"StreamTitle='Wrapped v1';".to_vec();
+                        block.resize(32, 0);
+                        let mut body = vec![b'a'; 16];
+                        body.push(2);
+                        body.extend(block);
+                        for _ in 0..4 {
+                            body.extend(vec![b'b'; 16]);
+                            body.push(0);
+                        }
+                        socket
+                            .write_all(
+                                b"ICY 200 OK\r\nContent-Type: audio/mpeg\r\nicy-metaint: 16\r\nicy-name: Wrapped fixture\r\n\r\n",
+                            )
+                            .await
+                            .unwrap();
+                        socket.write_all(&body).await.unwrap();
+                    }
+                    _ => panic!("unexpected fixture path: {path}"),
+                }
+            });
+        }
+    });
+    (
+        format!("http://127.0.0.1:{port}/list.m3u"),
+        format!("http://127.0.0.1:{port}/redirect"),
+    )
+}
+
+async fn wrapped_icy_fallback() {
+    let (playlist, redirect) = wrapped_icy_fixture().await;
+    let endpoint = redirect.replace("/redirect", "/live");
+    for source in [playlist, redirect] {
+        let info = stream::probe(&source, true, false).await.unwrap();
+        assert_eq!(info.url, endpoint);
+        assert_eq!(info.title.as_deref(), Some("Wrapped v1"));
+        assert_eq!(info.name.as_deref(), Some("Wrapped fixture"));
+
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let sink = heard.clone();
+        let relay = relay::Relay::start(Arc::new(move |_, title| {
+            sink.lock().unwrap().push(title.to_string());
+        }))
+        .await
+        .unwrap();
+        let response = reqwest::get(relay.route(&source)).await.unwrap();
+        assert!(response.status().is_success());
+        let audio = response.bytes().await.unwrap();
+        assert_eq!(audio.len(), 80);
+        assert!(audio[..16].iter().all(|byte| *byte == b'a'));
+        assert!(audio[16..].iter().all(|byte| *byte == b'b'));
+        assert_eq!(*heard.lock().unwrap(), ["Wrapped v1"]);
+    }
+    println!("PASS: playlist and HTTP redirect wrappers fall through to their Shoutcast-v1 endpoint for probes and relay playback");
+}
+
 async fn large_interval() {
     let interval = 512 * 1024 + 1;
     let mut body = vec![b'a'; interval];
@@ -297,6 +463,8 @@ async fn main() {
     #[cfg(target_os = "linux")]
     local_files().await;
     large_interval().await;
+    native_container_metadata().await;
+    wrapped_icy_fallback().await;
     guarded_redirects().await;
     tokio::join!(raw_head_deadline(), raw_idle_deadline());
     println!("All network regression fixtures passed.");

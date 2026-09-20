@@ -184,6 +184,7 @@ pub struct MetaStrip {
     metaint: usize,
     frame: Frame,
     block: Vec<u8>,
+    blocks: usize,
 }
 
 impl MetaStrip {
@@ -194,7 +195,14 @@ impl MetaStrip {
             metaint,
             frame: Frame::Audio(metaint),
             block: Vec::new(),
+            blocks: 0,
         }
+    }
+
+    /// Number of complete metadata boundaries seen, including zero-length
+    /// blocks. Probes use this to keep their short informational read bounded.
+    pub fn blocks(&self) -> usize {
+        self.blocks
     }
 
     /// Feed one chunk. The audio in it is appended to `audio`; any titles that
@@ -225,6 +233,7 @@ impl MetaStrip {
                     at += 1;
                     self.block.clear();
                     self.frame = if len == 0 {
+                        self.blocks += 1;
                         Frame::Audio(self.metaint)
                     } else {
                         Frame::Block(len)
@@ -235,6 +244,7 @@ impl MetaStrip {
                     self.block.extend_from_slice(&chunk[at..at + take]);
                     at += take;
                     if take == left {
+                        self.blocks += 1;
                         if let Some(title) = stream_title(&decode_text(&self.block)) {
                             titles.push(title);
                         }
@@ -293,9 +303,10 @@ fn windows_1252(byte: u8) -> char {
     }
 }
 
-/// Parse `StreamTitle='...';` out of an ICY metadata block. Returns None for
-/// an absent or empty title - servers pad blocks with NULs and often send an
-/// empty one before the real thing.
+/// Parse `StreamTitle='...';` out of an ICY metadata block. An explicit empty
+/// title is `Some("")`, so a broadcaster can clear the preceding track; an
+/// absent field is `None`. Servers also send zero-length metadata blocks as a
+/// heartbeat, which never reach this parser and therefore announce no change.
 pub fn stream_title(block: &str) -> Option<String> {
     let start = block.find("StreamTitle=")? + "StreamTitle=".len();
     let rest = &block[start..];
@@ -307,11 +318,7 @@ pub fn stream_title(block: &str) -> Option<String> {
     let terminator = if quoted { rest.find("';") } else { rest.find(';') };
     let end = terminator.unwrap_or_else(|| rest.trim_end_matches('\0').trim_end().len());
     let title = rest.get(..end)?.trim();
-    if title.is_empty() {
-        None
-    } else {
-        Some(title.to_string())
-    }
+    Some(title.to_string())
 }
 
 #[cfg(test)]
@@ -327,9 +334,12 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_or_absent_title_is_none() {
-        assert_eq!(stream_title("StreamTitle='';StreamUrl='';"), None);
-        assert_eq!(stream_title("StreamTitle='   ';"), None);
+    fn an_explicit_empty_title_is_a_clear_but_an_absent_one_is_none() {
+        assert_eq!(
+            stream_title("StreamTitle='';StreamUrl='';"),
+            Some(String::new())
+        );
+        assert_eq!(stream_title("StreamTitle='   ';"), Some(String::new()));
         assert_eq!(stream_title("nothing here"), None);
     }
 
@@ -422,6 +432,24 @@ mod tests {
         let mut strip = MetaStrip::new(16);
         let mut audio = Vec::new();
         assert_eq!(strip.push(&wire, &mut audio), ["Same", "Same"]);
+        assert_eq!(strip.blocks(), 2);
+    }
+
+    #[test]
+    fn a_nonempty_block_counts_only_after_all_of_it_arrives() {
+        let (wire, _) = interleaved(16, &["", "StreamTitle='Second';"]);
+        let inside_second_block = 16 + 1 + 16 + 1 + 5;
+        let mut strip = MetaStrip::new(16);
+        let mut audio = Vec::new();
+        assert!(strip
+            .push(&wire[..inside_second_block], &mut audio)
+            .is_empty());
+        assert_eq!(strip.blocks(), 1);
+        assert_eq!(
+            strip.push(&wire[inside_second_block..], &mut audio),
+            ["Second"]
+        );
+        assert_eq!(strip.blocks(), 2);
     }
 
     #[test]

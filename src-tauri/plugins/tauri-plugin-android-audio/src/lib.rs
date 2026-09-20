@@ -12,9 +12,9 @@ use mobile::AndroidAudio;
 
 pub use models::{
     AlarmDefinition, AlarmIdPayload, AlarmSettingsPayload, AlarmSource, AlarmState, AlarmStation,
-    FolderInfo, FolderPathPayload, PlayPayload, PlaybackState, RandomTrackPayload, SleepTimer,
-    SleepTimerPayload, SleepTimerSnapshot, SyncAlarmsPayload, TestAlarmPayload, TrackPick,
-    VolumePayload,
+    ArtworkPayload, FolderInfo, FolderPathPayload, MetadataEnabledPayload, PlayPayload,
+    PlaybackState, RandomTrackPayload, SleepTimer, SleepTimerPayload, SleepTimerSnapshot,
+    SyncAlarmsPayload, TestAlarmPayload, TrackPick, VolumePayload,
 };
 
 use tauri::{
@@ -53,6 +53,42 @@ fn set_volume<R: Runtime>(
     payload: VolumePayload,
 ) -> Result<PlaybackState, String> {
     app.state::<AndroidAudio<R>>().set_volume(payload)
+}
+
+#[tauri::command]
+fn update_artwork<R: Runtime>(
+    app: AppHandle<R>,
+    payload: ArtworkPayload,
+) -> Result<PlaybackState, String> {
+    app.state::<AndroidAudio<R>>().update_artwork(payload)
+}
+
+#[tauri::command]
+fn set_metadata_enabled<R: Runtime>(
+    app: AppHandle<R>,
+    payload: MetadataEnabledPayload,
+) -> Result<PlaybackState, String> {
+    app.state::<AndroidAudio<R>>().set_metadata_enabled(payload)
+}
+
+/// Publishes relay metadata directly to Android's media session. The relay can
+/// keep calling this when the WebView is suspended because JNI work is moved
+/// off its streaming task and stale source URLs are rejected on the native side.
+pub fn update_stream_title<R: Runtime>(app: &AppHandle<R>, source_url: String, title: String) {
+    #[cfg(target_os = "android")]
+    {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(error) = app
+                .state::<AndroidAudio<R>>()
+                .update_stream_title(models::StreamTitlePayload { source_url, title })
+            {
+                eprintln!("Android stream-title update failed: {error}");
+            }
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = (app, source_url, title);
 }
 
 #[tauri::command]
@@ -140,6 +176,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             stop,
             get_state,
             set_volume,
+            update_artwork,
+            set_metadata_enabled,
             set_sleep_timer,
             cancel_sleep_timer,
             get_sleep_timer,
