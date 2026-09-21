@@ -628,7 +628,7 @@ fn tick(app: &AppHandle, power: &mut power::PowerManager) {
 }
 
 /// Start the once-a-second clock. Runs for the life of the process.
-pub fn spawn(app: AppHandle) {
+pub fn spawn(app: AppHandle, power_window: Option<isize>) {
     std::thread::spawn(move || {
         let mut power = power::PowerManager::new();
         let mut pending_power = None;
@@ -647,7 +647,7 @@ pub fn spawn(app: AppHandle) {
             update_power(&app, &mut power);
             tick(&app, &mut power);
             update_power(&app, &mut power);
-            tick_sleep(&app, &mut power, last_tick, &mut pending_power);
+            tick_sleep(&app, &mut power, last_tick, &mut pending_power, power_window);
             std::thread::park_timeout(Duration::from_secs(1));
         }
     });
@@ -742,6 +742,7 @@ fn tick_sleep(
     power: &mut power::PowerManager,
     last_tick: i64,
     pending_power: &mut Option<PendingPowerAction>,
+    power_window: Option<isize>,
 ) {
     let now_ms = Local::now().timestamp_millis();
     let next = next_alarm(app).map(|a| a.at_ms);
@@ -820,19 +821,8 @@ fn tick_sleep(
             finish_power_action(app, action, committed.revision, wake_hold, Err(error));
             return;
         }
-        let power_app = app.clone();
         match power::PendingAction::spawn(action, move |action| {
-            #[cfg(windows)]
-            let window = power_app
-                .get_webview_window("main")
-                .and_then(|window| window.hwnd().ok())
-                .map(|window| window.0 as isize);
-            #[cfg(not(windows))]
-            let window = {
-                let _ = power_app;
-                None
-            };
-            power::execute(action, window)
+            power::execute(action, power_window)
         }) {
             Ok(task) => {
                 *pending_power = Some(PendingPowerAction {

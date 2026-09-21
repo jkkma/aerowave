@@ -927,7 +927,20 @@ pub fn run() {
             }
 
             #[cfg(desktop)]
-            scheduler::spawn(handle.clone());
+            {
+                // hwnd() waits for the UI thread when called elsewhere. Capture
+                // it here, on that thread, so a busy window cannot delay a
+                // committed power action past an alarm. Hiding or minimizing
+                // the main window keeps this handle until the app exits.
+                #[cfg(windows)]
+                let power_window = app
+                    .get_webview_window("main")
+                    .and_then(|window| window.hwnd().ok())
+                    .map(|window| window.0 as isize);
+                #[cfg(not(windows))]
+                let power_window = None;
+                scheduler::spawn(handle.clone(), power_window);
+            }
 
             // Launched by the autostart entry: go straight to the tray.
             #[cfg(desktop)]
