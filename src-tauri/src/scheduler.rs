@@ -810,11 +810,30 @@ fn tick_sleep(
             (sched.sleep.clone(), wake_hold)
         };
         let _ = app.emit("sleep-timer-updated", &committed);
-        // SetSuspendState must not occupy the clock thread. An automatic wake
+        // Windows power calls must not occupy the clock thread. An automatic wake
         // needs this thread to restore power requests and fire the alarm even
         // while the Windows call is still pending on the worker.
-        let _ = power.keep_awake(false, false);
-        match power::PendingAction::spawn(action, power::execute) {
+        // Modern Standby starts through display power-off, so a leftover
+        // system request could leave only the screen asleep. Keep the failure
+        // visible and restore the prior alarm hold instead of claiming sleep.
+        if let Err(error) = power.keep_awake(false, false) {
+            finish_power_action(app, action, committed.revision, wake_hold, Err(error));
+            return;
+        }
+        let power_app = app.clone();
+        match power::PendingAction::spawn(action, move |action| {
+            #[cfg(windows)]
+            let window = power_app
+                .get_webview_window("main")
+                .and_then(|window| window.hwnd().ok())
+                .map(|window| window.0 as isize);
+            #[cfg(not(windows))]
+            let window = {
+                let _ = power_app;
+                None
+            };
+            power::execute(action, window)
+        }) {
             Ok(task) => {
                 *pending_power = Some(PendingPowerAction {
                     task,

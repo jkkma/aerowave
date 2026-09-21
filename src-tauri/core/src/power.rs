@@ -23,6 +23,12 @@ pub enum SleepState {
     PowerOff,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SleepMethod {
+    Suspend,
+    ModernStandby,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WakePolicy {
     #[default]
@@ -55,9 +61,22 @@ pub fn unix_ms_to_filetime(at_ms: i64) -> Option<i64> {
         .filter(|value| *value > 0)
 }
 
+/// Chooses the native sleep path only from a successful capability query.
+/// Unknown facts and a known machine with no sleep state both return `None`.
+pub fn sleep_method(facts: PowerFacts) -> Option<SleepMethod> {
+    if !facts.known {
+        None
+    } else if facts.modern_standby {
+        Some(SleepMethod::ModernStandby)
+    } else if facts.sleep_s1 || facts.sleep_s2 || facts.sleep_s3 {
+        Some(SleepMethod::Suspend)
+    } else {
+        None
+    }
+}
+
 pub fn classify_capabilities(facts: PowerFacts) -> PowerCapabilities {
-    let sleep_supported =
-        facts.known && (facts.sleep_s1 || facts.sleep_s2 || facts.sleep_s3 || facts.modern_standby);
+    let sleep_supported = sleep_method(facts).is_some();
     // A machine capable of S3 normally sleeps there. RTC support for a
     // shallower state alone must not be presented as support for that sleep.
     let deepest = if facts.sleep_s3 {
@@ -147,6 +166,72 @@ mod tests {
         let largest = i64::MAX / 10_000 - 11_644_473_600_000;
         assert!(unix_ms_to_filetime(largest).is_some());
         assert_eq!(unix_ms_to_filetime(largest + 1), None);
+    }
+
+    #[test]
+    fn sleep_method_selects_the_supported_windows_path() {
+        for sleep in [
+            PowerFacts {
+                sleep_s1: true,
+                ..PowerFacts::default()
+            },
+            PowerFacts {
+                sleep_s2: true,
+                ..PowerFacts::default()
+            },
+            PowerFacts {
+                sleep_s3: true,
+                ..PowerFacts::default()
+            },
+        ] {
+            assert_eq!(
+                sleep_method(PowerFacts {
+                    known: true,
+                    ..sleep
+                }),
+                Some(SleepMethod::Suspend)
+            );
+        }
+
+        assert_eq!(
+            sleep_method(PowerFacts {
+                known: true,
+                modern_standby: true,
+                ..PowerFacts::default()
+            }),
+            Some(SleepMethod::ModernStandby)
+        );
+    }
+
+    #[test]
+    fn sleep_method_requires_known_sleep_support() {
+        for facts in [
+            PowerFacts::default(),
+            PowerFacts {
+                known: true,
+                ..PowerFacts::default()
+            },
+            PowerFacts {
+                modern_standby: true,
+                sleep_s3: true,
+                ..PowerFacts::default()
+            },
+        ] {
+            assert_eq!(sleep_method(facts), None);
+            assert!(!classify_capabilities(facts).sleep_supported);
+        }
+    }
+
+    #[test]
+    fn modern_standby_takes_precedence_over_legacy_sleep_states() {
+        let facts = PowerFacts {
+            known: true,
+            sleep_s3: true,
+            modern_standby: true,
+            ..PowerFacts::default()
+        };
+        assert_eq!(sleep_method(facts), Some(SleepMethod::ModernStandby));
+        assert!(classify_capabilities(facts).sleep_supported);
     }
 
     #[test]

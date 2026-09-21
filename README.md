@@ -171,6 +171,13 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   the PC does not immediately put it back to sleep or shut it down.
   The Windows sleep call runs separately from the alarm clock, so an automatic
   wake can prepare and ring the alarm even while that call is still returning.
+  On Modern Standby PCs, Sleep PC requests display power-off to begin Windows'
+  standby transition; the traditional suspend API can return "not supported"
+  on machines that only provide S0 low-power idle. Other applications or drivers
+  can delay low-power entry after the screen turns off. Traditional S1–S3 PCs
+  continue to use the suspend API. The display request goes only to Aerowave's
+  own window with a bounded wait, so an unresponsive unrelated window cannot
+  delay the request or turn the display off again after the alarm.
 
 **Browsing**
 
