@@ -160,7 +160,7 @@ fn main() -> Result<(), String> {
     manager.keep_awake(true, true)?;
     drop(manager);
     verify_execution_state(false, false)?;
-    power::execute(aerowave_core::sleep::SleepAction::Stop)?;
+    power::execute(aerowave_core::sleep::SleepAction::Stop, None)?;
     println!("System-only and alarm display requests verified, including display release while the system remains awake and cleanup on drop.");
     println!("Unchanged active requests restored after a simulated Windows execution-state reset; no actual suspend or power-source transition performed.");
     println!("Persistent alarm hold verified through snooze and dismissal, including release for explicit power actions and restoration after failure.");

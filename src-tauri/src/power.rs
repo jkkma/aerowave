@@ -47,14 +47,15 @@ pub use platform::{capabilities, execute, PowerManager};
 mod platform {
     use super::{PowerCapabilities, SleepAction};
     use aerowave_core::power::{
-        classify_capabilities, unix_ms_to_filetime, PowerFacts, SleepState, WakePolicy,
+        classify_capabilities, sleep_method, unix_ms_to_filetime, PowerFacts, SleepMethod,
+        SleepState, WakePolicy,
     };
     use std::mem::size_of;
     use std::ptr::{null, null_mut};
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, LocalFree, SetLastError, ERROR_NOT_ALL_ASSIGNED,
-        ERROR_NOT_SUPPORTED, ERROR_SUCCESS, HANDLE, LUID,
+        ERROR_NOT_SUPPORTED, ERROR_SUCCESS, HANDLE, HWND, LUID,
     };
     use windows_sys::Win32::Security::{
         AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
@@ -75,6 +76,9 @@ mod platform {
     use windows_sys::Win32::System::Threading::{
         CancelWaitableTimer, CreateWaitableTimerW, GetCurrentProcess, OpenProcessToken,
         SetWaitableTimer,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SendMessageTimeoutW, SC_MONITORPOWER, SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT, WM_SYSCOMMAND,
     };
 
     struct OwnedHandle(HANDLE);
@@ -288,9 +292,48 @@ mod platform {
         }
     }
 
-    pub fn execute(action: SleepAction) -> Result<(), String> {
+    fn modern_standby(window: Option<isize>) -> Result<(), String> {
+        let window = window.filter(|handle| *handle != 0).ok_or_else(|| {
+            "Could not find the Aerowave window needed to start Modern Standby.".to_string()
+        })?;
+        // S0-only PCs can reject SetSuspendState with ERROR_NOT_SUPPORTED.
+        // Display power-off starts their Modern Standby transition. Send once
+        // to our own window: broadcasting can block on unrelated applications
+        // and deliver another display-off request after the alarm has woken us.
+        unsafe { SetLastError(ERROR_SUCCESS) };
+        let sent = unsafe {
+            SendMessageTimeoutW(
+                window as HWND,
+                WM_SYSCOMMAND,
+                SC_MONITORPOWER as usize,
+                2,
+                SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+                2_000,
+                null_mut(),
+            )
+        };
+        if sent != 0 {
+            Ok(())
+        } else {
+            let code = unsafe { GetLastError() };
+            if code == ERROR_SUCCESS {
+                Err("Windows did not acknowledge the Modern Standby display-off request.".into())
+            } else {
+                Err(win_error("Could not start Modern Standby", code))
+            }
+        }
+    }
+
+    pub fn execute(action: SleepAction, window: Option<isize>) -> Result<(), String> {
         if action == SleepAction::Stop {
             return Ok(());
+        }
+        if action == SleepAction::Sleep {
+            match sleep_method(power_facts()) {
+                Some(SleepMethod::ModernStandby) => return modern_standby(window),
+                Some(SleepMethod::Suspend) => {}
+                None => return Err("Windows could not confirm a supported PC sleep method.".into()),
+            }
         }
         let _permission = ShutdownPrivilege::enable()?;
         let result = unsafe {
@@ -353,6 +396,10 @@ mod platform {
     }
 
     pub fn capabilities() -> PowerCapabilities {
+        classify_capabilities(power_facts())
+    }
+
+    fn power_facts() -> PowerFacts {
         let mut status = SYSTEM_POWER_STATUS::default();
         let on_battery = if unsafe { GetSystemPowerStatus(&mut status) } != 0 {
             match status.ACLineStatus {
@@ -380,7 +427,7 @@ mod platform {
             Some(2) => WakePolicy::ImportantOnly,
             _ => WakePolicy::Unknown,
         };
-        classify_capabilities(PowerFacts {
+        PowerFacts {
             known,
             sleep_s1: caps.SystemS1,
             sleep_s2: caps.SystemS2,
@@ -391,7 +438,7 @@ mod platform {
             wake_alarm_present: caps.WakeAlarmPresent,
             on_battery,
             policy,
-        })
+        }
     }
 }
 
@@ -416,7 +463,7 @@ impl PowerManager {
 }
 
 #[cfg(not(windows))]
-pub fn execute(action: SleepAction) -> Result<(), String> {
+pub fn execute(action: SleepAction, _window: Option<isize>) -> Result<(), String> {
     if action == SleepAction::Stop {
         Ok(())
     } else {

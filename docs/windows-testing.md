@@ -147,3 +147,27 @@ be treated as a ringing alarm that cancels every subsequent power timer.
 Repeat on battery only when its wake policy permits it. Modern Standby suspends
 desktop applications differently from traditional sleep; report its measured
 result separately rather than treating a successfully armed timer as proof.
+
+Sleep PC selects its Windows method from the same capability facts used to
+enable the control. Modern Standby uses a single `WM_SYSCOMMAND` /
+`SC_MONITORPOWER` display-off request to the app's main window; traditional
+sleep uses `SetSuspendState` with wake events enabled. Keep the main window
+responsive, including when it was previously hidden in the tray, and verify
+the countdown and any delivery error in the real app. A successful window
+message is only request delivery: confirm the subsequent Windows power-state
+records. Distinguish the Modern Standby screen-off phase from actual low-power
+sleep, and record whether resume occurred at the early-wake deadline, alarm
+deadline, or through user input. Do not poll the webview or inject input during
+the unattended interval. A screen that turns off and an alarm that later plays
+are insufficient by themselves to establish low-power entry or timer wake.
+
+A Windows 11 S0-only check on 2026-09-21 confirmed Modern Standby entry with
+Kernel-Power event 506 (`SC_MONITORPOWER`) after the Sleep PC countdown. With
+AC wake timers enabled, the armed alarm timer did not resume the machine.
+Event 507 instead recorded a later mouse wake, after which the missed-alarm
+path decoded and played the station. This qualifies the sleep-entry fix and
+catch-up playback on that machine, but not unattended alarm wake or measured
+low-power residency. Keep the Modern Standby wake warning in place.
+A second cycle with a one-shot Windows Task Scheduler `WakeToRun` task also
+missed its requested wake deadline on that PC. Task registration alone does
+not establish a working Modern Standby wake alternative.
