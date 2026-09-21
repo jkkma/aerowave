@@ -41,7 +41,7 @@ impl PendingAction {
 }
 
 #[cfg(windows)]
-pub use platform::{capabilities, execute, PowerManager};
+pub use platform::{capabilities, execute, modern_standby, PowerManager};
 
 #[cfg(windows)]
 mod platform {
@@ -292,7 +292,7 @@ mod platform {
         }
     }
 
-    fn modern_standby(window: Option<isize>) -> Result<(), String> {
+    pub fn modern_standby(window: Option<isize>) -> Result<(), String> {
         let window = window.filter(|handle| *handle != 0).ok_or_else(|| {
             "Could not find the Aerowave window needed to start Modern Standby.".to_string()
         })?;
@@ -330,7 +330,7 @@ mod platform {
         }
         if action == SleepAction::Sleep {
             match sleep_method(power_facts()) {
-                Some(SleepMethod::ModernStandby) => return modern_standby(window),
+                Some(SleepMethod::ModernStandby) => return super::modern_standby(window),
                 Some(SleepMethod::Suspend) => {}
                 None => return Err("Windows could not confirm a supported PC sleep method.".into()),
             }

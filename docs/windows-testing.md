@@ -101,6 +101,13 @@ checks the alarm deadline. It checks delivery of successful and failed results.
 This covers a blocked power call without an actual suspend; it does not establish
 unattended wake or speaker output on this PC.
 
+On Windows, the probe also sends the production Modern Standby request to an
+isolated message-only window that consumes display-power messages. It checks
+one delivery to a responsive window, a bounded failure while the window is
+not processing messages, and no late delivery when its message loop resumes.
+The fixture never forwards display-power requests to Windows' default window
+procedure, so this check does not turn off the display or enter standby.
+
 The core suite covers timer expiry, the cancellable power countdown, replacement
 and cancellation before dispatch, alarm precedence, short interrupted clock
 gaps, and waking both before an alarm and at its actual deadline. A power timer
@@ -151,7 +158,9 @@ result separately rather than treating a successfully armed timer as proof.
 Sleep PC selects its Windows method from the same capability facts used to
 enable the control. Modern Standby uses a single `WM_SYSCOMMAND` /
 `SC_MONITORPOWER` display-off request to the app's main window; traditional
-sleep uses `SetSuspendState` with wake events enabled. Keep the main window
+sleep uses `SetSuspendState` with wake events enabled. The main window handle
+is captured during setup on the UI thread and passed to the scheduler, so a
+committed power action never waits on Tauri to look it up. Keep the main window
 responsive, including when it was previously hidden in the tray, and verify
 the countdown and any delivery error in the real app. A successful window
 message is only request delivery: confirm the subsequent Windows power-state
