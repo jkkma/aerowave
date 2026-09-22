@@ -59,6 +59,135 @@ test("cancelling during the final fade restores the listening volume", async () 
   assert.equal(h.timers.has(fade), false);
 });
 
+test("changing playback during the final sleep fade starts fading the new source", async () => {
+  let elapsed = 1000;
+  const h = powerHarness({ performance: { now: () => elapsed } });
+  h.context.now = 100000;
+  h.evaluate("Date.now = () => now");
+  await h.evaluate(`play({ kind: "folder", path: "/music/old.mp3", url: "asset:///music/old.mp3",
+    title: "Old song" }, { volume: 0.8 })`);
+  h.context.sleepState = {
+    revision: 1, sampledAtMs: 1000,
+    timer: { minutes: 15, action: "stop", endsAtMs: 110000, remainingMs: 10000, executeAtMs: null },
+    outcome: null, error: null,
+  };
+  h.evaluate("applySleepSnapshot(sleepState)");
+  const oldFade = h.evaluate("player.fadeTimer");
+  elapsed = 6000;
+  await h.fireTimer(oldFade);
+  const fadedVolume = h.audios[0].volume;
+  await h.evaluate(`play({ kind: "folder", path: "/music/new.mp3", url: "asset:///music/new.mp3",
+    title: "New song" }, { volume: 0.8 })`);
+  const newFade = h.evaluate("player.fadeTimer");
+  assert.equal(h.evaluate("sleepFading"), true);
+  assert.ok(newFade && newFade !== oldFade);
+  assert.ok(h.audios[0].volume <= fadedVolume);
+  elapsed = 8000;
+  await h.fireTimer(newFade);
+  assert.ok(h.audios[0].volume < fadedVolume);
+  assert.equal(h.evaluate("player.source?.title"), "New song");
+});
+
+for (const elapsedAtResolution of [8000, 12000]) {
+  test(`a slow replacement ${elapsedAtResolution < 10000 ? "stays faded when ready" : "cannot start after sleep expiry"}`, async () => {
+    const route = deferred();
+    let elapsed = 1000;
+    let plays = 0;
+    const h = powerHarness({
+      performance: { now: () => elapsed },
+      onPlay: () => { plays++; },
+      invoke: (command, args) => command === "local_file_url" && args.path === "/music/new.mp3"
+        ? route.promise : undefined,
+    });
+    h.context.now = 100000;
+    h.evaluate("Date.now = () => now");
+    await h.evaluate(`play({ kind: "folder", path: "/music/old.mp3", url: "asset:///music/old.mp3",
+      title: "Old song" }, { volume: 0.8 })`);
+    h.context.sleepState = {
+      revision: 1, sampledAtMs: 1000,
+      timer: { minutes: 15, action: "stop", endsAtMs: 110000, remainingMs: 10000, executeAtMs: null },
+      outcome: null, error: null,
+    };
+    h.evaluate("applySleepSnapshot(sleepState)");
+    elapsed = 6000;
+    await h.fireTimer(h.evaluate("player.fadeTimer"));
+    const fadedVolume = h.audios[0].volume;
+    const starting = h.evaluate(`play({ kind: "folder", path: "/music/new.mp3",
+      url: "asset:///music/new.mp3", title: "New song" }, { volume: 0.8 })`);
+    await flush();
+    assert.ok(h.audios[0].volume <= fadedVolume);
+    assert.equal(plays, 1);
+    elapsed = elapsedAtResolution;
+    route.resolve("asset:///music/new.mp3");
+    await starting;
+    if (elapsedAtResolution < 10000) {
+      assert.equal(plays, 2);
+      assert.ok(h.audios[0].volume <= fadedVolume);
+      assert.ok(h.evaluate("player.fadeTimer"));
+    } else {
+      assert.equal(plays, 1);
+      assert.equal(h.evaluate("player.source"), null);
+      assert.equal(h.audios[0].paused, true);
+    }
+  });
+}
+
+test("desktop sleep fade follows monotonic samples across wall-clock changes", async () => {
+  let elapsed = 1000;
+  const h = powerHarness({ performance: { now: () => elapsed } });
+  h.context.now = 100000;
+  h.evaluate("Date.now = () => now; player.source = { kind: 'folder' }; player.target = 0.8; audio.volume = 0.8");
+  h.context.first = {
+    revision: 7, sampledAtMs: 1000,
+    timer: { minutes: 15, action: "stop", endsAtMs: 115000, remainingMs: 15000, executeAtMs: null },
+    outcome: null, error: null,
+  };
+  h.evaluate("applySleepSnapshot(first)");
+  const fade = h.evaluate("player.fadeTimer");
+  elapsed = 6000;
+  h.context.now += 3600000;
+  h.evaluate("renderSleepTimer()");
+  assert.match(h.el("#sleep-left").textContent, /10s left/);
+  await h.fireTimer(fade);
+  assert.ok(h.audios[0].volume < 0.8);
+
+  h.context.fresher = { ...h.context.first, sampledAtMs: 2000,
+    timer: { ...h.context.first.timer, endsAtMs: h.context.now + 9000, remainingMs: 9000 } };
+  h.evaluate("applySleepSnapshot(fresher)");
+  assert.match(h.el("#sleep-left").textContent, /9s left/);
+  assert.equal(h.evaluate("player.fadeTimer"), fade);
+  h.context.older = { ...h.context.fresher, sampledAtMs: 1500,
+    timer: { ...h.context.fresher.timer, remainingMs: 90000 } };
+  h.evaluate("applySleepSnapshot(older)");
+  assert.match(h.el("#sleep-left").textContent, /9s left/);
+});
+
+test("desktop power countdown uses monotonic samples and rejects an older sample", () => {
+  let elapsed = 1000;
+  const h = powerHarness({ performance: { now: () => elapsed } });
+  h.context.now = 100000;
+  h.evaluate("Date.now = () => now");
+  h.context.first = {
+    revision: 7, sampledAtMs: 1000,
+    timer: { minutes: 15, action: "sleep", endsAtMs: 100000, remainingMs: 0,
+      executeAtMs: 130000, executeRemainingMs: 30000 },
+    outcome: null, error: null,
+  };
+  h.evaluate("applySleepSnapshot(first)");
+  elapsed = 6000;
+  h.context.now += 3600000;
+  h.evaluate("renderSleepTimer()");
+  assert.equal(h.el("#power-seconds").textContent, "25s");
+  h.context.older = { ...h.context.first, sampledAtMs: 500,
+    timer: { ...h.context.first.timer, executeRemainingMs: 90000 } };
+  h.evaluate("applySleepSnapshot(older)");
+  assert.equal(h.el("#power-seconds").textContent, "25s");
+  h.context.fresher = { ...h.context.first, sampledAtMs: 2000,
+    timer: { ...h.context.first.timer, executeAtMs: h.context.now + 22000, executeRemainingMs: 22000 } };
+  h.evaluate("applySleepSnapshot(fresher)");
+  assert.equal(h.el("#power-seconds").textContent, "22s");
+});
+
 test("power countdown stops ordinary audio and keeps keyboard focus on Cancel", async () => {
   const h = powerHarness();
   h.evaluate('wire(); player.source = {kind:"folder"}');

@@ -179,6 +179,24 @@ pub fn missed_while_asleep<Tz: TimeZone>(
     }
 }
 
+/// Recheck alarm priority immediately before a PC power action commits. The
+/// wall clock or saved alarms may change after the ordinary scheduler tick;
+/// `next_occurrence` skips the current minute and cannot answer this question.
+pub fn unclaimed_due_alarm<Tz: TimeZone>(
+    hour: u32,
+    minute: u32,
+    days: &[u32],
+    now: &DateTime<Tz>,
+    last_tick: i64,
+    last_fired_key: Option<&str>,
+) -> bool {
+    let current_key = now.naive_local().format("%Y-%m-%d %H:%M").to_string();
+    if last_fired_key == Some(current_key.as_str()) {
+        return false;
+    }
+    due_now(hour, minute, days, now) || missed_while_asleep(hour, minute, days, now, last_tick)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +391,74 @@ mod tests {
         for last_tick in [0, now.timestamp(), now.timestamp() + 60] {
             assert!(!missed_while_asleep(7, 30, &[], &now, last_tick));
         }
+    }
+
+    #[test]
+    fn final_power_check_blocks_an_unclaimed_alarm_in_its_minute() {
+        let now = at(7, 7, 30) + Duration::seconds(10);
+        assert!(unclaimed_due_alarm(
+            7,
+            30,
+            &[],
+            &now,
+            now.timestamp() - 1,
+            None
+        ));
+        assert!(!unclaimed_due_alarm(
+            7,
+            30,
+            &[],
+            &now,
+            now.timestamp() - 1,
+            Some("2026-09-07 07:30")
+        ));
+        assert!(!unclaimed_due_alarm(
+            7,
+            30,
+            &[1],
+            &now,
+            now.timestamp() - 1,
+            None
+        ));
+    }
+
+    #[test]
+    fn final_power_check_catches_a_crossed_minute_within_grace() {
+        let before = at(7, 7, 29) + Duration::seconds(50);
+        let after = at(7, 7, 31) + Duration::seconds(10);
+        assert!(unclaimed_due_alarm(
+            7,
+            30,
+            &[],
+            &after,
+            before.timestamp(),
+            None
+        ));
+        assert!(!unclaimed_due_alarm(
+            7,
+            30,
+            &[],
+            &after,
+            before.timestamp(),
+            Some("2026-09-07 07:31")
+        ));
+        assert!(!unclaimed_due_alarm(
+            7,
+            30,
+            &[1],
+            &after,
+            before.timestamp(),
+            None
+        ));
+        let too_late = at(7, 7, 46);
+        assert!(!unclaimed_due_alarm(
+            7,
+            30,
+            &[],
+            &too_late,
+            before.timestamp(),
+            None
+        ));
     }
 
     #[test]
