@@ -163,6 +163,10 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   **Shut down PC** before choosing the duration. The selected action is remembered
   for the next timer; choosing another duration replaces an active timer.
   Rust owns the deadline, including while the window is hidden or reloading.
+  Durations use elapsed time, so correcting the Windows clock cannot shorten
+  or extend either the timer or its final countdown. A power action delayed
+  more than five seconds past its countdown is cancelled. Changing tracks keeps
+  the remaining fade instead of bringing the new track back at full volume.
   Turning it off mid-fade puts the volume back. Sleep and shutdown stop the audio,
   then show a 30-second countdown that can be cancelled with its button or Escape.
   Shutdown lets other applications with unsaved work block it. A ringing alarm
@@ -315,6 +319,10 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   to silence, and consumes its snooze allowance only after acceptance. Automatic
   actions retry a limited number of times; a persistent failure leaves the
   alarm available for manual dismissal or snooze.
+  The native scheduler owns the automatic-snooze tally, so reloading the page
+  does not grant extra rounds. A manual Dismiss or Snooze that arrives while
+  an automatic completion is pending takes precedence for that occurrence;
+  a delayed request cannot change a newer occurrence of the same alarm.
 - So does the track a folder alarm rings on: it is drawn once, when the alarm
   first goes off, and every snooze after it comes back to that same file. A
   snooze is the same alarm returning, and waking to a different song each time
@@ -367,6 +375,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   the hold. Editing, disabling or deleting an alarm updates the next wake timer
   without releasing the hold from an alarm that already fired.
   Keep Aerowave running, including in the tray: quitting cancels its timers.
+  Alarm and wake-setting changes become active only after their configuration
+  has been written successfully. A failed save keeps the previous live state.
   Wake support depends on the PC and its current AC/battery power plan. Settings
   reports the current policy; if blocked, enable **Sleep > Allow wake timers**
   in Windows' advanced power settings. Aerowave does not change that system setting.

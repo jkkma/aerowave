@@ -219,11 +219,9 @@ pub struct Store {
     /// reset is indistinguishable from a first run, and on an alarm clock
     /// that means every alarm quietly ceases to exist.
     pub load_error: Option<String>,
-    /// Held across the whole of `save()` - snapshot, write, rename. The temp
-    /// file is shared, so without this the scheduler thread and the UI thread
-    /// can interleave two writes into it and rename the mixture into place,
-    /// producing exactly the unparseable file this struct then has to cope
-    /// with.
+    /// Serializes every data mutation and config write. The shared temp file
+    /// would be corrupted by interleaved writes, and a direct mutation of
+    /// `data` would invalidate a candidate while it is being persisted.
     write_lock: Mutex<()>,
     pub data: Mutex<AppData>,
 }
@@ -314,23 +312,32 @@ impl Store {
     }
 
     /// A failed Add must not enter memory and hitch a ride on the next save.
-    /// Hold both locks so no concurrent settings write can replace the candidate.
     pub fn replace_stations(&self, stations: Vec<Station>) -> Result<(), String> {
-        let _writing = self.write_lock.lock().unwrap();
-        let mut data = self.data.lock().unwrap();
-        aerowave_core::persistence::update(
-            &mut *data,
-            |candidate| candidate.stations = stations,
-            |candidate| self.write_snapshot(candidate),
-        )
+        self.update(|candidate| candidate.stations = stations)
     }
 
-    /// Mutate the data under lock, then persist.
+    /// Persist a private candidate before making it visible to other readers.
     pub fn update<F: FnOnce(&mut AppData)>(&self, f: F) -> Result<(), String> {
-        {
-            let mut d = self.data.lock().unwrap();
-            f(&mut d);
-        }
-        self.save()
+        self.update_with(f, |current, candidate| *current = candidate)
+    }
+
+    /// Keep writes serialized while the data lock is free during filesystem I/O.
+    /// Commit dependent scheduler state with data-before-scheduler lock order.
+    pub fn update_with<F, C>(&self, change: F, commit: C) -> Result<(), String>
+    where
+        F: FnOnce(&mut AppData),
+        C: FnOnce(&mut AppData, AppData),
+    {
+        let _writing = self.write_lock.lock().unwrap();
+        let mut staged = self.snapshot();
+        aerowave_core::persistence::update_with(
+            &mut staged,
+            change,
+            |candidate| self.write_snapshot(candidate),
+            |_, candidate| {
+                let mut data = self.data.lock().unwrap();
+                commit(&mut data, candidate);
+            },
+        )
     }
 }

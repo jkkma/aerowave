@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 
 pub const POWER_COUNTDOWN_MS: i64 = 30_000;
 pub const WAKE_LEAD_MS: i64 = 45_000;
+const POWER_DISPATCH_GRACE_MS: u64 = 5_000;
 
-/// A power countdown must have recent clock ticks before it can dispatch.
-/// Even a brief suspend must not resume into an overdue shutdown; alarm
-/// catch-up separately allows an occurrence to ring up to 15 minutes late.
-pub fn power_clock_interrupted(last_tick_ms: i64, now_ms: i64) -> bool {
-    now_ms.saturating_sub(last_tick_ms) > 5_000
+/// A power countdown must have recent elapsed-clock ticks before it can
+/// dispatch. Wall-clock corrections must not look like a resume or hide one.
+pub fn power_clock_interrupted(last_tick_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(last_tick_ms) > POWER_DISPATCH_GRACE_MS
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -27,8 +27,15 @@ pub enum SleepAction {
 pub struct SleepTimer {
     pub minutes: u32,
     pub action: SleepAction,
+    /// Projected wall-clock deadline for display, updated after clock changes.
     pub ends_at_ms: i64,
     pub execute_at_ms: Option<i64>,
+    pub remaining_ms: i64,
+    pub execute_remaining_ms: Option<i64>,
+    #[serde(skip)]
+    ends_at_elapsed_ms: u64,
+    #[serde(skip)]
+    execute_at_elapsed_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -44,6 +51,8 @@ pub enum SleepOutcome {
 #[serde(rename_all = "camelCase")]
 pub struct SleepSnapshot {
     pub revision: u64,
+    /// A strictly increasing sample tag, including samples within one ms.
+    pub sampled_at_ms: u64,
     pub timer: Option<SleepTimer>,
     pub outcome: Option<SleepOutcome>,
     pub error: Option<String>,
@@ -58,12 +67,28 @@ pub enum SleepEffect {
 }
 
 impl SleepSnapshot {
+    /// Compatibility with fixed-clock callers. The desktop passes an elapsed
+    /// clock through `start_monotonic` so wall corrections cannot move a timer.
     pub fn start(&mut self, now_ms: i64, minutes: u32, action: SleepAction) -> Result<(), String> {
+        self.start_monotonic(now_ms, now_ms.max(0) as u64, minutes, action)
+    }
+
+    pub fn start_monotonic(
+        &mut self,
+        wall_ms: i64,
+        elapsed_ms: u64,
+        minutes: u32,
+        action: SleepAction,
+    ) -> Result<(), String> {
         if !(1..=1440).contains(&minutes) {
             return Err("Choose a sleep timer between 1 minute and 24 hours".into());
         }
-        let ends_at_ms = now_ms
-            .checked_add(i64::from(minutes) * 60_000)
+        let duration_ms = i64::from(minutes) * 60_000;
+        let ends_at_ms = wall_ms
+            .checked_add(duration_ms)
+            .ok_or("The sleep timer deadline is out of range")?;
+        let ends_at_elapsed_ms = elapsed_ms
+            .checked_add(duration_ms as u64)
             .ok_or("The sleep timer deadline is out of range")?;
         self.revision += 1;
         self.timer = Some(SleepTimer {
@@ -71,10 +96,32 @@ impl SleepSnapshot {
             action,
             ends_at_ms,
             execute_at_ms: None,
+            remaining_ms: duration_ms,
+            execute_remaining_ms: None,
+            ends_at_elapsed_ms,
+            execute_at_elapsed_ms: None,
         });
         self.outcome = None;
         self.error = None;
+        self.sample(wall_ms, elapsed_ms);
         Ok(())
+    }
+
+    /// Refresh the serialized countdown without advancing its transitions.
+    /// Wall deadlines are projections; elapsed deadlines own the duration.
+    pub fn sample(&mut self, wall_ms: i64, elapsed_ms: u64) {
+        self.sampled_at_ms = self.sampled_at_ms.saturating_add(1).max(elapsed_ms);
+        if let Some(timer) = self.timer.as_mut() {
+            let remaining = timer.ends_at_elapsed_ms.saturating_sub(elapsed_ms);
+            timer.remaining_ms = remaining.min(i64::MAX as u64) as i64;
+            timer.ends_at_ms = wall_ms.saturating_add(timer.remaining_ms);
+            timer.execute_remaining_ms = timer
+                .execute_at_elapsed_ms
+                .map(|at| at.saturating_sub(elapsed_ms).min(i64::MAX as u64) as i64);
+            timer.execute_at_ms = timer
+                .execute_remaining_ms
+                .map(|remaining| wall_ms.saturating_add(remaining));
+        }
     }
 
     pub fn cancel(&mut self, reason: SleepOutcome) -> bool {
@@ -96,6 +143,24 @@ impl SleepSnapshot {
         alarm_imminent: bool,
         resumed: bool,
     ) -> SleepEffect {
+        self.advance_monotonic(
+            now_ms,
+            now_ms.max(0) as u64,
+            ringing,
+            alarm_imminent,
+            resumed,
+        )
+    }
+
+    pub fn advance_monotonic(
+        &mut self,
+        wall_ms: i64,
+        elapsed_ms: u64,
+        ringing: bool,
+        alarm_imminent: bool,
+        resumed: bool,
+    ) -> SleepEffect {
+        self.sample(wall_ms, elapsed_ms);
         let Some(timer) = self.timer.as_ref() else {
             return SleepEffect::None;
         };
@@ -103,21 +168,29 @@ impl SleepSnapshot {
             self.cancel(SleepOutcome::Alarm);
             return SleepEffect::Changed;
         }
-        if resumed && timer.action != SleepAction::Stop && now_ms >= timer.ends_at_ms {
+        if resumed && timer.action != SleepAction::Stop && elapsed_ms >= timer.ends_at_elapsed_ms {
             self.cancel(SleepOutcome::Cancelled);
             return SleepEffect::Changed;
         }
-        if now_ms < timer.ends_at_ms {
+        if elapsed_ms < timer.ends_at_elapsed_ms {
             return SleepEffect::None;
         }
         let action = timer.action;
         if action != SleepAction::Stop {
-            if let Some(execute_at) = timer.execute_at_ms {
-                if now_ms < execute_at {
+            if let Some(execute_at) = timer.execute_at_elapsed_ms {
+                if elapsed_ms < execute_at {
                     return SleepEffect::None;
                 }
+                // A busy save gate can make dispatch retry on every healthy
+                // tick. Do not perform a power action long after its prompt.
+                if elapsed_ms.saturating_sub(execute_at) > POWER_DISPATCH_GRACE_MS {
+                    self.cancel(SleepOutcome::Cancelled);
+                    return SleepEffect::Changed;
+                }
             } else {
-                self.timer.as_mut().unwrap().execute_at_ms = Some(now_ms + POWER_COUNTDOWN_MS);
+                self.timer.as_mut().unwrap().execute_at_elapsed_ms =
+                    Some(elapsed_ms.saturating_add(POWER_COUNTDOWN_MS as u64));
+                self.sample(wall_ms, elapsed_ms);
                 self.revision += 1;
                 return SleepEffect::Countdown;
             }
@@ -140,7 +213,7 @@ impl SleepSnapshot {
     pub fn commit_power(&mut self, revision: u64) -> bool {
         if self.revision != revision
             || !self.timer.as_ref().is_some_and(|timer| {
-                timer.action != SleepAction::Stop && timer.execute_at_ms.is_some()
+                timer.action != SleepAction::Stop && timer.execute_at_elapsed_ms.is_some()
             })
         {
             return false;
@@ -292,6 +365,37 @@ mod tests {
     }
 
     #[test]
+    fn repeated_uncommitted_dispatch_cancels_after_five_seconds() {
+        for action in [SleepAction::Sleep, SleepAction::Shutdown] {
+            let mut s = timer(action);
+            // A late first tick still starts a full countdown.
+            assert_eq!(
+                s.advance_monotonic(80_000, 80_000, false, false, false),
+                SleepEffect::Countdown
+            );
+            let revision = s.revision;
+            let mut last_tick = 109_000;
+            for now in [110_000, 111_000, 112_000, 113_000, 114_000, 115_000] {
+                assert!(!power_clock_interrupted(last_tick, now));
+                assert_eq!(
+                    s.advance_monotonic(now as i64, now, false, false, false),
+                    SleepEffect::Execute(action)
+                );
+                assert_eq!(s.revision, revision);
+                last_tick = now;
+            }
+            assert!(!power_clock_interrupted(last_tick, 115_001));
+            assert_eq!(
+                s.advance_monotonic(115_001, 115_001, false, false, false),
+                SleepEffect::Changed
+            );
+            assert_eq!(s.outcome, Some(SleepOutcome::Cancelled));
+            assert!(s.timer.is_none());
+            assert!(!s.commit_power(revision));
+        }
+    }
+
+    #[test]
     fn off_and_replacement_cancel_the_old_pending_action() {
         let mut s = timer(SleepAction::Shutdown);
         s.advance(61_000, false, false, false);
@@ -328,7 +432,12 @@ mod tests {
         assert!(wake_plan(prepare_at, Some(alarm_at), false).keep_awake);
         let before = s.clone();
         assert_eq!(s.advance(prepare_at, false, true, false), SleepEffect::None);
-        assert_eq!(s, before);
+        assert_eq!(s.revision, before.revision);
+        assert_eq!(s.outcome, before.outcome);
+        assert_eq!(
+            s.timer.as_ref().unwrap().action,
+            before.timer.unwrap().action
+        );
         assert_eq!(
             s.advance(61_000, false, true, false),
             SleepEffect::Execute(SleepAction::Stop)
@@ -401,7 +510,13 @@ mod tests {
         let before = s.clone();
         for minutes in [0, 1441, u32::MAX] {
             assert!(s.start(0, minutes, SleepAction::Shutdown).is_err());
+            assert!(s
+                .start_monotonic(0, 10_000, minutes, SleepAction::Shutdown)
+                .is_err());
         }
+        assert!(s
+            .start_monotonic(0, u64::MAX, 1, SleepAction::Shutdown)
+            .is_err());
         assert_eq!(s, before);
     }
 
@@ -431,8 +546,100 @@ mod tests {
         let value = serde_json::to_value(&s).unwrap();
         assert_eq!(value["timer"]["endsAtMs"], 61_000);
         assert_eq!(value["timer"]["executeAtMs"], 91_000);
+        assert_eq!(value["timer"]["remainingMs"], 0);
+        assert_eq!(value["timer"]["executeRemainingMs"], 30_000);
         assert_eq!(value["timer"]["action"], "shutdown");
         assert_eq!(value["revision"], 2);
+        assert!(value["sampledAtMs"].as_u64().unwrap() >= 61_000);
+    }
+
+    #[test]
+    fn wall_clock_corrections_do_not_change_elapsed_timer_duration() {
+        for wall_at_halfway in [970_000, 1_130_000] {
+            let mut s = SleepSnapshot::default();
+            s.start_monotonic(1_000_000, 10_000, 1, SleepAction::Sleep)
+                .unwrap();
+            assert_eq!(
+                s.advance_monotonic(wall_at_halfway, 40_000, false, false, true),
+                SleepEffect::None
+            );
+            let timer = s.timer.as_ref().unwrap();
+            assert_eq!(timer.remaining_ms, 30_000);
+            assert_eq!(timer.ends_at_ms, wall_at_halfway + 30_000);
+            assert_eq!(
+                s.advance_monotonic(wall_at_halfway + 30_000, 70_000, false, false, false),
+                SleepEffect::Countdown
+            );
+            assert_eq!(s.timer.as_ref().unwrap().execute_remaining_ms, Some(30_000));
+        }
+    }
+
+    #[test]
+    fn countdown_uses_elapsed_time_through_forward_and_backward_clock_changes() {
+        for changed_wall in [1_025_000, 1_105_000] {
+            let mut s = SleepSnapshot::default();
+            s.start_monotonic(1_000_000, 10_000, 1, SleepAction::Shutdown)
+                .unwrap();
+            assert_eq!(
+                s.advance_monotonic(1_060_000, 70_000, false, false, false),
+                SleepEffect::Countdown
+            );
+            assert_eq!(
+                s.advance_monotonic(changed_wall, 75_000, false, false, false),
+                SleepEffect::None
+            );
+            assert_eq!(s.timer.as_ref().unwrap().execute_remaining_ms, Some(25_000));
+            assert_eq!(
+                s.advance_monotonic(changed_wall + 24_999, 99_999, false, false, false),
+                SleepEffect::None
+            );
+            assert_eq!(
+                s.advance_monotonic(changed_wall + 25_000, 100_000, false, false, false),
+                SleepEffect::Execute(SleepAction::Shutdown)
+            );
+        }
+    }
+
+    #[test]
+    fn elapsed_gap_cancels_overdue_power_but_finishes_stop_audio() {
+        for action in [SleepAction::Sleep, SleepAction::Shutdown] {
+            let mut s = SleepSnapshot::default();
+            s.start_monotonic(1_000_000, 10_000, 1, action).unwrap();
+            assert!(!power_clock_interrupted(69_000, 70_000));
+            assert!(power_clock_interrupted(40_000, 80_000));
+            assert_eq!(
+                s.advance_monotonic(980_000, 80_000, false, false, true),
+                SleepEffect::Changed
+            );
+            assert_eq!(s.outcome, Some(SleepOutcome::Cancelled));
+        }
+        let mut stop = SleepSnapshot::default();
+        stop.start_monotonic(1_000_000, 10_000, 1, SleepAction::Stop)
+            .unwrap();
+        assert_eq!(
+            stop.advance_monotonic(980_000, 80_000, false, false, true),
+            SleepEffect::Execute(SleepAction::Stop)
+        );
+    }
+
+    #[test]
+    fn samples_in_one_millisecond_stay_ordered_and_replacement_resets_remaining() {
+        let mut s = SleepSnapshot::default();
+        s.start_monotonic(1_000_000, 10_000, 1, SleepAction::Sleep)
+            .unwrap();
+        let first = s.sampled_at_ms;
+        s.sample(1_000_000, 10_000);
+        assert!(s.sampled_at_ms > first);
+        assert_eq!(s.timer.as_ref().unwrap().remaining_ms, 60_000);
+        assert!(s.cancel(SleepOutcome::Cancelled));
+        s.start_monotonic(2_000_000, 20_000, 2, SleepAction::Stop)
+            .unwrap();
+        assert_eq!(s.timer.as_ref().unwrap().remaining_ms, 120_000);
+        assert_eq!(
+            s.advance_monotonic(2_090_000, 110_000, false, false, false),
+            SleepEffect::None
+        );
+        assert_eq!(s.timer.as_ref().unwrap().remaining_ms, 30_000);
     }
 
     #[test]

@@ -595,12 +595,12 @@ function fadeTo(target, seconds) {
  * caller decides what happens at the end - this only moves the knob, so a
  * fade that gets cancelled halfway cannot take the ending with it.
  */
-function fadeOut(seconds) {
+function fadeOut(seconds, now = Date.now) {
   clearInterval(player.fadeTimer);
   const from = audio.volume;
-  const started = Date.now();
+  const started = now();
   player.fadeTimer = setInterval(() => {
-    const t = Math.min(1, (Date.now() - started) / (seconds * 1000));
+    const t = Math.min(1, (now() - started) / (seconds * 1000));
     const away = 1 - t;
     audio.volume = Math.min(1, Math.max(0, from * away * away));
     if (t < 1) return;
@@ -1125,6 +1125,7 @@ async function play(source, opts = {}) {
     say("Dismiss or snooze the alarm before changing playback.");
     return;
   }
+  const sleepFadeVolume = !IS_ANDROID && sleepFading ? audio.volume : null;
   stopPlayback(true, { skipNative: IS_ANDROID });
   const generation = playGeneration;
   player.source = source;
@@ -1132,6 +1133,7 @@ async function play(source, opts = {}) {
   player.retries = 0;
   player.streamTitle = false;
   const volume = opts.volume !== undefined ? opts.volume : state.settings.volume ?? 0.8;
+  if (sleepFadeVolume != null) audio.volume = Math.min(sleepFadeVolume, volume);
   // A second alarm can interrupt this connection before the media URL arrives.
   // Keep the intended volume and position available for its snapshot too.
   player.target = volume;
@@ -1225,7 +1227,21 @@ async function play(source, opts = {}) {
     audio.currentTime = player.pendingPosition;
   }
   player.pendingPosition = null;
-  audio.volume = opts.fadeSecs > 0 ? 0.02 : volume;
+  const continuingSleepFade = sleepFadeVolume != null && sleepFading;
+  if (continuingSleepFade && (!sleepSnapshot.timer || sleepSnapshot.timer.executeAtMs != null ||
+      sleepTimeLeft(sleepSnapshot.timer) <= 0)) {
+    stopPlayback();
+    return;
+  }
+  audio.volume = continuingSleepFade
+    ? Math.min(audio.volume, opts.fadeSecs > 0 ? 0.02 : volume)
+    : opts.fadeSecs > 0 ? 0.02 : volume;
+  if (continuingSleepFade) {
+    // Source resolution may have taken most of the time left. Resume from its
+    // faded level only when the replacement can actually start making sound.
+    sleepFading = false;
+    renderSleepTimer();
+  }
   if (player.paused || givingUp) return;
   try {
     await audio.play();
@@ -1237,7 +1253,7 @@ async function play(source, opts = {}) {
     return;
   }
   if (superseded(generation) || player.paused || givingUp) return;
-  if (opts.fadeSecs > 0) fadeTo(volume, opts.fadeSecs);
+  if (opts.fadeSecs > 0 && !continuingSleepFade) fadeTo(volume, opts.fadeSecs);
 
   if (source.kind === "station" && !player.hls) startMetadata(source, initialInfo);
 }
@@ -2687,13 +2703,6 @@ let givingUp = false;
 let ringActionFailures = 0;
 let ringCompletionIntent = null;
 let latestAlarmOccurrence = null;
-/**
- * Give-ups each alarm's current ring has turned into a snooze, by alarm id.
- * One tally per alarm rather than one for the app: a second alarm ringing in
- * the gap between a snooze and its return used to wipe the first one's
- * budget, and an alarm set to snooze once would do it again and again.
- */
-const autoSnoozed = new Map();
 /** How long an alarm takes to recede once it has given up. */
 const GIVE_UP_FADE_SECS = 6;
 const RING_ACTION_RETRY_MS = 30000;
@@ -2831,11 +2840,8 @@ function onAlarmFire(payload) {
   ringActionFailures = 0;
   ringCompletionIntent = null;
   player.backupAttempts = 0;
-  // The budget belongs to the ring: a snooze carries its tally on, and any
-  // other way of arriving - scheduled, caught up, tested - starts it over.
-  if (payload.trigger !== "snooze") {
-    autoSnoozed.delete(payload.alarmId);
-  }
+  // Rust owns the auto-snooze tally across WebView reloads and sends the count
+  // with each occurrence. A scheduled or test ring starts with zero there.
   $("#ringcard").classList.remove("silent");
 
   const overlay = $("#ringing");
@@ -2938,7 +2944,7 @@ function giveUp() {
 /** Should this give-up come back later instead of being the end of it? */
 function autoSnoozeDue() {
   if (!ringing) return false;
-  if ((autoSnoozed.get(ringing.alarmId) || 0) >= (ringing.autoSnoozes || 0)) return false;
+  if ((ringing.autoSnoozed || 0) >= (ringing.autoSnoozes || 0)) return false;
   // A test ring must not schedule a real one: nobody expects the alarm they
   // auditioned at teatime to go off again ten minutes later.
   return ringing.trigger !== "test";
@@ -2997,14 +3003,15 @@ function beginRingAction(ring, resumePrevious, manualIntent) {
   }
   const pending = pendingRingActions.get(ring);
   if (pending) {
-    // A manual press still means stop when the automatic dismissal or snooze
-    // has already reached Rust. Keep one request, but cancel its audio resume.
+    // A manual press cancels listening restoration. After the automatic request
+    // returns, Rust also needs that choice to release its hold or snooze budget.
     if (!resumePrevious) {
       pending.resumePrevious = false;
+      if (pending.automatic && !pending.overrideStarted) pending.manualIntent = manualIntent;
     }
     return null;
   }
-  const action = { resumePrevious, automatic: resumePrevious };
+  const action = { resumePrevious, automatic: resumePrevious, manualIntent: null, overrideStarted: false };
   pendingRingActions.set(ring, action);
   return action;
 }
@@ -3039,29 +3046,58 @@ function recoverFailedRingAction(ring) {
   }
 }
 
-async function dismissRing({ resumePrevious = false } = {}) {
-  if (IS_ANDROID) return androidRingAction("dismiss_alarm");
-  const ring = ringing;
-  if (!ring) return;
-  const action = beginRingAction(ring, resumePrevious, "dismiss");
-  if (!action) return;
+async function invokeRingAction(ring, intent, automatic) {
+  const args = { alarmId: ring.alarmId, automatic };
+  if (ring.occurrenceId != null) args.occurrenceId = String(ring.occurrenceId);
+  if (intent === "snooze") {
+    await invoke("snooze_alarm", { ...args, minutes: ring.snoozeMins });
+  } else if (ring.alarmId) {
+    if (ring.trigger === "test") await invoke("dismiss_test_alarm", { alarmId: ring.alarmId });
+    else await invoke("dismiss_alarm", args);
+  }
+}
+
+async function completeRingAction(ring, action, intent, why) {
+  let attempted = intent;
   try {
-    if (ring.alarmId) {
-      if (ring.trigger === "test") await invoke("dismiss_test_alarm", { alarmId: ring.alarmId });
-      else await invoke("dismiss_alarm", { alarmId: ring.alarmId });
+    await invokeRingAction(ring, intent, action.automatic);
+    // A person can answer while an automatic IPC request is in flight. Confirm
+    // that choice for the same occurrence, even when both actions have the same
+    // name, before closing the card.
+    if (ringing === ring && action.automatic && action.manualIntent) {
+      // Once the manual command reaches Rust it is final for this occurrence.
+      // Later clicks cannot issue another competing override.
+      action.overrideStarted = true;
+      attempted = action.manualIntent;
+      await invokeRingAction(ring, attempted, false);
+      intent = attempted;
     }
     if (ringing !== ring) return;
     finishRing(action.resumePrevious);
+    if (intent === "snooze") {
+      say((why && action.automatic && !action.manualIntent ? why + " - " : "") +
+        "snoozed for " + ring.snoozeMins + " minutes", "good");
+    }
     refreshNextAlarm();
     refreshPowerStatus();
   } catch (e) {
     if (ringing !== ring) return;
     recoverFailedRingAction(ring);
-    $("#ring-note").textContent = "Could not dismiss the alarm: " + e + ". Try again.";
-    say("could not dismiss the alarm: " + e, "bad");
+    const verb = attempted === "snooze" ? "snooze" : "dismiss";
+    $("#ring-note").textContent = "Could not " + verb + " the alarm: " + e +
+      (verb === "snooze" ? ". Try again or dismiss it." : ". Try again.");
+    say("could not " + verb + " the alarm: " + e, "bad");
   } finally {
     pendingRingActions.delete(ring);
   }
+}
+
+async function dismissRing({ resumePrevious = false } = {}) {
+  if (IS_ANDROID) return androidRingAction("dismiss_alarm");
+  const ring = ringing;
+  if (!ring) return;
+  const action = beginRingAction(ring, resumePrevious, "dismiss");
+  if (action) await completeRingAction(ring, action, "dismiss");
 }
 
 /** `why` is set when the alarm snoozed itself rather than being asked to. */
@@ -3070,26 +3106,7 @@ async function snoozeRing(why, { resumePrevious = false } = {}) {
   const ring = ringing;
   if (!ring || ring.trigger === "test") return;
   const action = beginRingAction(ring, resumePrevious, "snooze");
-  if (!action) return;
-  const { alarmId, snoozeMins } = ring;
-  try {
-    await invoke("snooze_alarm", { alarmId, minutes: snoozeMins });
-    // A later alarm can arrive while IPC is pending. Its card and audio belong
-    // to that occurrence, even if both occurrences have the same alarm id.
-    if (ringing !== ring) return;
-    if (action.automatic) autoSnoozed.set(alarmId, (autoSnoozed.get(alarmId) || 0) + 1);
-    finishRing(action.resumePrevious);
-    say((why ? why + " - " : "") + "snoozed for " + snoozeMins + " minutes", "good");
-    refreshNextAlarm();
-    refreshPowerStatus();
-  } catch (e) {
-    if (ringing !== ring) return;
-    recoverFailedRingAction(ring);
-    $("#ring-note").textContent = "Could not snooze the alarm: " + e + ". Try again or dismiss it.";
-    say("could not snooze the alarm: " + e, "bad");
-  } finally {
-    pendingRingActions.delete(ring);
-  }
+  if (action) await completeRingAction(ring, action, "snooze", why);
 }
 
 let nextAlarmRequest = 0;
@@ -3846,6 +3863,7 @@ function readAlarmEditor() {
 
 let sleepSnapshot = { revision: -1, timer: null, outcome: null, error: null };
 let androidSleepSampleAt = 0;
+let desktopSleepSampleAt = 0;
 let sleepFading = false;
 let powerFocusBefore = null;
 let sleepRequest = 0;
@@ -3859,6 +3877,15 @@ const sleepActionLabel = (action) => ({ stop: "Stop audio", sleep: "Sleep PC", s
  * not just starting to think about it.
  */
 const SLEEP_FADE_SECS = 20;
+
+function sleepTimeLeft(timer, pending = false) {
+  const remaining = pending ? timer.executeRemainingMs : timer.remainingMs;
+  if (Number.isFinite(remaining)) {
+    const sampledAt = IS_ANDROID ? androidSleepSampleAt : desktopSleepSampleAt;
+    return remaining - (performance.now() - sampledAt);
+  }
+  return (pending ? timer.executeAtMs : timer.endsAtMs) - Date.now();
+}
 
 /** Put the volume back, if the timer had already started taking it away. */
 function endSleepFade() {
@@ -3899,7 +3926,7 @@ function renderSleepTimer() {
     return;
   }
   if (pending) {
-    const left = Math.max(0, Math.ceil((timer.executeAtMs - Date.now()) / 1000));
+    const left = Math.max(0, Math.ceil(sleepTimeLeft(timer, true) / 1000));
     $("#sleep-left").textContent = sleepActionLabel(timer.action) + " · " + left + "s";
     $("#power-title").textContent = timer.action === "shutdown" ? "This PC will shut down" : "This PC will sleep";
     $("#power-seconds").textContent = left + "s";
@@ -3915,16 +3942,14 @@ function renderSleepTimer() {
     return;
   }
   closePowerCountdown();
-  const left = IS_ANDROID
-    ? timer.remainingMs - (performance.now() - androidSleepSampleAt)
-    : timer.endsAtMs - Date.now();
+  const left = sleepTimeLeft(timer);
   $("#sleep-left").textContent = left > 0 ? fmtDuration(left / 1000) + " left" : "Finishing…";
   // Fade out over whatever is actually left rather than a fixed twenty
   // seconds, so a tick that arrives late - the window was hidden, and
   // WebView2 throttles timers there - still lands on silence at zero.
   if (!IS_ANDROID && !sleepFading && !ringing && player.playing && left > 0 && left <= SLEEP_FADE_SECS * 1000) {
     sleepFading = true;
-    fadeOut(Math.max(1, left / 1000));
+    fadeOut(Math.max(1, left / 1000), () => performance.now());
   }
 }
 
@@ -3937,14 +3962,22 @@ function applySleepSnapshot(snapshot) {
       sleepSnapshot = snapshot;
       androidSleepSampleAt = performance.now();
       renderSleepTimer();
+    } else if (Number.isFinite(snapshot.sampledAtMs) &&
+        (!Number.isFinite(sleepSnapshot.sampledAtMs) || snapshot.sampledAtMs > sleepSnapshot.sampledAtMs)) {
+      sleepSnapshot = snapshot;
+      desktopSleepSampleAt = performance.now();
+      renderSleepTimer();
     }
     return;
   }
   const previous = sleepSnapshot.timer;
   sleepSnapshot = snapshot;
   if (IS_ANDROID) androidSleepSampleAt = performance.now();
+  else desktopSleepSampleAt = performance.now();
   const timer = snapshot.timer;
-  if (!timer || previous?.endsAtMs !== timer.endsAtMs || previous?.action !== timer.action) endSleepFade();
+  // A new revision changes the timer. A fresh sample at the same revision can
+  // change its wall-clock projection without changing the actual deadline.
+  endSleepFade();
   if (!IS_ANDROID && !ringing && ((timer?.executeAtMs != null && previous?.executeAtMs == null) || snapshot.outcome === "finished")) {
     sleepFading = false;
     stopPlayback();

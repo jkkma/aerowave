@@ -31,7 +31,7 @@ async function ring(h, overrides = {}) {
   h.context.alarmPayload = {
     alarmId: "wake", trigger: "scheduled", kind: "folder", path: "/alarm/wake.mp3",
     folder: "/alarm", title: "Alarm song", snoozeMins: 10, hour: 7, minute: 0,
-    volume: 0.9, fadeSecs: 0, autoStopMins: 1, autoSnoozes: 0, ...overrides,
+    volume: 0.9, fadeSecs: 0, autoStopMins: 1, autoSnoozes: 0, autoSnoozed: 0, ...overrides,
   };
   h.evaluate("onAlarmFire(alarmPayload)");
   await flush();
@@ -169,12 +169,27 @@ test("auto-snooze resumes listening and the returning alarm restores it after it
   await expireAlarm(h);
   assert.equal(h.evaluate("player.source?.stationId"), "listening");
   assert.equal(h.calls.filter(({ command }) => command === "snooze_alarm").length, 1);
-  await ring(h, { trigger: "snooze", autoSnoozes: 1 });
+  await ring(h, { trigger: "snooze", autoSnoozes: 1, autoSnoozed: 1 });
   await expireAlarm(h);
   assert.equal(h.evaluate("player.source?.stationId"), "listening");
   assert.equal(h.audios[0].paused, false);
   assert.equal(h.calls.filter(({ command }) => command === "snooze_alarm").length, 1);
   assert.equal(h.calls.filter(({ command }) => command === "dismiss_alarm").length, 1);
+});
+
+test("a reloaded WebView respects the native auto-snooze tally", async () => {
+  const firstPage = harness();
+  await ring(firstPage, { occurrenceId: "11", autoSnoozes: 1 });
+  await expireAlarm(firstPage);
+  assert.equal(firstPage.calls.filter(({ command }) => command === "snooze_alarm").length, 1);
+
+  const reloadedPage = harness();
+  await ring(reloadedPage, {
+    occurrenceId: "12", trigger: "snooze", autoSnoozes: 1, autoSnoozed: 1,
+  });
+  await expireAlarm(reloadedPage);
+  assert.equal(reloadedPage.calls.filter(({ command }) => command === "snooze_alarm").length, 0);
+  assert.equal(reloadedPage.calls.filter(({ command }) => command === "dismiss_alarm").length, 1);
 });
 
 test("overlapping alarms restore the original listening source when the last one gives up", async () => {
@@ -194,7 +209,7 @@ test("duplicate delivery of one occurrence keeps its fade and budget, while a ne
   h.evaluate("Date.now = () => now");
   await ring(h, { occurrenceId: "1", autoSnoozes: 1 });
   const first = h.evaluate("ringing");
-  h.evaluate("autoSnoozed.set('wake', 1)");
+  h.evaluate("ringing.autoSnoozed = 1");
   h.context.now = 61000;
   await h.fireTimer(h.evaluate("autoStopTimer"));
   const end = h.evaluate("autoStopTimer");
@@ -208,7 +223,7 @@ test("duplicate delivery of one occurrence keeps its fade and budget, while a ne
   assert.equal(h.evaluate("autoStopTimer"), end);
   assert.equal(h.evaluate("player.fadeTimer"), fade);
   assert.equal(h.audios[0].volume, fadedVolume);
-  assert.equal(h.evaluate("autoSnoozed.get('wake')"), 1);
+  assert.equal(h.evaluate("ringing.autoSnoozed"), 1);
 
   await ring(h, { occurrenceId: "2", title: "New occurrence", path: "/alarm/new.mp3" });
   assert.notEqual(h.evaluate("ringing"), first);
@@ -360,7 +375,7 @@ for (const action of ["dismissRing", "snoozeRing"]) {
     assert.equal(h.timers.has(end), false);
     assert.equal(h.timers.get(h.evaluate("ringWatchdog"))?.interval, true);
     assert.equal(attempts, 1);
-    assert.equal(h.evaluate("autoSnoozed.get('wake') || 0"), 0);
+    assert.equal(h.evaluate("ringing.autoSnoozed"), 0);
     h.context.now = 94000;
     await h.fireTimer(h.evaluate("autoStopTimer"));
     h.context.now = 100000;
@@ -396,7 +411,7 @@ for (const autoSnoozes of [0, 1]) {
     assert.equal(h.evaluate("ringing?.alarmId"), "wake");
     assert.equal(h.evaluate("givingUp"), false);
     assert.equal(h.audios[0].volume, 0.9);
-    assert.equal(h.evaluate("autoSnoozed.get('wake') || 0"), 0);
+    assert.equal(h.evaluate("ringing.autoSnoozed"), 0);
     assert.equal(h.timers.get(h.evaluate("autoStopTimer"))?.ms, 30000);
     assert.equal(h.timers.get(h.evaluate("ringWatchdog"))?.interval, true);
 
@@ -409,16 +424,16 @@ for (const autoSnoozes of [0, 1]) {
     assert.equal(attempts, 2);
     assert.equal(h.evaluate("ringing"), null);
     assert.equal(h.evaluate("player.source?.stationId"), "listening");
-    assert.equal(h.evaluate("autoSnoozed.get('wake') || 0"), autoSnoozes);
+    assert.equal(h.calls.filter(({ command: cmd }) => cmd === command).at(-1).args.automatic, true);
   });
 
   for (const manualAction of ["dismissRing", "snoozeRing"]) {
-    test(`manual ${manualAction === "dismissRing" ? "dismissal" : "snooze"} cancels restoration while automatic ${autoSnoozes ? "snooze" : "dismissal"} is pending`, async () => {
+    test(`manual ${manualAction === "dismissRing" ? "dismissal" : "snooze"} wins while automatic ${autoSnoozes ? "snooze" : "dismissal"} is pending`, async () => {
       const request = deferred();
       const h = harness({ invoke: (cmd) => cmd === command ? request.promise : undefined });
       const backendActions = () => h.calls.filter(({ command: cmd }) => cmd === "dismiss_alarm" || cmd === "snooze_alarm");
       await playRadio(h);
-      await ring(h, { autoSnoozes });
+      await ring(h, { occurrenceId: "41", autoSnoozes });
       await expireAlarm(h);
       assert.equal(h.evaluate("ringing?.alarmId"), "wake");
       assert.equal(backendActions().length, 1);
@@ -431,9 +446,49 @@ for (const autoSnoozes of [0, 1]) {
       assert.equal(h.evaluate("player.source"), null);
       assert.equal(h.audios[0].paused, true);
       assert.equal(h.audios[0].src, "");
-      assert.equal(backendActions().length, 1);
+      const expected = manualAction === action ? command : (autoSnoozes ? "dismiss_alarm" : "snooze_alarm");
+      assert.equal(backendActions().length, 2);
+      assert.equal(backendActions().at(-1).command, expected);
+      assert.equal(backendActions()[0].args.automatic, true);
+      assert.equal(backendActions().at(-1).args.automatic, false);
+      assert.ok(backendActions().every(({ args }) => args.occurrenceId === "41"));
     });
   }
+
+  test(`an override of automatic ${autoSnoozes ? "snooze" : "dismissal"} cannot act on a newer occurrence`, async () => {
+    const request = deferred();
+    const h = harness({ invoke: (cmd) => cmd === command ? request.promise : undefined });
+    await ring(h, { occurrenceId: "51", autoSnoozes });
+    await expireAlarm(h);
+    await h.evaluate(`${autoSnoozes ? "dismissRing" : "snoozeRing"}()`);
+    await ring(h, { occurrenceId: "52", title: "New ring", path: "/alarm/new.mp3" });
+    request.resolve(null);
+    await flush();
+    assert.equal(h.evaluate("ringing?.occurrenceId"), "52");
+    assert.equal(h.calls.filter(({ command: cmd }) => cmd === "dismiss_alarm" || cmd === "snooze_alarm").length, 1);
+  });
+
+  test(`a failed manual override of automatic ${autoSnoozes ? "snooze" : "dismissal"} restores sound and retries that manual choice`, async () => {
+    const original = deferred();
+    const overrideCommand = autoSnoozes ? "dismiss_alarm" : "snooze_alarm";
+    let overrideAttempts = 0;
+    const h = harness({ invoke: (cmd) => {
+      if (cmd === command) return original.promise;
+      if (cmd === overrideCommand && ++overrideAttempts === 1) return Promise.reject(new Error("temporarily unavailable"));
+    } });
+    await ring(h, { occurrenceId: "61", autoSnoozes });
+    await expireAlarm(h);
+    await h.evaluate(`${autoSnoozes ? "dismissRing" : "snoozeRing"}()`);
+    original.resolve(null);
+    await flush();
+    assert.equal(h.evaluate("ringing?.occurrenceId"), "61");
+    assert.equal(h.audios[0].volume, 0.9);
+    assert.equal(h.timers.get(h.evaluate("autoStopTimer"))?.ms, 30000);
+    await expireAlarm(h);
+    assert.equal(overrideAttempts, 2);
+    assert.equal(h.evaluate("ringing"), null);
+    assert.equal(h.calls.filter(({ command: cmd }) => cmd === overrideCommand).length, 2);
+  });
 
   test(`a manual retry after failed automatic ${autoSnoozes ? "snooze" : "dismissal"} deliberately stops playback`, async () => {
     let attempts = 0;
@@ -500,7 +555,7 @@ test("manual dismissal redirects a failed pending auto-snooze to a delayed dismi
   assert.equal(h.evaluate("givingUp"), false);
   assert.equal(h.audios[0].volume, 0.9);
   assert.equal(h.timers.get(h.evaluate("autoStopTimer"))?.ms, 30000);
-  assert.equal(h.evaluate("autoSnoozed.get('wake') || 0"), 0);
+  assert.equal(h.evaluate("ringing.autoSnoozed"), 0);
   h.context.now = 97000;
   await h.fireTimer(h.evaluate("autoStopTimer"));
   h.context.now = 103000;
@@ -511,6 +566,27 @@ test("manual dismissal redirects a failed pending auto-snooze to a delayed dismi
   assert.equal(h.evaluate("player.source"), null);
   assert.equal(h.calls.filter(({ command }) => command === "snooze_alarm").length, 1);
   assert.equal(h.calls.filter(({ command }) => command === "dismiss_alarm").length, 1);
+});
+
+test("a manual override already sent to Rust stays final when another control is pressed", async () => {
+  const automatic = deferred();
+  const manual = deferred();
+  const h = harness({ invoke: (command) => {
+    if (command === "snooze_alarm") return automatic.promise;
+    if (command === "dismiss_alarm") return manual.promise;
+  } });
+  await ring(h, { occurrenceId: "71", autoSnoozes: 1 });
+  await expireAlarm(h);
+  await h.evaluate("dismissRing()");
+  automatic.resolve(null);
+  await flush();
+  assert.equal(h.calls.filter(({ command }) => command === "dismiss_alarm").length, 1);
+  await h.evaluate("snoozeRing()");
+  manual.resolve(null);
+  await flush();
+  assert.equal(h.evaluate("ringing"), null);
+  assert.deepEqual(h.calls.filter(({ command }) => command === "dismiss_alarm" || command === "snooze_alarm")
+    .map(({ command }) => command), ["snooze_alarm", "dismiss_alarm"]);
 });
 
 test("a volume change while automatic snooze is pending survives its failure", async () => {
@@ -578,7 +654,7 @@ test("repeated failed manual dismissal keeps its intent and stops retrying after
   assert.equal(h.evaluate("autoStopTimer"), null);
   assert.equal(h.evaluate("ringing?.alarmId"), "wake");
   assert.equal(h.audios[0].volume, 0.9);
-  assert.equal(h.evaluate("autoSnoozed.get('wake') || 0"), 0);
+  assert.equal(h.evaluate("ringing.autoSnoozed"), 0);
 });
 
 for (const rejects of [false, true]) {

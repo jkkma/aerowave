@@ -61,7 +61,7 @@ tauri-plugin-android-audio = { path = "plugins/tauri-plugin-android-audio" }
 [target.'cfg(windows)'.dependencies]
 # auto-launch tells us one bit; the logon entry has more to say than that.
 winreg = "0.55"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Shutdown", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Shutdown", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 # The power probe intercepts display-off requests in its own message-only window.

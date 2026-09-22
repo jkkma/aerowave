@@ -137,6 +137,26 @@ automatic snooze or dismissal. Check that sound and the watchdog recover, only
 accepted snoozes consume the allowance, retries stop at their limit, and a manual
 action or newer occurrence prevents obsolete work from taking over the alarm.
 Duplicate or older occurrence delivery must not restart playback or its fade.
+The regressions also hold an automatic completion open while a manual Dismiss
+or Snooze arrives. Its final native action must match the manual choice, including
+when it differs from the automatic one. Reload between snooze rounds and check
+that the native used allowance survives. A newer occurrence must reject an older
+occurrence's completion request.
+
+Sleep durations and the power countdown use elapsed-clock deadlines; core and
+frontend tests simulate wall-clock corrections without changing the PC's clock.
+Check that replacing a track during the final fade preserves its reduced volume
+and completes the fade by the original deadline. Persistence tests inject failed
+alarm and wake-setting saves and verify that live settings and scheduler effects
+are unchanged, including during the next successful save.
+
+A disposable native WebView2 check on 2026-09-22 verified decoded local audio,
+timer restoration after a page reload, manual dismissal overriding an accepted
+automatic snooze, and failed alarm/settings writes preserving the live state.
+The write failure was a temporary directory at the config's staging-file path;
+a later successful save retained the original alarms and wake setting. These
+checks did not suspend or shut down Windows and do not establish speaker
+audibility or Android device behavior.
 
 `cargo run --manifest-path src-tauri/Cargo.toml --example sourcecheck --locked`
 exercises the production folder workers with a stalled preferred-folder fixture

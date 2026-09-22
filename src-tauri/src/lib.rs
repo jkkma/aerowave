@@ -129,15 +129,15 @@ fn save_alarms(app: AppHandle, state: State<AppState>, alarms: Vec<Alarm>) -> Re
     require_desktop_feature()?;
     let _power_update = state.power_updates.lock().unwrap();
     scheduler::ensure_power_idle(&app)?;
-    state.store.update(|d| {
-        let previous: Vec<_> = d.alarms.iter().map(|a| (a.id.as_str(), a.enabled)).collect();
-        let current: Vec<_> = alarms.iter().map(|a| (a.id.as_str(), a.enabled)).collect();
-        let cancelled = aerowave_core::schedule::cancelled_alarms(&previous, &current);
+    state.store.update_with(|candidate| candidate.alarms = alarms, |current, candidate| {
+        let previous: Vec<_> = current.alarms.iter().map(|a| (a.id.as_str(), a.enabled)).collect();
+        let next: Vec<_> = candidate.alarms.iter().map(|a| (a.id.as_str(), a.enabled)).collect();
+        let cancelled = aerowave_core::schedule::cancelled_alarms(&previous, &next);
         let mut sched = state.sched.lock().unwrap();
+        *current = candidate;
         for id in cancelled {
             sched.cancel_pending(&id);
         }
-        d.alarms = alarms;
     })?;
     scheduler::refresh(&app);
     let _ = app.emit("alarms-updated", ());
@@ -163,15 +163,13 @@ fn save_settings(
         settings.minimize_to_tray = false;
     }
     let want_autostart = settings.start_with_windows;
-    state.store.update(|d| {
+    state.store.update_with(|candidate| candidate.settings = settings, |current, candidate| {
         // Record an explicit OFF even if another save enables wake again
         // before the scheduler next observes the settings.
-        state
-            .sched
-            .lock()
-            .unwrap()
-            .set_wake_enabled(settings.wake_for_alarms);
-        d.settings = settings;
+        let mut sched = state.sched.lock().unwrap();
+        let wake_enabled = candidate.settings.wake_for_alarms;
+        *current = candidate;
+        sched.set_wake_enabled(wake_enabled);
     })?;
     #[cfg(desktop)]
     scheduler::refresh(&app);
@@ -688,8 +686,8 @@ fn cancel_sleep_timer(app: AppHandle) -> Result<SleepSnapshot, String> {
 }
 
 #[tauri::command]
-fn get_sleep_timer(state: State<AppState>) -> SleepSnapshot {
-    state.sched.lock().unwrap().sleep.clone()
+fn get_sleep_timer(app: AppHandle) -> SleepSnapshot {
+    scheduler::sleep_snapshot(&app)
 }
 
 #[tauri::command]
@@ -716,17 +714,19 @@ fn dismiss_test_alarm(app: AppHandle, alarm_id: String) {
 }
 
 #[tauri::command]
-fn snooze_alarm(app: AppHandle, alarm_id: String, minutes: u32) -> Result<i64, String> {
+fn snooze_alarm(app: AppHandle, alarm_id: String, occurrence_id: String, minutes: u32, automatic: Option<bool>) -> Result<i64, String> {
     require_desktop_feature()?;
     let state = app.state::<AppState>();
     let _power_update = state.power_updates.lock().unwrap();
     scheduler::ensure_power_idle(&app)?;
-    scheduler::snooze(&app, &alarm_id, minutes)
+    let occurrence = occurrence_id.parse().map_err(|_| "Invalid alarm occurrence")?;
+    scheduler::snooze(&app, &alarm_id, occurrence, minutes, automatic.unwrap_or(false))
 }
 
 #[tauri::command]
-fn dismiss_alarm(app: AppHandle, alarm_id: String) {
-    scheduler::dismiss(&app, &alarm_id);
+fn dismiss_alarm(app: AppHandle, alarm_id: String, occurrence_id: String, automatic: Option<bool>) -> Result<(), String> {
+    let occurrence = occurrence_id.parse().map_err(|_| "Invalid alarm occurrence")?;
+    scheduler::dismiss(&app, &alarm_id, occurrence, automatic.unwrap_or(false))
 }
 
 #[tauri::command]
