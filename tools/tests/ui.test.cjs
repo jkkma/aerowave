@@ -185,3 +185,220 @@ test("a debounced volume save retains the latest explicit startup choice", async
   await h.fireTimer(h.evaluate("settingsSaveTimer"));
   assert.equal(h.calls.filter(c => c.command === "save_settings")[1].args.explicitAutostart, null);
 });
+
+test("settings saves serialize snapshots and retain the explicit startup intent", async () => {
+  const first = deferred();
+  let writes = 0;
+  const h = createHarness({ invoke: command => command === "save_settings" && ++writes === 1
+    ? first.promise : undefined });
+  h.evaluate("state.settings = { volume: 0.2 }; saveSettings(true)");
+  await h.fireTimer(h.evaluate("settingsSaveTimer"));
+  await flush();
+  h.evaluate("state.settings.volume = 0.4; saveSettings()");
+  const draining = h.evaluate("flushSettings()");
+  await flush();
+  assert.equal(h.calls.filter(c => c.command === "save_settings").length, 1);
+  first.resolve(null);
+  assert.equal(await draining, true);
+  const saves = h.calls.filter(c => c.command === "save_settings");
+  assert.equal(saves.length, 2);
+  assert.equal(saves[0].args.settings.volume, 0.2);
+  assert.equal(saves[0].args.explicitAutostart, true);
+  assert.equal(saves[1].args.settings.volume, 0.4);
+  assert.equal(saves[1].args.explicitAutostart, null);
+  assert.equal(saves[1].args.settings.startWithWindows, true);
+});
+
+test("window action acknowledges before flushing a pending settings save", async () => {
+  const saving = deferred();
+  const h = createHarness({ invoke: command => {
+    if (command === "acknowledge_window_action") return true;
+    if (command === "save_settings") return saving.promise;
+  } });
+  h.evaluate("state.settings.volume = 0.3; saveSettings()");
+  const pending = h.evaluate("handleWindowAction({requestId: '7', action: 'quit'})");
+  await flush();
+  assert.equal(h.document.body.inert, true);
+  assert.equal(h.calls[0].command, "acknowledge_window_action");
+  assert.equal(h.calls.filter(c => c.command === "save_settings").length, 1);
+  assert.equal(h.calls.some(c => c.command === "complete_window_action"), false);
+  assert.equal(h.evaluate("settingsSaveTimer"), null);
+  saving.resolve(null);
+  await pending;
+  assert.equal(h.document.body.inert, false);
+  const complete = h.calls.find(c => c.command === "complete_window_action");
+  assert.equal(complete.args.requestId, "7");
+  assert.equal(complete.args.saved, true);
+});
+
+test("a failed settings flush cancels the close request and reports the error", async () => {
+  const h = createHarness({ invoke: command => {
+    if (command === "acknowledge_window_action") return true;
+    if (command === "save_settings") throw new Error("disk unavailable");
+    if (command === "get_state") return { stations: [], alarms: [], settings: { volume: 0.7 } };
+  } });
+  h.evaluate("state.settings.volume = 0.3; saveSettings()");
+  await h.evaluate("handleWindowAction({requestId: '8', action: 'close'})");
+  await flush();
+  assert.equal(h.document.body.inert, false);
+  assert.match(h.el("#status-msg").textContent, /disk unavailable/);
+  assert.equal(h.calls.find(c => c.command === "complete_window_action").args.saved, false);
+  assert.equal(h.evaluate("state.settings.volume"), 0.7);
+  // The failed attempt has completed and the readback is visible. A later
+  // close with no new edit must not be held open by that old result forever.
+  await h.evaluate("handleWindowAction({requestId: '9', action: 'close'})");
+  assert.equal(h.calls.filter(c => c.command === "complete_window_action")[1].args.saved, true);
+});
+
+for (const rejected of [false, true]) {
+  test(`a ${rejected ? "rejected" : "stale"} native acknowledgement restores prior inert state`, async () => {
+    const h = createHarness({ invoke: command => {
+      if (command === "acknowledge_window_action") {
+        if (rejected) throw new Error("ack failed");
+        return false;
+      }
+    } });
+    h.document.body.inert = rejected;
+    await h.evaluate("handleWindowAction({requestId: '13', action: 'close'})");
+    assert.equal(h.document.body.inert, rejected);
+    assert.equal(h.evaluate("activeWindowActions.size"), 0);
+    assert.equal(h.calls.some(c => c.command === "complete_window_action"), false);
+  });
+}
+
+test("overlapping window actions keep controls inert until both complete", async () => {
+  const saving = deferred();
+  const secondComplete = deferred();
+  const h = createHarness({ invoke: (command, args) => {
+    if (command === "acknowledge_window_action") return true;
+    if (command === "save_settings") return saving.promise;
+    if (command === "complete_window_action" && args.requestId === "15") {
+      return secondComplete.promise;
+    }
+  } });
+  h.el("#app-content").inert = true;
+  h.evaluate("state.settings.volume = 0.3; saveSettings()");
+  const first = h.evaluate("handleWindowAction({requestId: '14', action: 'close'})");
+  const second = h.evaluate("handleWindowAction({requestId: '15', action: 'quit'})");
+  await flush();
+  assert.equal(h.document.body.inert, true);
+  assert.equal(h.evaluate("activeWindowActions.size"), 2);
+  saving.resolve(null);
+  await first;
+  assert.equal(h.document.body.inert, true);
+  assert.equal(h.evaluate("activeWindowActions.size"), 1);
+  secondComplete.resolve(null);
+  await second;
+  assert.equal(h.document.body.inert, false);
+  assert.equal(h.el("#app-content").inert, true);
+  assert.equal(h.evaluate("activeWindowActions.size"), 0);
+});
+
+test("keyboard and volume controls cannot change playback or settings during close", async () => {
+  const saving = deferred();
+  const mediaHandlers = {};
+  const h = createHarness({
+    navigator: { mediaSession: { setActionHandler: (name, handler) => { mediaHandlers[name] = handler; } } },
+    invoke: command => {
+      if (command === "acknowledge_window_action") return true;
+      if (command === "save_settings") return saving.promise;
+    },
+  });
+  h.evaluate("wire()");
+  ringFixture(h);
+  h.evaluate("state.settings.volume = 0.3; saveSettings()");
+  const pending = h.evaluate("handleWindowAction({requestId: '16', action: 'quit'})");
+  await flush();
+  h.el("#volume").value = "10";
+  await h.el("#volume").dispatch("input");
+  await h.document.dispatch("keydown", { code: "Space", key: " " });
+  mediaHandlers.stop();
+  assert.equal(h.evaluate("state.settings.volume"), 0.3);
+  assert.equal(h.calls.some(c => c.command === "dismiss_alarm"), false);
+  assert.equal(h.evaluate("player.source?.title"), "Wake up");
+  saving.resolve(null);
+  await pending;
+  assert.equal(h.document.body.inert, false);
+});
+
+test("a failed older save cannot reload over a newer settings edit", async () => {
+  const first = deferred();
+  let writes = 0;
+  const h = createHarness({ invoke: command => command === "save_settings" && ++writes === 1
+    ? first.promise : undefined });
+  h.evaluate("state.settings.volume = 0.2; saveSettings(true)");
+  await h.fireTimer(h.evaluate("settingsSaveTimer"));
+  await flush();
+  h.evaluate("state.settings.volume = 0.4; saveSettings()");
+  const draining = h.evaluate("flushSettings()");
+  first.reject(new Error("older save failed"));
+  assert.equal(await draining, false);
+  assert.equal(h.evaluate("state.settings.volume"), 0.4);
+  const saves = h.calls.filter(c => c.command === "save_settings");
+  assert.equal(saves.length, 2);
+  assert.equal(saves[0].args.explicitAutostart, true);
+  assert.equal(saves[1].args.explicitAutostart, null);
+  assert.equal(saves[1].args.settings.startWithWindows, true);
+  assert.equal(h.calls.some(c => c.command === "get_state"), false);
+});
+
+test("a failed close waits for settings readback before it is cancelled", async () => {
+  const readback = deferred();
+  const h = createHarness({ invoke: command => {
+    if (command === "acknowledge_window_action") return true;
+    if (command === "save_settings") throw new Error("disk unavailable");
+    if (command === "get_state") return readback.promise;
+  } });
+  h.evaluate("state.settings.volume = 0.3; saveSettings()");
+  const pending = h.evaluate("handleWindowAction({requestId: '12', action: 'quit'})");
+  await flush();
+  assert.equal(h.calls.some(c => c.command === "complete_window_action"), false);
+  readback.resolve({ stations: [], alarms: [], settings: { volume: 0.7 } });
+  await pending;
+  assert.equal(h.evaluate("state.settings.volume"), 0.7);
+  assert.equal(h.calls.find(c => c.command === "complete_window_action").args.saved, false);
+});
+
+test("a second edit during a slow flush is saved before the window action completes", async () => {
+  const first = deferred();
+  let writes = 0;
+  const h = createHarness({ invoke: command => {
+    if (command === "acknowledge_window_action") return true;
+    if (command === "save_settings" && ++writes === 1) return first.promise;
+  } });
+  h.evaluate("state.settings.volume = 0.2; saveSettings()");
+  const pending = h.evaluate("handleWindowAction({requestId: '10', action: 'quit'})");
+  await flush();
+  h.evaluate("state.settings.volume = 0.5; saveSettings()");
+  first.resolve(null);
+  await pending;
+  const saves = h.calls.filter(c => c.command === "save_settings");
+  assert.equal(saves.length, 2);
+  assert.equal(saves[1].args.settings.volume, 0.5);
+  assert.equal(h.calls.find(c => c.command === "complete_window_action").args.saved, true);
+});
+
+test("close and quit controls use the native window-action gate", async () => {
+  const h = createHarness();
+  h.evaluate("wire()");
+  await h.el("#btn-close").dispatch("click");
+  await h.el("#btn-quit").dispatch("click");
+  await flush();
+  assert.deepEqual(h.calls.filter(c => c.command === "request_window_action")
+    .map(c => c.args.action), ["close", "quit"]);
+});
+
+test("boot listens for native window actions before loading settings", async () => {
+  let h;
+  h = createHarness({ invoke: command => {
+    if (command === "get_state") {
+      assert.equal(h.listeners.get("window-action-requested")?.length, 1);
+      return { stations: [], alarms: [], settings: {} };
+    }
+    if (command === "acknowledge_window_action") return true;
+  } });
+  await h.evaluate("boot()");
+  await h.emit("window-action-requested", { requestId: "11", action: "close" });
+  assert.equal(h.calls.some(c => c.command === "save_settings"), false);
+  assert.equal(h.calls.find(c => c.command === "complete_window_action").args.saved, true);
+});

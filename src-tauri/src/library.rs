@@ -55,20 +55,6 @@ pub struct FolderInfo {
     pub sample: Vec<String>,
 }
 
-pub fn info(dir: &Path) -> FolderInfo {
-    let files = scan(dir);
-    let sample = files
-        .iter()
-        .take(6)
-        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-        .collect();
-    FolderInfo {
-        path: dir.to_string_lossy().to_string(),
-        count: files.len(),
-        sample,
-    }
-}
-
 /// Read embedded artwork without making a shuffle failure a playback failure.
 /// Parsing and its limits live in core; this module only owns filesystem I/O.
 pub fn track_artwork(path: &Path) -> Option<String> {
@@ -82,7 +68,8 @@ pub fn track_artwork(path: &Path) -> Option<String> {
 pub struct RecentTracks(Mutex<VecDeque<PathBuf>>);
 
 impl RecentTracks {
-    fn remember(&self, p: &Path, keep: usize) {
+    pub fn remember(&self, p: &Path, total: usize) {
+        let keep = (total / 3).clamp(1, 100);
         let mut q = self.0.lock().unwrap();
         q.push_back(p.to_path_buf());
         while q.len() > keep {
@@ -95,25 +82,18 @@ impl RecentTracks {
     }
 }
 
-/// Pick a random audio file from `dir`, avoiding recent picks where possible.
-/// Returns the track and how many were there to choose from - callers want
-/// both, and scanning once for the pick and again for the count doubles the
-/// cost of every track change.
-pub fn pick_random(dir: &Path, recent: &RecentTracks) -> Option<(PathBuf, usize)> {
-    let files = scan(dir);
+/// Selection is separate from remembering so a late scan result cannot alter
+/// the history of an alarm that was dismissed or replaced while it ran.
+pub fn choose_random(files: &[PathBuf], recent: &RecentTracks) -> Option<PathBuf> {
     if files.is_empty() {
         return None;
     }
-    let total = files.len();
     // Keep at most a third of the folder in the "recently played" window, so
     // a two-file folder still alternates instead of running out of choices.
-    let keep = (files.len() / 3).clamp(1, 100);
     let fresh: Vec<&PathBuf> = files.iter().filter(|p| !recent.seen(p)).collect();
-    let chosen = if fresh.is_empty() {
+    if fresh.is_empty() {
         files.choose(&mut rand::thread_rng()).cloned()
     } else {
         fresh.choose(&mut rand::thread_rng()).map(|p| (*p).clone())
-    }?;
-    recent.remember(&chosen, keep);
-    Some((chosen, total))
+    }
 }

@@ -18,5 +18,7 @@ pub mod ring;
 pub mod schedule;
 pub mod settings;
 pub mod sleep;
+pub mod source_resolution;
 pub mod stream_tags;
 pub mod track_art;
+pub mod window_action;

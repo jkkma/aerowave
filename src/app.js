@@ -1948,7 +1948,10 @@ function wireMediaKeys() {
   if (IS_ANDROID || !("mediaSession" in navigator)) return;
   const on = (action, handler) => {
     try {
-      navigator.mediaSession.setActionHandler(action, handler);
+      navigator.mediaSession.setActionHandler(action, () => {
+        if (activeWindowActions.size) return;
+        handler();
+      });
     } catch {
       // An action this build does not know is not worth failing the rest over.
     }
@@ -2681,6 +2684,9 @@ let ringWatchdog = null;
 let autoStopTimer = null;
 /** Set from the moment the give-up timeout fires until the ring is over. */
 let givingUp = false;
+let ringActionFailures = 0;
+let ringCompletionIntent = null;
+let latestAlarmOccurrence = null;
 /**
  * Give-ups each alarm's current ring has turned into a snooze, by alarm id.
  * One tally per alarm rather than one for the app: a second alarm ringing in
@@ -2690,6 +2696,8 @@ let givingUp = false;
 const autoSnoozed = new Map();
 /** How long an alarm takes to recede once it has given up. */
 const GIVE_UP_FADE_SECS = 6;
+const RING_ACTION_RETRY_MS = 30000;
+const MAX_RING_ACTION_FAILURES = 3;
 
 /**
  * The fallback for everything: a random track from the backup folder. Used
@@ -2789,6 +2797,16 @@ function armRingWatchdog(quietMs, note, reason) {
 }
 
 function onAlarmFire(payload) {
+  if (payload.occurrenceId != null) {
+    // Rust sends increasing u64 IDs as strings. A pending_alarm reply can
+    // arrive after a newer event, so equality alone cannot reject stale work.
+    const id = String(payload.occurrenceId);
+    if (/^\d+$/.test(id)) {
+      const occurrence = BigInt(id);
+      if (latestAlarmOccurrence !== null && occurrence <= latestAlarmOccurrence) return;
+      latestAlarmOccurrence = occurrence;
+    }
+  }
   // A replacement ring still interrupts the same listening session. Capture
   // it only once, before the alarm's source and volume replace the player's.
   if (!ringing) {
@@ -2810,6 +2828,8 @@ function onAlarmFire(payload) {
   clearInterval(ringWatchdog);
   clearTimeout(autoStopTimer);
   givingUp = false;
+  ringActionFailures = 0;
+  ringCompletionIntent = null;
   player.backupAttempts = 0;
   // The budget belongs to the ring: a snooze carries its tally on, and any
   // other way of arriving - scheduled, caught up, tested - starts it over.
@@ -2931,8 +2951,15 @@ function endGiveUp() {
   clearInterval(player.fadeTimer);
   autoStopTimer = player.fadeTimer = null;
   const mins = ringing.autoStopMins;
+  if (ringCompletionIntent === "dismiss") {
+    dismissRing();
+    return;
+  }
+  if (ringCompletionIntent === "snooze") {
+    snoozeRing();
+    return;
+  }
   if (autoSnoozeDue()) {
-    autoSnoozed.set(ringing.alarmId, (autoSnoozed.get(ringing.alarmId) || 0) + 1);
     snoozeRing("gave up after " + mins + " min", { resumePrevious: true });
     return;
   }
@@ -2947,6 +2974,8 @@ function finishRing(resumePrevious) {
   clearTimeout(autoStopTimer);
   ringWatchdog = autoStopTimer = null;
   givingUp = false;
+  ringActionFailures = 0;
+  ringCompletionIntent = null;
   $("#ringing").hidden = true;
   ringing = null;
   renderSleepTimer();
@@ -2961,24 +2990,60 @@ function finishRing(resumePrevious) {
 
 const pendingRingActions = new WeakMap();
 
-function beginRingAction(ring, resumePrevious) {
+function beginRingAction(ring, resumePrevious, manualIntent) {
+  if (!resumePrevious) {
+    interruptedPlayback = null;
+    ringCompletionIntent = manualIntent;
+  }
   const pending = pendingRingActions.get(ring);
   if (pending) {
     // A manual press still means stop when the automatic dismissal or snooze
     // has already reached Rust. Keep one request, but cancel its audio resume.
-    if (!resumePrevious) pending.resumePrevious = false;
+    if (!resumePrevious) {
+      pending.resumePrevious = false;
+    }
     return null;
   }
-  const action = { resumePrevious };
+  const action = { resumePrevious, automatic: resumePrevious };
   pendingRingActions.set(ring, action);
   return action;
+}
+
+function recoverFailedRingAction(ring) {
+  if (!givingUp || ringing !== ring) return;
+  // A manual request can fail during the fade, before endGiveUp has run.
+  // Cancel both old timers so neither can undo the restored sound or take an
+  // automatic action after the person's request failed.
+  clearInterval(player.fadeTimer);
+  clearTimeout(autoStopTimer);
+  player.fadeTimer = autoStopTimer = null;
+  givingUp = false;
+  // The request can fail after the fade has reached zero. Keep the alarm
+  // sounding while Rust is unavailable, and let the watchdog rescue a source
+  // that stopped producing audio during the quiet request.
+  if (player.playing && player.source) {
+    audio.volume = ring.volume;
+    player.lastProgress = Date.now();
+    armRingWatchdog(
+      player.source.kind === "station" ? 12000 : 8000,
+      "That source stopped during the alarm - playing the backup folder.",
+      "alarm source stopped"
+    );
+  }
+  // Retry the requested completion after a quiet interval. A manual press
+  // retains its command in ringCompletionIntent and has already cancelled
+  // listening restoration. Stop after three failures so IPC cannot loop.
+  ringActionFailures++;
+  if (ringActionFailures < MAX_RING_ACTION_FAILURES) {
+    autoStopTimer = setTimeout(giveUp, RING_ACTION_RETRY_MS);
+  }
 }
 
 async function dismissRing({ resumePrevious = false } = {}) {
   if (IS_ANDROID) return androidRingAction("dismiss_alarm");
   const ring = ringing;
   if (!ring) return;
-  const action = beginRingAction(ring, resumePrevious);
+  const action = beginRingAction(ring, resumePrevious, "dismiss");
   if (!action) return;
   try {
     if (ring.alarmId) {
@@ -2991,6 +3056,7 @@ async function dismissRing({ resumePrevious = false } = {}) {
     refreshPowerStatus();
   } catch (e) {
     if (ringing !== ring) return;
+    recoverFailedRingAction(ring);
     $("#ring-note").textContent = "Could not dismiss the alarm: " + e + ". Try again.";
     say("could not dismiss the alarm: " + e, "bad");
   } finally {
@@ -3003,7 +3069,7 @@ async function snoozeRing(why, { resumePrevious = false } = {}) {
   if (IS_ANDROID) return androidRingAction("snooze_alarm");
   const ring = ringing;
   if (!ring || ring.trigger === "test") return;
-  const action = beginRingAction(ring, resumePrevious);
+  const action = beginRingAction(ring, resumePrevious, "snooze");
   if (!action) return;
   const { alarmId, snoozeMins } = ring;
   try {
@@ -3011,12 +3077,14 @@ async function snoozeRing(why, { resumePrevious = false } = {}) {
     // A later alarm can arrive while IPC is pending. Its card and audio belong
     // to that occurrence, even if both occurrences have the same alarm id.
     if (ringing !== ring) return;
+    if (action.automatic) autoSnoozed.set(alarmId, (autoSnoozed.get(alarmId) || 0) + 1);
     finishRing(action.resumePrevious);
     say((why ? why + " - " : "") + "snoozed for " + snoozeMins + " minutes", "good");
     refreshNextAlarm();
     refreshPowerStatus();
   } catch (e) {
     if (ringing !== ring) return;
+    recoverFailedRingAction(ring);
     $("#ring-note").textContent = "Could not snooze the alarm: " + e + ". Try again or dismiss it.";
     say("could not snooze the alarm: " + e, "bad");
   } finally {
@@ -3335,26 +3403,80 @@ const saveAlarms = () => (IS_ANDROID ? syncAndroidAlarms(true) : invoke("save_al
 
 let settingsSaveTimer = null;
 let settingsAutostartIntent = null;
+let settingsDirty = false;
+let settingsRevision = 0;
+let settingsSaveTail = Promise.resolve();
+let pendingSettingsSave = null;
+let settingsSaveFailures = 0;
 function saveSettings(explicitAutostart = null) {
-  if (explicitAutostart !== null) settingsAutostartIntent = explicitAutostart;
+  if (explicitAutostart !== null) {
+    settingsAutostartIntent = explicitAutostart;
+    state.settings.startWithWindows = explicitAutostart;
+  }
+  settingsDirty = true;
+  settingsRevision++;
   clearTimeout(settingsSaveTimer);
   settingsSaveTimer = setTimeout(() => {
-    const explicitAutostart = settingsAutostartIntent;
-    settingsAutostartIntent = null;
-    if (explicitAutostart !== null) state.settings.startWithWindows = explicitAutostart;
-    invoke("save_settings", { settings: state.settings, explicitAutostart }).then(() => {
-      if (IS_ANDROID) return syncAndroidAlarms();
-      refreshPowerStatus();
-    }).catch((e) => {
-      say(String(e), "bad");
-      // start-with-Windows can fail on its own; reflect what actually stuck.
-      loadState().catch((error) => say(String(error), "bad"));
-    });
+    settingsSaveTimer = null;
+    flushSettings();
   }, 250);
 }
 
-async function loadState() {
-  state = await invoke("get_state");
+function queueSettingsSave() {
+  settingsDirty = false;
+  const revision = settingsRevision;
+  const explicitAutostart = settingsAutostartIntent;
+  settingsAutostartIntent = null;
+  const settings = { ...state.settings };
+  const save = async () => {
+    try {
+      await invoke("save_settings", { settings, explicitAutostart });
+    } catch (error) {
+      settingsSaveFailures++;
+      say(String(error), "bad");
+      // A later local edit must not be overwritten by this failed snapshot's
+      // readback. The last failed save still reflects what reached the store.
+      if (settingsRevision === revision) {
+        try {
+          await loadState(revision);
+        } catch (readError) {
+          say(String(readError), "bad");
+        }
+      }
+      return false;
+    }
+    if (IS_ANDROID) syncAndroidAlarms().catch((error) => say(String(error), "bad"));
+    else refreshPowerStatus();
+    return true;
+  };
+  const result = settingsSaveTail.then(save, save);
+  settingsSaveTail = result.then(() => undefined, () => undefined);
+  pendingSettingsSave = result;
+  result.then(() => { if (pendingSettingsSave === result) pendingSettingsSave = null; });
+  return result;
+}
+
+async function flushSettings() {
+  let saved = true;
+  const failuresAtStart = settingsSaveFailures;
+  while (true) {
+    clearTimeout(settingsSaveTimer);
+    settingsSaveTimer = null;
+    const current = settingsDirty ? queueSettingsSave() : pendingSettingsSave;
+    if (!current) return saved && settingsSaveFailures === failuresAtStart;
+    saved = (await current) && saved;
+    // A setting can change while an earlier save is in flight. Keep draining
+    // until closing cannot discard a newer edit still in its debounce window.
+    if (!settingsDirty && !pendingSettingsSave) {
+      return saved && settingsSaveFailures === failuresAtStart;
+    }
+  }
+}
+
+async function loadState(expectedSettingsRevision = null) {
+  const loaded = await invoke("get_state");
+  if (expectedSettingsRevision !== null && expectedSettingsRevision !== settingsRevision) return;
+  state = loaded;
   renderStations();
   refreshBrowseIndicators();
   renderSettings();
@@ -3363,6 +3485,43 @@ async function loadState() {
   refreshNextAlarm();
   refreshFolderLabels();
   if (!IS_ANDROID) refreshPowerStatus();
+}
+
+const activeWindowActions = new Set();
+let windowActionPreviousInert = false;
+
+function requestWindowAction(action) {
+  invoke("request_window_action", { action }).catch((error) => say(String(error), "bad"));
+}
+
+async function handleWindowAction({ requestId }) {
+  if (requestId == null || activeWindowActions.has(requestId)) return;
+  if (!activeWindowActions.size) {
+    windowActionPreviousInert = !!document.body.inert;
+    document.body.inert = true;
+  }
+  activeWindowActions.add(requestId);
+  let acknowledged = false;
+  let saved = false;
+  try {
+    // Acknowledge before waiting for disk or Windows startup integration.
+    // Rust only uses its fallback when the webview never answers at all.
+    acknowledged = await invoke("acknowledge_window_action", { requestId });
+    if (!acknowledged) return;
+    saved = await flushSettings();
+  } catch (error) {
+    say(String(error), "bad");
+  } finally {
+    if (acknowledged) {
+      try {
+        await invoke("complete_window_action", { requestId, saved });
+      } catch (error) {
+        say(String(error), "bad");
+      }
+    }
+    activeWindowActions.delete(requestId);
+    if (!activeWindowActions.size) document.body.inert = windowActionPreviousInert;
+  }
 }
 
 // -------------------------------------------------------- station editor ---
@@ -3905,8 +4064,8 @@ function wire() {
   if (appWindow) {
     $("#btn-min").addEventListener("click", () => appWindow.minimize());
     $("#btn-max").addEventListener("click", () => appWindow.toggleMaximize());
-    $("#btn-close").addEventListener("click", () => appWindow.close());
-    $("#btn-quit").addEventListener("click", () => invoke("quit_app"));
+    $("#btn-close").addEventListener("click", () => requestWindowAction("close"));
+    $("#btn-quit").addEventListener("click", () => requestWindowAction("quit"));
   }
 
   // transport
@@ -3915,6 +4074,7 @@ function wire() {
   $("#btn-next").addEventListener("click", () => step(1));
 
   $("#volume").addEventListener("input", (e) => {
+    if (activeWindowActions.size) return;
     const v = +e.target.value;
     e.target.style.setProperty("--fill", v + "%");
     $("#volval").textContent = v;
@@ -3943,6 +4103,7 @@ function wire() {
   );
   if (!IS_ANDROID) {
     $("#sleep-action").addEventListener("change", () => {
+      if (activeWindowActions.size) return;
       state.settings.sleepTimerAction = $("#sleep-action").value;
       saveSettings();
       renderSleepTimer();
@@ -4257,6 +4418,7 @@ function wire() {
   // settings
   $$(".settings .row").forEach((row) => {
     row.querySelector(".sw").addEventListener("click", (e) => {
+      if (activeWindowActions.size) return;
       const sw = e.currentTarget;
       const next = sw.getAttribute("aria-pressed") !== "true";
       // The hour field holds 12- or 24-hour digits according to this very
@@ -4281,6 +4443,7 @@ function wire() {
   wireMediaKeys();
 
   document.addEventListener("keydown", (e) => {
+    if (activeWindowActions.size) return;
     if (!ringing && $("#power-countdown").open) return;
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
     // Space belongs to whichever control has focus. The exception is a ringing
@@ -4337,6 +4500,9 @@ async function showConfigLocation() {
 // ----------------------------------------------------------------- boot ---
 
 async function boot() {
+  if (!IS_ANDROID) {
+    await listen("window-action-requested", (event) => handleWindowAction(event.payload));
+  }
   await tickClock();
   // Saving an alarm can return before Windows finishes updating its timer.
   // Subscribe before the initial query so that completion cannot leave it stale.
