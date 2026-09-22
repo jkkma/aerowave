@@ -311,6 +311,10 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   or as many rounds as you set. The tally belongs to the ring — dismissing it, or
   the next day's alarm, starts the budget over. A test ring fades out too but
   never schedules a real snooze.
+  A rejected automatic snooze restores the alarm instead of leaving it faded
+  to silence, and consumes its snooze allowance only after acceptance. Automatic
+  actions retry a limited number of times; a persistent failure leaves the
+  alarm available for manual dismissal or snooze.
 - So does the track a folder alarm rings on: it is drawn once, when the alarm
   first goes off, and every snooze after it comes back to that same file. A
   snooze is the same alarm returning, and waking to a different song each time
@@ -334,6 +338,15 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   you deleted, a folder that has moved, a file that will not decode. If even the backup folder
   is unusable the alarm still fires — the window comes up in red and says why.
   There is no synthesised fallback tone.
+  Folder searches run outside the alarm clock, so a slow drive or disconnected
+  share cannot stop the scheduler. The preferred folder and backup are searched
+  concurrently: a ready backup can take over after two seconds, and source
+  selection stops waiting after five seconds. A result arriving after dismissal
+  or replacement cannot restart the alarm. Filesystem work uses a bounded worker
+  pool; exhausted capacity is reported as unavailable rather than creating more
+  blocked threads.
+  Each occurrence keeps the alarm settings it claimed. Edits apply to future
+  occurrences; disabling or deleting an alarm still cancels an unresolved source.
 - The same rule applies to ordinary listening: when a station gives up after its
   four reconnects, the backup folder takes over.
 - Missed alarms are caught up: if the machine was asleep through the alarm minute,
@@ -517,7 +530,9 @@ at, and prints its SHA-256.
 
 - Closing the window hides it to the tray by default, so alarms keep working.
   Turn that off in Settings, or use Quit Aerowave to really exit. Alarms only ring
-  while Aerowave is running.
+  while Aerowave is running. Close and Quit finish pending settings saves first,
+  including when requested from the native window or tray. If a save fails,
+  the app stays open and shows the error instead of silently losing the change.
 - "Start at login" is off by default. It creates a Windows registry entry or a
   Linux desktop autostart entry outside a portable copy's own folder, and removes
   that entry when turned off.

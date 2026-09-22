@@ -82,6 +82,30 @@ stop-playing action and cancellation behavior; arrange an explicit user-approved
 test window before actually suspending or shutting down the machine. Preserve
 test evidence and follow the Recycle Bin rule when cleaning up test files.
 
+## Closing and quitting
+
+With disposable settings, change volume, Wake PC for alarms, or the selected
+sleep action and immediately quit. Verify the saved values after restarting.
+Toggle Keep running when closed and immediately close the native window; its
+latest value must determine whether the app hides or exits. Repeat with the
+app's own Close and Quit controls and tray Quit. Quitting releases process-owned
+wake timers; hiding must preserve alarm scheduling.
+
+The frontend tests hold settings writes and readbacks open to check ordering,
+newer edits, and failed saves. A failed save must cancel the pending close and
+show the error. The native request gate also has a five-second fallback when
+the webview never acknowledges a request, so a loading or unresponsive page
+does not disable native Quit. Once acknowledged, the request waits for the
+save result; the fallback must not close the app over a reported write failure.
+
+A 2026-09-22 disposable WebView2 check exercised production Tauri commands in a
+rebuilt app. Changing Keep running when closed and immediately requesting native
+close used the new value in both directions, and immediate Quit persisted the
+new volume, wake setting, and selected sleep action. Suppressing the webview's
+acknowledgement exercised the five-second native Quit fallback. These were
+instrumented app checks; Computer Use capture/input was unavailable for the
+physical Close and tray-menu controls during this check.
+
 ## Power timer checks
 
 `cargo run --manifest-path src-tauri/Cargo.toml --example powercheck` reads the
@@ -107,6 +131,21 @@ one delivery to a responsive window, a bounded failure while the window is
 not processing messages, and no late delivery when its message loop resumes.
 The fixture never forwards display-power requests to Windows' default window
 procedure, so this check does not turn off the display or enter standby.
+
+The frontend alarm regressions complete the give-up fade before rejecting an
+automatic snooze or dismissal. Check that sound and the watchdog recover, only
+accepted snoozes consume the allowance, retries stop at their limit, and a manual
+action or newer occurrence prevents obsolete work from taking over the alarm.
+Duplicate or older occurrence delivery must not restart playback or its fade.
+
+`cargo run --manifest-path src-tauri/Cargo.toml --example sourcecheck --locked`
+exercises the production folder workers with a stalled preferred-folder fixture
+and a responsive backup. It checks separate worker capacity and abandoned queued
+work without touching app settings or a real network share. The core tests check
+the two-second preference window and five-second deadline, including late results.
+The decision limit does not cancel an OS filesystem call. With disposable native
+settings, also check cancellation and replacement during resolution and reloading
+the page while a scheduled or TEST alarm is resolving its folder.
 
 The core suite covers timer expiry, the cancellable power countdown, replacement
 and cancellation before dispatch, alarm precedence, short interrupted clock
@@ -154,6 +193,35 @@ be treated as a ringing alarm that cancels every subsequent power timer.
 Repeat on battery only when its wake policy permits it. Modern Standby suspends
 desktop applications differently from traditional sleep; report its measured
 result separately rather than treating a successfully armed timer as proof.
+
+A 2026-09-22 check of the working-tree fixes used an isolated portable profile
+and a downloaded music MP3 on an AC-powered S3 PC. Stop audio expired correctly,
+and Sleep PC and Shut down PC timers could be selected and cancelled. A real
+Sleep PC timer completed its countdown and entered S3; Windows attributed the
+subsequent wake to Aerowave's timer. The scheduled folder alarm began decoding
+about 1.5 seconds after its deadline, and the user confirmed hearing the first
+ring before touching the PC. Its five-minute automatic stop also completed.
+This qualifies one S3 cycle with that local music file, not a radio-stream wake,
+battery wake, Modern Standby, or an actual shutdown. The test alarm was cleared,
+the test app exited, and the normal profile and startup entries were unchanged.
+
+A separate awake radio check that day reached playable Radio Paradise audio in
+about two seconds, and the user confirmed hearing it through the speakers. An
+unavailable test station switched to the downloaded music backup and showed
+advancing decoded playback. This checks radio startup and backup while awake;
+it does not by itself qualify radio playback after sleep.
+
+A subsequent 2026-09-22 radio wake check used the rebuilt app's one-minute Sleep
+PC timer and its full 30-second countdown on AC power. Windows recorded actual
+S3 entry and attributed the automatic wake to that Aerowave process's timer.
+The scheduled Radio Paradise alarm began decoded playback about 2.3 seconds
+after its deadline, without falling back to a local file. The user confirmed
+that the PC woke and the radio was audible through the 3.5 mm speakers before
+any mouse or keyboard input. Windows session and endpoint meters were also
+unmuted with positive output. The test alarm was cleared, the process exited,
+and the installed portable profile checksum was unchanged. This qualifies one
+radio S3 cycle on that PC; battery wake, Modern Standby wake, and actual shutdown
+remain separate checks.
 
 Sleep PC selects its Windows method from the same capability facts used to
 enable the control. Modern Standby uses a single `WM_SYSCOMMAND` /

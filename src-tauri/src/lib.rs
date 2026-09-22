@@ -10,6 +10,7 @@ mod library;
 mod power;
 mod relay;
 mod scheduler;
+mod source_scan;
 mod store;
 mod stream;
 
@@ -30,17 +31,20 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 
 use aerowave_core::sleep::{SleepAction, SleepSnapshot};
+use aerowave_core::window_action::{Action as WindowAction, Requests as WindowActionRequests};
 use library::{FolderInfo, RecentTracks};
 use scheduler::{FirePayload, NextAlarm};
 use store::{Alarm, AppData, Settings, Station, Store};
 
 pub struct AppState {
     pub store: Store,
+    pub window_actions: Mutex<WindowActionRequests>,
     pub sched: Mutex<scheduler::SchedState>,
     /// Serialize alarm/settings changes with the final wake refresh before
     /// suspension, so a newly saved alarm cannot miss the native timer.
     pub power_updates: Mutex<()>,
-    pub recent: RecentTracks,
+    pub recent: Arc<RecentTracks>,
+    pub scanner: source_scan::Scanner,
     /// None if the loopback listener would not bind. Playback then falls back
     /// to handing <audio> the station URL directly, which is what it did
     /// before the relay existed - fewer stations, but not none.
@@ -319,7 +323,7 @@ fn sync_autostart(_app: &AppHandle, _state: &AppState, _want: bool, _explicit: O
 /// thread; the callback hands the answer back over a channel.
 #[tauri::command]
 #[cfg(desktop)]
-async fn pick_folder(app: AppHandle) -> Option<FolderInfo> {
+async fn pick_folder(app: AppHandle) -> Result<Option<FolderInfo>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let mut dialog = app.dialog().file();
     // Owned by the main window, so the picker is modal to the app and cannot
@@ -331,35 +335,61 @@ async fn pick_folder(app: AppHandle) -> Option<FolderInfo> {
     dialog.pick_folder(move |chosen| {
         let _ = tx.send(chosen);
     });
-    let chosen = rx.await.ok().flatten()?;
-    let path = chosen.into_path().ok()?;
-    Some(library::info(&path))
+    let Some(chosen) = rx.await.ok().flatten() else { return Ok(None); };
+    let Some(path) = chosen.into_path().ok() else { return Ok(None); };
+    let path = path.to_string_lossy().to_string();
+    let files = scan_folder(&app.state::<AppState>(), &path).await?;
+    Ok(Some(folder_info_from_files(path, &files)))
 }
 
 #[tauri::command]
 #[cfg(mobile)]
-async fn pick_folder() -> Option<FolderInfo> {
-    None
+async fn pick_folder() -> Result<Option<FolderInfo>, String> {
+    Ok(None)
+}
+
+async fn scan_folder(state: &AppState, path: &str) -> Result<Vec<std::path::PathBuf>, String> {
+    let result = state.scanner.scan(std::path::PathBuf::from(path))?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), result)
+        .await
+        .map_err(|_| "folder scan took too long".to_string())?
+        .map_err(|_| "folder scanner stopped".to_string())
+}
+
+fn folder_info_from_files(path: String, files: &[std::path::PathBuf]) -> FolderInfo {
+    let sample = files.iter().take(6)
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .collect();
+    FolderInfo { path, count: files.len(), sample }
+}
+
+async fn pick_track(app: &AppHandle, state: &AppState, path: &str, backup: bool)
+    -> Result<source_scan::Pick, String> {
+    let app = app.clone();
+    let result = state.scanner.pick(std::path::PathBuf::from(path), None,
+        state.recent.clone(), backup,
+        move |track| app.asset_protocol_scope().allow_file(track).map_err(|e| e.to_string()))?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), result)
+        .await
+        .map_err(|_| "folder scan took too long".to_string())?
+        .map_err(|_| "folder scanner stopped".to_string())??
+        .ok_or_else(|| "no playable audio files in that folder".to_string())
 }
 
 #[tauri::command]
-fn folder_info(path: String) -> FolderInfo {
-    library::info(std::path::Path::new(&path))
+async fn folder_info(state: State<'_, AppState>, path: String) -> Result<FolderInfo, String> {
+    let files = scan_folder(&state, &path).await?;
+    Ok(folder_info_from_files(path, &files))
 }
 
 /// Pick one random file out of a folder and open it to the asset protocol.
 #[tauri::command]
-fn random_track(app: AppHandle, state: State<AppState>, path: String) -> Result<TrackPick, String> {
+async fn random_track(app: AppHandle, state: State<'_, AppState>, path: String) -> Result<TrackPick, String> {
     require_desktop_feature()?;
-    let dir = std::path::Path::new(&path);
-    if !dir.is_dir() {
-        return Err(format!("{path} is not a folder"));
-    }
-    let (track, total) = library::pick_random(dir, &state.recent)
-        .ok_or_else(|| "no playable audio files in that folder".to_string())?;
-    app.asset_protocol_scope()
-        .allow_file(&track)
-        .map_err(|e| e.to_string())?;
+    let picked = pick_track(&app, &state, &path, false).await?;
+    let track = picked.path;
+    let total = picked.total;
+    state.recent.remember(&track, total);
     Ok(TrackPick {
         name: track
             .file_name()
@@ -373,7 +403,7 @@ fn random_track(app: AppHandle, state: State<AppState>, path: String) -> Result<
 /// A random track from the backup folder - what the webview reaches for when
 /// a stream will not play.
 #[tauri::command]
-fn backup_track(app: AppHandle, state: State<AppState>) -> Result<TrackPick, String> {
+async fn backup_track(app: AppHandle, state: State<'_, AppState>) -> Result<TrackPick, String> {
     require_desktop_feature()?;
     let folder = state
         .store
@@ -384,9 +414,15 @@ fn backup_track(app: AppHandle, state: State<AppState>) -> Result<TrackPick, Str
         .backup_folder
         .clone()
         .ok_or_else(|| "no backup folder set".to_string())?;
-    scheduler::backup_track(&app)
-        .map(|(path, name, total)| TrackPick { path, name, total })
-        .ok_or_else(|| format!("nothing playable in the backup folder ({folder})"))
+    let picked = pick_track(&app, &state, &folder, true).await
+        .map_err(|e| format!("nothing playable in the backup folder ({folder}): {e}"))?;
+    let track = picked.path;
+    state.recent.remember(&track, picked.total);
+    Ok(TrackPick {
+        name: track.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        path: track.to_string_lossy().to_string(),
+        total: picked.total,
+    })
 }
 
 /// Open an HLS session for `url` and hand back the base the webview's loader
@@ -669,9 +705,9 @@ fn power_status(app: AppHandle) -> scheduler::PowerStatus {
 /// the source from the passed alarm gives the same answer the real ring will
 /// get, without touching the stored copy.
 #[tauri::command]
-fn test_alarm(app: AppHandle, alarm: Alarm) -> Result<FirePayload, String> {
+async fn test_alarm(app: AppHandle, alarm: Alarm) -> Result<FirePayload, String> {
     require_desktop_feature()?;
-    scheduler::test_alarm(&app, alarm)
+    scheduler::test_alarm(&app, alarm).await
 }
 
 #[tauri::command]
@@ -705,7 +741,96 @@ fn hide_window(_app: AppHandle) {
 
 #[tauri::command]
 fn quit_app(app: AppHandle) {
+    #[cfg(desktop)]
+    queue_window_action(&app, WindowAction::Quit);
+    #[cfg(mobile)]
     app.exit(0);
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowActionRequest {
+    request_id: String,
+    action: WindowAction,
+}
+
+#[cfg(desktop)]
+fn finish_window_action(app: &AppHandle, action: WindowAction) {
+    let to_tray = action == WindowAction::Close
+        && app
+            .state::<AppState>()
+            .store
+            .data
+            .lock()
+            .unwrap()
+            .settings
+            .minimize_to_tray;
+    if to_tray {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.hide();
+        }
+    } else {
+        app.exit(0);
+    }
+}
+
+#[cfg(desktop)]
+fn queue_window_action(app: &AppHandle, action: WindowAction) {
+    let request = app
+        .state::<AppState>()
+        .window_actions
+        .lock()
+        .unwrap()
+        .begin(action);
+    let Some(request) = request else { return };
+    let _ = app.emit(
+        "window-action-requested",
+        WindowActionRequest {
+            request_id: request.id.to_string(),
+            action: request.action,
+        },
+    );
+    // A loading or unresponsive webview must not make native Quit unusable.
+    // Once it acknowledges, only a completed settings save may close the app.
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let state = app.state::<AppState>();
+        let mut requests = state.window_actions.lock().unwrap();
+        if let Some(action) = requests.fallback(request.id) {
+            finish_window_action(&app, action);
+        }
+    });
+}
+
+#[tauri::command]
+fn request_window_action(app: AppHandle, action: WindowAction) -> Result<(), String> {
+    require_desktop_feature()?;
+    #[cfg(desktop)]
+    queue_window_action(&app, action);
+    Ok(())
+}
+
+#[tauri::command]
+fn acknowledge_window_action(state: State<AppState>, request_id: String) -> bool {
+    request_id
+        .parse()
+        .ok()
+        .is_some_and(|id| state.window_actions.lock().unwrap().acknowledge(id))
+}
+
+#[tauri::command]
+fn complete_window_action(app: AppHandle, request_id: String, saved: bool) {
+    let Some(id) = request_id.parse().ok() else { return };
+    let state = app.state::<AppState>();
+    // Keep the native action inside the request's commit boundary, so a
+    // newer Quit cannot be accepted before an older Close is dispatched.
+    let mut requests = state.window_actions.lock().unwrap();
+    let action = requests.complete(id, saved);
+    #[cfg(desktop)]
+    if let Some(action) = action {
+        finish_window_action(&app, action);
+    }
 }
 
 // ------------------------------------------------------------------- setup
@@ -728,7 +853,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "stop" => {
                 let _ = app.emit("tray-stop", ());
             }
-            "quit" => app.exit(0),
+            "quit" => queue_window_action(app, WindowAction::Quit),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -776,39 +901,18 @@ fn config_location(state: State<AppState>) -> ConfigLocation {
 #[tauri::command]
 fn pending_alarm(app: AppHandle, state: State<AppState>) -> Option<FirePayload> {
     if cfg!(mobile) { return None; }
-    let preview = state.sched.lock().unwrap().preview_alarm.clone();
-    if let Some(alarm) = preview {
-        return Some(scheduler::resolve_source(&app, &alarm, "test"));
+    let sched = state.sched.lock().unwrap();
+    if sched.ringing.is_some() {
+        return sched.payload.clone();
     }
-    let ringing = state.sched.lock().unwrap().ringing.clone();
-    let Some(id) = ringing else {
+    drop(sched);
+    {
         #[cfg(desktop)]
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.set_always_on_top(false);
         }
-        return None;
-    };
-
-    let alarm = state
-        .store
-        .data
-        .lock()
-        .unwrap()
-        .alarms
-        .iter()
-        .find(|a| a.id == id)
-        .cloned();
-
-    match alarm {
-        // Re-resolve rather than replay: the backup folder may have changed,
-        // and a folder alarm should get a fresh track.
-        Some(a) => Some(scheduler::resolve_source(&app, &a, "catchup")),
-        None => {
-            // Deleted while it was ringing; let go of the window.
-            scheduler::dismiss(&app, &id);
-            None
-        }
     }
+    None
 }
 
 // Tauri maps custom protocols onto HTTP hosts on Windows. WebKit uses the
@@ -865,9 +969,11 @@ pub fn run() {
             let store = Store::load(&handle);
             app.manage(AppState {
                 store,
+                window_actions: Mutex::new(WindowActionRequests::default()),
                 sched: Mutex::new(scheduler::SchedState::default()),
                 power_updates: Mutex::new(()),
-                recent: RecentTracks::default(),
+                recent: Arc::new(RecentTracks::default()),
+                scanner: source_scan::Scanner::new(),
                 relay: Mutex::new(None),
                 hls: hls_state,
             });
@@ -956,19 +1062,11 @@ pub fn run() {
             let (window, event) = (_window, _event);
             #[cfg(desktop)]
             if let WindowEvent::CloseRequested { api, .. } = event {
-                let app = window.app_handle();
-                let to_tray = app
-                    .state::<AppState>()
-                    .store
-                    .data
-                    .lock()
-                    .unwrap()
-                    .settings
-                    .minimize_to_tray;
-                if to_tray {
-                    // Closing the window must not silence the alarms.
+                if window.label() == "main" {
+                    // Settings may still be waiting in the webview's debounce.
+                    // Read close-to-tray only after that save has completed.
                     api.prevent_close();
-                    let _ = window.hide();
+                    queue_window_action(window.app_handle(), WindowAction::Close);
                 }
             }
         })
@@ -1005,6 +1103,9 @@ pub fn run() {
             dismiss_alarm,
             hide_window,
             quit_app,
+            request_window_action,
+            acknowledge_window_action,
+            complete_window_action,
             config_location,
             pending_alarm,
         ])

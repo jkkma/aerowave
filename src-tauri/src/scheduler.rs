@@ -7,10 +7,12 @@
 //! only does the playing.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use aerowave_core::ring::RingHolds;
 use aerowave_core::schedule;
+use aerowave_core::source_resolution::{accepts_result, cancel_unresolved_ring, Decision, Resolution};
 use aerowave_core::sleep::{
     power_clock_interrupted, wake_plan, AlarmWakeHold, SleepAction, SleepEffect, SleepOutcome,
     SleepSnapshot,
@@ -18,9 +20,10 @@ use aerowave_core::sleep::{
 use chrono::Local;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::oneshot;
 
-use crate::library;
 use crate::power;
+use crate::source_scan::Pick;
 use crate::store::{Alarm, AlarmSource};
 use crate::AppState;
 
@@ -34,6 +37,8 @@ pub struct SchedState {
     /// Whatever is ringing right now.
     pub ringing: Option<String>,
     pub preview_alarm: Option<Alarm>,
+    pub payload: Option<FirePayload>,
+    ring_generation: u64,
     /// The track each folder alarm's current occurrence is playing, held so
     /// that the snoozes after it come back with the same one.
     holds: RingHolds,
@@ -142,8 +147,8 @@ pub fn cancel_sleep_timer(app: &AppHandle) -> Result<SleepSnapshot, String> {
     Ok(snapshot)
 }
 
-pub fn test_alarm(app: &AppHandle, alarm: Alarm) -> Result<FirePayload, String> {
-    let snapshot = {
+pub async fn test_alarm(app: &AppHandle, alarm: Alarm) -> Result<FirePayload, String> {
+    let (snapshot, generation) = {
         let state = app.state::<AppState>();
         let mut sched = state.sched.lock().unwrap();
         if sched.power_committed {
@@ -154,12 +159,43 @@ pub fn test_alarm(app: &AppHandle, alarm: Alarm) -> Result<FirePayload, String> 
         }
         sched.ringing = Some(alarm.id.clone());
         sched.preview_alarm = Some(alarm.clone());
+        sched.payload = None;
+        sched.ring_generation = sched.ring_generation.wrapping_add(1);
         sched.sleep.cancel(SleepOutcome::Alarm);
-        sched.sleep.clone()
+        (sched.sleep.clone(), sched.ring_generation)
     };
     let _ = app.emit("sleep-timer-updated", snapshot);
     refresh(app);
-    Ok(resolve_source(app, &alarm, "test"))
+    match begin_source(app, &alarm, "test", generation) {
+        Ok(payload) => {
+            let state = app.state::<AppState>();
+            let mut sched = state.sched.lock().unwrap();
+            if !accepts_result(sched.ringing.as_deref(), &alarm.id, sched.ring_generation, generation) {
+                return Err("alarm test was dismissed".into());
+            }
+            sched.payload = Some(payload.clone());
+            let _ = app.emit("alarm-fire", payload.clone());
+            Ok(payload)
+        }
+        Err(mut pending) => loop {
+            if let Some(payload) = pending.poll(app) {
+                let state = app.state::<AppState>();
+                let sched = state.sched.lock().unwrap();
+                if !accepts_result(sched.ringing.as_deref(), &alarm.id, sched.ring_generation, generation) {
+                    return Err("alarm test was dismissed".into());
+                }
+                let _ = app.emit("alarm-fire", payload.clone());
+                return Ok(payload);
+            }
+            let active = {
+                let state = app.state::<AppState>();
+                let sched = state.sched.lock().unwrap();
+                accepts_result(sched.ringing.as_deref(), &alarm.id, sched.ring_generation, generation)
+            };
+            if !active { return Err("alarm test was dismissed".into()); }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        },
+    }
 }
 
 impl SchedState {
@@ -170,12 +206,20 @@ impl SchedState {
     pub fn cancel_pending(&mut self, alarm_id: &str) {
         self.snoozed.remove(alarm_id);
         self.holds.release(alarm_id);
+        if cancel_unresolved_ring(self.ringing.as_deref(), alarm_id,
+            self.preview_alarm.is_some(), self.payload.is_some()) {
+            self.ringing = None;
+            self.preview_alarm = None;
+            self.payload = None;
+            self.ring_generation = self.ring_generation.wrapping_add(1);
+        }
     }
 }
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct FirePayload {
+    pub occurrence_id: String,
     pub alarm_id: String,
     pub label: String,
     pub hour: u32,
@@ -213,170 +257,156 @@ pub struct NextAlarm {
     pub snoozed: bool,
 }
 
-/// Try to turn a folder into a playable track, opening it to the asset
-/// protocol (whose scope starts empty) on the way out.
-fn track_from_folder(app: &AppHandle, dir: &std::path::Path) -> Option<(String, String, usize)> {
-    let state = app.state::<AppState>();
-    let (track, total) = library::pick_random(dir, &state.recent)?;
-    let _ = app.asset_protocol_scope().allow_file(&track);
-    let name = track_name(&track);
-    Some((track.to_string_lossy().to_string(), name, total))
-}
-
 /// What a track shows under: its file name, with the extension trimmed off
 /// later by the webview.
-fn track_name(path: &std::path::Path) -> String {
+fn track_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "track".into())
 }
 
-/// The track a snooze should come back with, if this alarm is holding one and
-/// it is still on disk. A held track that has been moved or deleted between
-/// snoozes is no reason to wake nobody up: dropping it here sends the ring
-/// back through an ordinary draw.
-fn held_track(app: &AppHandle, alarm_id: &str, trigger: &str, folder: &str) -> Option<String> {
-    let state = app.state::<AppState>();
-    let held = state
-        .sched
-        .lock()
-        .unwrap()
-        .holds
-        .held_for(alarm_id, trigger, folder)?
-        .to_string();
-    let path = std::path::Path::new(&held);
-    if !path.is_file() {
-        return None;
+impl FirePayload {
+    fn new(alarm: &Alarm, trigger: &str, occurrence_id: u64) -> Self {
+        Self {
+            occurrence_id: occurrence_id.to_string(),
+            alarm_id: alarm.id.clone(), label: alarm.label.clone(),
+            hour: alarm.hour, minute: alarm.minute, trigger: trigger.into(),
+            kind: "none".into(), url: None, path: None, folder: None,
+            title: None, volume: alarm.volume, fade_secs: alarm.fade_secs,
+            snooze_mins: alarm.snooze_mins, auto_stop_mins: alarm.auto_stop_mins,
+            auto_snoozes: alarm.auto_snoozes, note: None,
+        }
     }
-    // Granted on the first draw and good for the life of the process, but
-    // asking again costs nothing and does not rely on that being true.
-    let _ = app.asset_protocol_scope().allow_file(path);
-    Some(held)
 }
 
-/// The backup folder from settings, if it has anything playable in it.
-pub fn backup_track(app: &AppHandle) -> Option<(String, String, usize)> {
-    let folder = app
-        .state::<AppState>()
-        .store
-        .data
-        .lock()
-        .unwrap()
-        .settings
-        .backup_folder
-        .clone()?;
-    track_from_folder(app, std::path::Path::new(&folder))
+struct PendingSource {
+    alarm: Alarm,
+    trigger: String,
+    generation: u64,
+    payload: FirePayload,
+    preferred_folder: Option<String>,
+    preferred: Option<oneshot::Receiver<Result<Option<Pick>, String>>>,
+    backup: Option<oneshot::Receiver<Result<Option<Pick>, String>>>,
+    gate: Resolution<Pick>,
+    started: Instant,
 }
 
-/// Work out what the webview should play for this alarm. If the alarm's own
-/// source has gone missing, the backup folder stands in; if there is no
-/// usable backup either, the alarm still fires, but silently, and says so.
-pub fn resolve_source(app: &AppHandle, alarm: &Alarm, trigger: &str) -> FirePayload {
+fn begin_source(app: &AppHandle, alarm: &Alarm, trigger: &str, generation: u64) -> Result<FirePayload, PendingSource> {
     let state = app.state::<AppState>();
-    let mut payload = FirePayload {
-        alarm_id: alarm.id.clone(),
-        label: alarm.label.clone(),
-        hour: alarm.hour,
-        minute: alarm.minute,
-        trigger: trigger.to_string(),
-        kind: "none".into(),
-        url: None,
-        path: None,
-        folder: None,
-        title: None,
-        volume: alarm.volume,
-        fade_secs: alarm.fade_secs,
-        snooze_mins: alarm.snooze_mins,
-        auto_stop_mins: alarm.auto_stop_mins,
-        auto_snoozes: alarm.auto_snoozes,
-        note: None,
+    let (station, backup_folder) = {
+        let data = state.store.data.lock().unwrap();
+        let station = match &alarm.source {
+            AlarmSource::Station { station_id } => data.stations.iter().find(|s| &s.id == station_id).cloned(),
+            AlarmSource::Folder { .. } => None,
+        };
+        (station, data.settings.backup_folder.clone())
     };
-
-    // Why the first choice failed, set only when it did.
-    let fell_back: String;
-
-    match &alarm.source {
-        AlarmSource::Station { station_id } => {
-            let station = state
-                .store
-                .data
-                .lock()
-                .unwrap()
-                .stations
-                .iter()
-                .find(|s| &s.id == station_id)
-                .cloned();
-            match station {
-                Some(s) => {
-                    payload.kind = "station".into();
-                    payload.url = Some(s.url);
-                    payload.title = Some(s.name);
-                    return payload;
-                }
-                None => fell_back = "that station has been deleted".into(),
-            }
-        }
-        AlarmSource::Folder { path } => {
-            let dir = std::path::Path::new(path);
-            // A snooze is the same alarm coming back, not a new one, so it
-            // comes back with the track it was already playing. Waking to a
-            // different song every nine minutes reads as a different alarm
-            // each time. See `aerowave_core::ring` for when a hold applies.
-            if let Some(track) = held_track(app, &alarm.id, trigger, path) {
-                payload.kind = "folder".into();
-                payload.title = Some(track_name(std::path::Path::new(&track)));
-                payload.path = Some(track);
-                payload.folder = Some(path.clone());
-                return payload;
-            }
-            match track_from_folder(app, dir) {
-                Some((track, name, _)) => {
-                    // Held for the snoozes this ring turns into. Only the
-                    // alarm's own folder: the backup folder below is the
-                    // sound of something having gone wrong, and is meant to
-                    // be played through rather than held.
-                    if trigger != "test" {
-                        state
-                            .sched
-                            .lock()
-                            .unwrap()
-                            .holds
-                            .remember(&alarm.id, path, &track);
-                    }
-                    payload.kind = "folder".into();
-                    payload.path = Some(track);
-                    payload.folder = Some(path.clone());
-                    payload.title = Some(name);
-                    return payload;
-                }
-                None => {
-                    fell_back = if dir.is_dir() {
-                        "no playable audio in that folder".into()
-                    } else {
-                        "that folder is missing".into()
-                    }
-                }
-            }
-        }
+    let mut payload = FirePayload::new(alarm, trigger, generation);
+    if let Some(station) = station {
+        payload.kind = "station".into();
+        payload.url = Some(station.url);
+        payload.title = Some(station.name);
+        return Ok(payload);
     }
+    let preferred_folder = match &alarm.source {
+        AlarmSource::Folder { path } => Some(path.clone()),
+        AlarmSource::Station { .. } => None,
+    };
+    let mut gate = Resolution::new(0);
+    // Submit backup first. It has its own worker, so a stalled preferred share
+    // cannot prevent a responsive local backup from returning.
+    let backup = backup_folder.as_ref().and_then(|folder| {
+        let app = app.clone();
+        state.scanner.pick(PathBuf::from(folder), None, state.recent.clone(), true,
+            move |path| app.asset_protocol_scope().allow_file(path).map_err(|e| e.to_string())).ok()
+    });
+    if backup.is_none() { gate.backup(None, 0); }
+    let held = preferred_folder.as_deref().and_then(|folder| state.sched.lock().unwrap()
+        .holds.held_for(&alarm.id, trigger, folder).map(PathBuf::from));
+    let preferred = preferred_folder.as_ref().and_then(|folder| {
+        let app = app.clone();
+        state.scanner.pick(PathBuf::from(folder), held, state.recent.clone(), false,
+            move |path| app.asset_protocol_scope().allow_file(path).map_err(|e| e.to_string())).ok()
+    });
+    if preferred.is_none() { gate.preferred(None, 0); }
+    Err(PendingSource {
+        alarm: alarm.clone(), trigger: trigger.into(), generation, payload,
+        preferred_folder, preferred, backup, gate, started: Instant::now(),
+    })
+}
 
-    // First choice unusable - reach for the backup folder.
-    match backup_track(app) {
-        Some((track, name, _)) => {
+impl PendingSource {
+    fn poll(&mut self, app: &AppHandle) -> Option<FirePayload> {
+        if let Some(receiver) = &mut self.preferred {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    let elapsed = result.as_ref().ok().and_then(Option::as_ref)
+                        .map(|pick| pick.completed_at.saturating_duration_since(self.started).as_millis() as u64)
+                        .unwrap_or_else(|| self.started.elapsed().as_millis() as u64);
+                    self.gate.preferred(result.ok().flatten(), elapsed);
+                    self.preferred = None;
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    self.gate.preferred(None, self.started.elapsed().as_millis() as u64);
+                    self.preferred = None;
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(receiver) = &mut self.backup {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    let elapsed = result.as_ref().ok().and_then(Option::as_ref)
+                        .map(|pick| pick.completed_at.saturating_duration_since(self.started).as_millis() as u64)
+                        .unwrap_or_else(|| self.started.elapsed().as_millis() as u64);
+                    self.gate.backup(result.ok().flatten(), elapsed);
+                    self.backup = None;
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    self.gate.backup(None, self.started.elapsed().as_millis() as u64);
+                    self.backup = None;
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {}
+            }
+        }
+        let now = self.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let decision = self.gate.decide(now)?;
+        let state = app.state::<AppState>();
+        let mut payload = self.payload.clone();
+        let mut sched = state.sched.lock().unwrap();
+        if !accepts_result(sched.ringing.as_deref(), &self.alarm.id, sched.ring_generation, self.generation) {
+            return None;
+        }
+        // The snapshot claimed at fire time owns this occurrence. Ordinary
+        // edits apply to later rings; disabling or deleting this alarm cancels
+        // an unresolved ring by advancing its generation in cancel_pending.
+        let (picked, own) = match decision {
+            Decision::Preferred(picked) => (Some(picked), true),
+            Decision::Backup(picked) => (Some(picked), false),
+            Decision::Unavailable => (None, false),
+        };
+        if let Some(Pick { path: track, total, .. }) = picked {
+            let path = track.to_string_lossy().to_string();
+            if own && self.trigger != "test" {
+                sched.holds.remember(&self.alarm.id, self.preferred_folder.as_deref().unwrap(), &path);
+            }
+            state.recent.remember(&track, total);
             payload.kind = "folder".into();
-            payload.path = Some(track);
-            payload.title = Some(name);
-            payload.note = Some(format!(
-                "{fell_back} - playing from the backup folder instead"
-            ));
+            payload.path = Some(path);
+            payload.title = Some(track_name(&track));
+            if own { payload.folder = self.preferred_folder.clone(); }
+            else { payload.note = Some("alarm source unavailable - playing from the backup folder instead".into()); }
         }
-        None => {
-            payload.note = Some(format!(
-                "{fell_back}, and there is no usable backup folder set"
-            ));
+        if payload.kind == "none" {
+            payload.note = Some(if now >= 5_000 {
+                "alarm source did not respond within five seconds, and no backup track was available"
+            } else {
+                "no playable alarm source or backup track was available"
+            }.into());
         }
+        sched.payload = Some(payload.clone());
+        Some(payload)
     }
-    payload
 }
 
 /// Bring the window back from wherever it went and put it in front.
@@ -390,18 +420,17 @@ fn surface_window(app: &AppHandle) {
     }
 }
 
-pub fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str) -> bool {
-    let payload = resolve_source(app, alarm, trigger);
+fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str, pending: &mut Option<PendingSource>) -> bool {
     let state = app.state::<AppState>();
-    let (one_shot, sleep) = {
-        // Edits take these locks in the same order. Recheck after disk/network
-        // source work so a cancelled snooze cannot publish an obsolete ring.
+    let (one_shot, sleep, generation, claimed_alarm) = {
+        // Claim the occurrence and wake hold before any filesystem request.
         let mut data = state.store.data.lock().unwrap();
         let mut sched = state.sched.lock().unwrap();
         let wake_enabled = cfg!(windows) && data.settings.wake_for_alarms;
         let Some(current) = data.alarms.iter_mut().find(|a| a.id == alarm.id) else {
             return false;
         };
+        if current != alarm { return false; }
         let now = Local::now();
         if !schedule::alarm_may_fire(
             trigger == "snooze",
@@ -414,6 +443,8 @@ pub fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str) -> bool {
         }
         sched.ringing = Some(alarm.id.clone());
         sched.preview_alarm = None;
+        sched.payload = None;
+        sched.ring_generation = sched.ring_generation.wrapping_add(1);
         sched.snoozed.remove(&alarm.id);
         sched
             .fired
@@ -422,15 +453,25 @@ pub fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str) -> bool {
         if one_shot {
             current.enabled = false;
         }
+        let claimed_alarm = current.clone();
         // Ending the sound must not send an unattended alarm wake back to
         // sleep. Preview alarms use a separate path and never claim this hold.
         sched.wake_hold.alarm_fired(wake_enabled);
         sched.sleep.cancel(SleepOutcome::Alarm);
-        (one_shot, sched.sleep.clone())
+        (one_shot, sched.sleep.clone(), sched.ring_generation, claimed_alarm)
     };
     let _ = app.emit("sleep-timer-updated", sleep);
-    surface_window(app);
-    let _ = app.emit("alarm-fire", payload);
+    match begin_source(app, &claimed_alarm, trigger, generation) {
+        Ok(payload) => {
+            let mut sched = state.sched.lock().unwrap();
+            if accepts_result(sched.ringing.as_deref(), &alarm.id, sched.ring_generation, generation) {
+                sched.payload = Some(payload.clone());
+                surface_window(app);
+                let _ = app.emit("alarm-fire", payload);
+            }
+        }
+        Err(work) => *pending = Some(work),
+    }
 
     // A one-shot alarm has now done its job.
     if one_shot {
@@ -450,6 +491,8 @@ pub fn dismiss_test(app: &AppHandle, alarm_id: &str) {
             return;
         }
         sched.preview_alarm = None;
+        sched.payload = None;
+        sched.ring_generation = sched.ring_generation.wrapping_add(1);
         if sched.ringing.as_deref() == Some(alarm_id) {
             sched.ringing = None;
         }
@@ -476,6 +519,8 @@ pub fn dismiss(app: &AppHandle, alarm_id: &str) {
     if sched.ringing.as_deref() == Some(alarm_id) {
         sched.ringing = None;
         sched.preview_alarm = None;
+        sched.payload = None;
+        sched.ring_generation = sched.ring_generation.wrapping_add(1);
     }
     drop(sched);
     refresh(app);
@@ -509,6 +554,8 @@ pub fn snooze(app: &AppHandle, alarm_id: &str, minutes: u32) -> Result<i64, Stri
             .insert(alarm_id.to_string(), schedule::Snooze::new(at));
         if sched.ringing.as_deref() == Some(alarm_id) {
             sched.ringing = None;
+            sched.payload = None;
+            sched.ring_generation = sched.ring_generation.wrapping_add(1);
         }
     }
     #[cfg(desktop)]
@@ -556,7 +603,7 @@ pub fn next_alarm(app: &AppHandle) -> Option<NextAlarm> {
 
 /// One pass of the clock. Split out from the thread so the logic stays
 /// readable and the borrow of the store stays short.
-fn tick(app: &AppHandle, power: &mut power::PowerManager) {
+fn tick(app: &AppHandle, power: &mut power::PowerManager, pending_source: &mut Option<PendingSource>) {
     let now = Local::now();
     let now_secs = now.timestamp();
     let key = now.format("%Y-%m-%d %H:%M").to_string();
@@ -590,7 +637,7 @@ fn tick(app: &AppHandle, power: &mut power::PowerManager) {
     if let Some(id) = due_snooze {
         if let Some(alarm) = alarms.iter().find(|a| a.id == id) {
             let _ = power.keep_awake(true, true);
-            fired_this_pass = fire(app, alarm, "snooze");
+            fired_this_pass = fire(app, alarm, "snooze", pending_source);
         }
     }
 
@@ -623,7 +670,32 @@ fn tick(app: &AppHandle, power: &mut power::PowerManager) {
             continue;
         }
         let _ = power.keep_awake(true, true);
-        fired_this_pass = fire(app, alarm, if on_time { "scheduled" } else { "catchup" });
+        fired_this_pass = fire(app, alarm, if on_time { "scheduled" } else { "catchup" }, pending_source);
+    }
+}
+
+fn poll_source(app: &AppHandle, pending: &mut Option<PendingSource>) {
+    let Some(work) = pending.as_mut() else { return; };
+    let active = {
+        let state = app.state::<AppState>();
+        let sched = state.sched.lock().unwrap();
+        accepts_result(sched.ringing.as_deref(), &work.alarm.id,
+            sched.ring_generation, work.generation)
+    };
+    if !active {
+        *pending = None;
+        return;
+    }
+    if let Some(payload) = work.poll(app) {
+        let generation = work.generation;
+        let alarm_id = work.alarm.id.clone();
+        *pending = None;
+        let state = app.state::<AppState>();
+        let sched = state.sched.lock().unwrap();
+        if accepts_result(sched.ringing.as_deref(), &alarm_id, sched.ring_generation, generation) {
+            surface_window(app);
+            let _ = app.emit("alarm-fire", payload);
+        }
     }
 }
 
@@ -632,6 +704,7 @@ pub fn spawn(app: AppHandle, power_window: Option<isize>) {
     std::thread::spawn(move || {
         let mut power = power::PowerManager::new();
         let mut pending_power = None;
+        let mut pending_source: Option<PendingSource> = None;
         {
             let state = app.state::<AppState>();
             let mut sched = state.sched.lock().unwrap();
@@ -640,12 +713,13 @@ pub fn spawn(app: AppHandle, power_window: Option<isize>) {
         }
         loop {
             poll_power_action(&app, &mut pending_power);
+            poll_source(&app, &mut pending_source);
             let last_tick = app.state::<AppState>().sched.lock().unwrap().last_tick;
             // Alarms get first refusal, including a timer expiring on the
             // very same tick. tick holds Windows awake before any due
             // alarm enters source resolution, which can involve folder I/O.
             update_power(&app, &mut power);
-            tick(&app, &mut power);
+            tick(&app, &mut power, &mut pending_source);
             update_power(&app, &mut power);
             tick_sleep(&app, &mut power, last_tick, &mut pending_power, power_window);
             std::thread::park_timeout(Duration::from_secs(1));

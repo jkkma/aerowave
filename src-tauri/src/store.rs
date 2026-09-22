@@ -31,7 +31,7 @@ pub struct Station {
 /// Where an alarm gets its sound from. When a station will not play, the
 /// backup folder in `Settings` stands in for it - there is no synthesised
 /// fallback tone.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum AlarmSource {
     /// A saved station, by id.
@@ -48,7 +48,7 @@ impl Default for AlarmSource {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Alarm {
     pub id: String,
