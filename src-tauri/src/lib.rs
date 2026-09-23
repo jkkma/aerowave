@@ -164,8 +164,8 @@ fn save_settings(
     }
     let want_autostart = settings.start_with_windows;
     state.store.update_with(|candidate| candidate.settings = settings, |current, candidate| {
-        // Record an explicit OFF even if another save enables wake again
-        // before the scheduler next observes the settings.
+        // An explicit Off must clear the old snooze hold even if another save
+        // enables wake again before the scheduler's next tick.
         let mut sched = state.sched.lock().unwrap();
         let wake_enabled = candidate.settings.wake_for_alarms;
         *current = candidate;

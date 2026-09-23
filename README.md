@@ -364,16 +364,18 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   requests a wake timer 45 seconds before the next alarm or snooze, giving the
   network and audio device time to resume, and requests both the system and
   display stay awake through the ring. A timer wake otherwise leaves the display
-  off; showing the alarm window alone does not request display power. The display
-  request ends when the alarm is dismissed or snoozed. After any real alarm
-  fires with this setting on, the system stays awake for the rest of the app
-  session, including through snoozes, automatic stopping and dismissal. This
-  also applies when the PC was already awake; TEST does not start this hold.
-  The screen can turn off normally after ringing. Turning this setting off or
-  quitting restores automatic sleep. Manual Sleep and Shut down still work,
-  as does a subsequently requested PC power timer; a failed power action keeps
-  the hold. Editing, disabling or deleting an alarm updates the next wake timer
-  without releasing the hold from an alarm that already fired.
+  off; showing the alarm window alone does not request display power. The active
+  operation includes the alarm's snooze cycle: the system stays awake between
+  rings while a snooze is pending, but the display can turn off until preparation
+  for the next ring. Final dismissal or automatic stopping without another
+  snooze releases the requests, unless another alarm is preparing, ringing or
+  snoozed. Cancelling the last pending snooze also ends its hold. Snoozes still
+  request wake timers in case the user explicitly puts the PC to sleep. An
+  explicit Sleep PC timer releases the hold when it dispatches; an idle request
+  must not undo that action. A running sleep timer keeps the system awake until
+  its deadline. Scoping the hold to active alarm work follows Microsoft's
+  [guidance to release execution-state requests after the active operation](https://learn.microsoft.com/en-us/windows/win32/power/system-sleep-criteria).
+  Editing, disabling or deleting an alarm updates the next wake timer.
   Keep Aerowave running, including in the tray: quitting cancels its timers.
   Alarm and wake-setting changes become active only after their configuration
   has been written successfully. A failed save keeps the previous live state.
@@ -381,7 +383,11 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   reports the current policy; if blocked, enable **Sleep > Allow wake timers**
   in Windows' advanced power settings. Aerowave does not change that system setting.
   Modern Standby may suspend desktop applications, so automatic waking there is
-  not guaranteed. Alarms cannot turn on a shut-down PC. The native adapter uses
+  unverified and not guaranteed. Settings keeps a visible warning on those PCs
+  even when Windows accepts a timer; it reports a registered request rather than
+  confirmed wake support. The Sleep PC countdown also warns when automatic wake
+  is off or unconfirmed. Keep the PC awake for dependable alarms on those systems.
+  Alarms cannot turn on a shut-down PC. The native adapter uses
   [Windows resume-capable waitable timers](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-setwaitabletimer);
   Microsoft's [Modern Standby guidance](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/integrating-apps-with-modern-standby)
   explains the desktop-app limitation.

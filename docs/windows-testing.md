@@ -122,6 +122,10 @@ will resume the PC.
 The probe also holds a substitute power call open on the production worker while
 the caller prepares an alarm, verifies its native system/display requests and
 checks the alarm deadline. It checks delivery of successful and failed results.
+It verifies that final dismissal and automatic stopping release alarm requests,
+and that completing an earlier power action cannot clear a newer ring's request.
+Snooze retains the system request and a future wake timer, but releases the
+display until the next ring's preparation window.
 This covers a blocked power call without an actual suspend; it does not establish
 unattended wake or speaker output on this PC.
 
@@ -186,6 +190,11 @@ power countdown expire outside the approved test window.
 Keep Settings open while changing an alarm and the Windows wake policy. The wake
 status should reflect a completed timer update immediately and an external policy
 change within twenty seconds while the page is active, or on returning to the app.
+An unknown wake policy and Modern Standby must remain visibly warned even when
+the timer is registered. The status must distinguish a registered wake request
+from confirmed hardware/policy support, and must not imply tested S0 wake.
+The Sleep PC countdown must also show its alarm-wake warning while automatic
+wake is off, blocked or unknown, and clear it when support and policy are confirmed.
 
 For an actual wake test, use a near-future alarm and a known playable local file.
 Record the power source, wake policy and sleep state before suspending. Check an
@@ -200,16 +209,22 @@ then an unavailable station with a valid backup folder. Record the media clock,
 readiness, volume and Windows audio-session output; an advancing media clock alone
 does not prove that the speakers made sound. The display request must release on
 dismissal and snooze, and a sleep timer by itself must not hold the display on.
-With Wake PC for alarms enabled, a real alarm also starts a system keep-awake
-hold that survives dismissal, snooze and automatic stopping. Verify it with a
-scheduled alarm, including one with no usable audio source; TEST must not start
-it. Check Settings reports the hold, disabling wake-for-alarms releases it, and
-re-enabling the setting alone does not restore it. A subsequently selected and
-cancelled PC power timer must leave the hold intact. Successful Sleep clears it;
-a failed Windows call restores it. Shut down retains the hold until process exit
-because another application or the user can cancel an accepted shutdown. Perform
-actual power transitions only within an approved test window. The hold must not
-be treated as a ringing alarm that cancels every subsequent power timer.
+The system request must remain throughout manual and automatic snoozes when
+wake-for-alarms is enabled. It must release after final dismissal or automatic
+stopping without another snooze, unless another alarm is preparing, ringing or
+snoozed or a sleep timer is active. Check scheduled alarms and TEST, including a
+ring with no usable audio source. A snooze outside the 45-second preparation
+window must retain its future wake timer and system request while releasing the
+display request. Check that cancelling the last pending snooze ends the hold,
+and that dismissing one alarm leaves another alarm's pending snooze protected.
+An explicit Sleep PC timer must release the old snooze hold at dispatch and must
+not immediately reassert it after a successful Modern Standby display-off call.
+Disabling wake-for-alarms must cancel the snooze hold, preparation and wake timer,
+but must not remove the requests of an alarm already ringing. Settings must
+describe only the current alarm need;
+an idle app must not claim it is keeping the PC awake after an alarm. Completing
+or failing an older power action must not release a newer ringing alarm's request.
+Perform actual power transitions only within an approved test window.
 Repeat on battery only when its wake policy permits it. Modern Standby suspends
 desktop applications differently from traditional sleep; report its measured
 result separately rather than treating a successfully armed timer as proof.
@@ -268,3 +283,14 @@ low-power residency. Keep the Modern Standby wake warning in place.
 A second cycle with a one-shot Windows Task Scheduler `WakeToRun` task also
 missed its requested wake deadline on that PC. Task registration alone does
 not establish a working Modern Standby wake alternative.
+
+Modern Standby alarm wake remains unqualified. Microsoft's
+[wake-timer instructions](https://learn.microsoft.com/en-us/windows/win32/power/system-wake-up-events)
+apply to S3/S4; [desktop apps can be paused during S0 standby](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/integrating-apps-with-modern-standby).
+A timer context string, a keep-running power request or successful Task Scheduler
+registration is not evidence of unattended S0 wake and radio playback. A scheduled
+Windows notification is a different delivery mechanism and does not automatically
+start this app's radio engine. Qualifying S0 requires an actual compatible test
+machine, no injected user input, and separate AC/battery and audible-playback
+evidence. The S3-only development PC cannot establish those results. Keep the
+warning until that evidence exists.

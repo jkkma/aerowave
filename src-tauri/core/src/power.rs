@@ -122,7 +122,7 @@ pub fn classify_capabilities(facts: PowerFacts) -> PowerCapabilities {
         }
     };
     if facts.modern_standby {
-        message.push_str(" This PC uses Modern Standby, which can pause desktop apps; automatic alarm wake is not guaranteed.");
+        message.push_str(" This PC uses Modern Standby. Windows can pause desktop apps, so automatic alarm wake is unverified and not guaranteed. Keep this PC awake for dependable alarms.");
     }
     message.push_str(" Alarms cannot turn on a shut-down PC.");
     PowerCapabilities {
