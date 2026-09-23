@@ -9,8 +9,12 @@ A release is finished when a user can install it, not when the GitHub release
 exists. The Scoop manifest in the separate bucket repository linked from
 `README.md` is part of this job, not a follow-up to offer afterwards.
 
-Use this skill when the user requests a release. Confirm the version number
-before changing it if the user did not give one. Carry the authorized release
+Use this skill when the user requests a release. Honor an explicitly supplied
+version. Otherwise, check the current project version and existing tags and
+releases, then choose the next appropriate unused SemVer from the release
+changes (normally patch for fixes, minor for features, and major for breaking
+changes). Tell the user the chosen version and continue without waiting for
+confirmation. Carry the authorized release
 through both repositories; a request to prepare release files alone does not
 authorize publishing them. Follow existing user authorization and the standing
 deletion rules. Run the commands below from the repository root in PowerShell 7.
@@ -116,7 +120,7 @@ git -c credential.helper= -c credential.helper="!gh auth git-credential" push or
 ## 6. Publish the GitHub release
 
 Prepare the complete release notes in a UTF-8 file, set `$releaseNotesPath` to
-that file, and replace `X.Y.Z` below with the confirmed version. Check whether
+that file, and replace `X.Y.Z` below with the chosen version. Check whether
 the tag or release already exists
 before creating it; report any conflict instead of replacing existing assets
 or publishing under another version.
