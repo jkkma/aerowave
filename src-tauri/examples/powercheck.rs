@@ -270,12 +270,21 @@ fn simulate_cleared_execution_state() -> Result<(), String> {
 }
 
 fn verify_pending_power_action(manager: &mut power::PowerManager) -> Result<(), String> {
-    use aerowave_core::sleep::{wake_plan, SleepAction};
+    use aerowave_core::sleep::{AlarmWakeHold, SleepAction};
     use chrono::{TimeZone, Utc};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     for expected in [Ok(()), Err("simulated sleep failure".to_string())] {
+        // Dispatch releases the sleep timer's system request before the OS
+        // worker starts, leaving a later alarm free to own a new request.
+        let mut hold = AlarmWakeHold::default();
+        hold.alarm_fired(true);
+        let plan = hold.plan(0, Some(600_000), false, true, true);
+        manager.keep_awake(plan.keep_awake, plan.keep_display_awake)?;
+        let saved_hold = std::mem::take(&mut hold);
+        manager.keep_awake(false, false)?;
+        verify_execution_state(false, false)?;
         let (entered, started) = mpsc::channel();
         let (release, wait) = mpsc::channel();
         let completion = expected.clone();
@@ -294,10 +303,12 @@ fn verify_pending_power_action(manager: &mut power::PowerManager) -> Result<(), 
         // Hold the OS-call substitute open while the clock reaches preparation
         // and ringing. These requests still belong to this scheduler thread.
         let alarm = Utc.with_ymd_and_hms(2026, 1, 1, 7, 30, 0).unwrap();
-        let plan = wake_plan(
+        let plan = hold.plan(
             alarm.timestamp_millis() - 45_000,
             Some(alarm.timestamp_millis()),
             false,
+            true,
+            true,
         );
         assert!(plan.keep_awake && plan.keep_display_awake);
         manager.keep_awake(plan.keep_awake, plan.keep_display_awake)?;
@@ -307,6 +318,10 @@ fn verify_pending_power_action(manager: &mut power::PowerManager) -> Result<(), 
             task.try_result().is_none(),
             "alarm work waited for the power action"
         );
+        hold.alarm_fired(true);
+        let plan = hold.plan(alarm.timestamp_millis(), None, true, false, true);
+        manager.keep_awake(plan.keep_awake, plan.keep_display_awake)?;
+        verify_execution_state(true, true)?;
 
         release.send(()).map_err(|error| error.to_string())?;
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -320,9 +335,25 @@ fn verify_pending_power_action(manager: &mut power::PowerManager) -> Result<(), 
             std::thread::park_timeout(Duration::from_millis(10));
         };
         assert_eq!(actual, expected);
+        hold.finish_power_action(
+            saved_hold, SleepAction::Sleep, actual.is_ok(), true, true,
+        );
+        let plan = hold.plan(alarm.timestamp_millis(), None, true, false, true);
+        manager.keep_awake(plan.keep_awake, plan.keep_display_awake)?;
+        // Completing the old action must leave the new cycle protected,
+        // including its next snooze after this ring ends.
+        verify_execution_state(true, true)?;
+        let plan = hold.plan(
+            alarm.timestamp_millis(),
+            Some(alarm.timestamp_millis() + 600_000),
+            false, true, true,
+        );
+        manager.keep_awake(plan.keep_awake, plan.keep_display_awake)?;
+        verify_execution_state(true, false)?;
         manager.keep_awake(false, false)?;
+        verify_execution_state(false, false)?;
     }
-    println!("A blocked power action leaves alarm preparation and due checks runnable; both success and failure completions delivered. No sleep requested.");
+    println!("A blocked power action leaves alarm preparation and due checks runnable; success and failure completions preserve a newer ring request. No sleep requested.");
     Ok(())
 }
 
@@ -354,33 +385,27 @@ fn main() -> Result<(), String> {
     }
     manager.keep_awake(false, false)?;
     verify_execution_state(false, false)?;
-    let mut hold = aerowave_core::sleep::AlarmWakeHold::default();
-    hold.alarm_fired(true);
-    for (next, ringing, display) in [
-        (None, true, true),
-        (Some(600_000), false, false),
-        (None, false, false),
+    use aerowave_core::sleep::AlarmWakeHold;
+    let mut hold = AlarmWakeHold::default();
+    for (now, next, ringing, snoozing, system, display) in [
+        (0, Some(600_000), false, false, false, false),
+        (555_000, Some(600_000), false, false, true, true),
+        (600_000, None, true, false, true, true),
+        (600_001, Some(1_200_000), false, true, true, false),
+        (1_155_000, Some(1_200_000), false, true, true, true),
+        (1_200_000, None, true, false, true, true),
+        (1_200_001, Some(1_800_000), false, true, true, false),
+        (1_755_000, Some(1_800_000), false, true, true, true),
+        (1_800_000, None, true, false, true, true),
+        (1_800_001, None, false, false, false, false),
     ] {
-        let plan = hold.plan(0, next, ringing, true);
+        if ringing {
+            hold.alarm_fired(true);
+        }
+        let plan = hold.plan(now, next, ringing, snoozing, true);
         manager.keep_awake(plan.keep_awake, plan.keep_display_awake)?;
-        verify_execution_state(true, display)?;
+        verify_execution_state(system, display)?;
     }
-    let before_power_action = std::mem::take(&mut hold);
-    let plan = hold.plan(0, None, false, true);
-    manager.keep_awake(plan.keep_awake, plan.keep_display_awake)?;
-    verify_execution_state(false, false)?;
-    // A refused power action restores the hold without an actual suspension.
-    hold.finish_power_action(
-        before_power_action,
-        aerowave_core::sleep::SleepAction::Sleep,
-        false,
-    );
-    let plan = hold.plan(0, None, false, true);
-    manager.keep_awake(plan.keep_awake, plan.keep_display_awake)?;
-    verify_execution_state(true, false)?;
-    let plan = hold.plan(0, None, false, false);
-    manager.keep_awake(plan.keep_awake, plan.keep_display_awake)?;
-    verify_execution_state(false, false)?;
     let deadline = chrono::Utc::now().timestamp_millis() + 24 * 60 * 60 * 1_000;
     manager.sync_wake(Some(deadline))?;
     manager.sync_wake(Some(deadline))?;
@@ -391,7 +416,7 @@ fn main() -> Result<(), String> {
     power::execute(aerowave_core::sleep::SleepAction::Stop, None)?;
     println!("System-only and alarm display requests verified, including display release while the system remains awake and cleanup on drop.");
     println!("Unchanged active requests restored after a simulated Windows execution-state reset; no actual suspend or power-source transition performed.");
-    println!("Persistent alarm hold verified through snooze and dismissal, including release for explicit power actions and restoration after failure.");
+    println!("The system remained awake across repeated snoozes; the display released between rings, and both requests released when the alarm cycle ended.");
     println!("Wake timer armed, unchanged deadline retained, and canceled. No sleep or shutdown requested.");
     Ok(())
 }

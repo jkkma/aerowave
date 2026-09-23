@@ -49,7 +49,7 @@ pub struct SchedState {
     wake_at_ms: Option<i64>,
     wake_error: Option<String>,
     wake_hold: AlarmWakeHold,
-    reported_wake_hold: bool,
+    reported_alarm_awake: bool,
     power_committed: bool,
 }
 
@@ -85,12 +85,11 @@ pub struct PowerStatus {
 pub fn power_status(app: &AppHandle) -> PowerStatus {
     let capabilities = power::capabilities();
     let state = app.state::<AppState>();
-    let wake_enabled = state.store.data.lock().unwrap().settings.wake_for_alarms;
     let sched = state.sched.lock().unwrap();
     PowerStatus {
         capabilities,
         armed_at_ms: sched.wake_at_ms,
-        staying_awake: wake_enabled && sched.wake_hold.active(),
+        staying_awake: sched.reported_alarm_awake,
         error: sched.wake_error.clone(),
     }
 }
@@ -223,6 +222,10 @@ impl SchedState {
         self.wake_hold.set_enabled(enabled);
     }
 
+    fn active_alarm_cycle(&self) -> bool {
+        (self.ringing.is_some() && self.preview_alarm.is_none()) || !self.snoozed.is_empty()
+    }
+
     pub fn cancel_pending(&mut self, alarm_id: &str) {
         self.snoozed.remove(alarm_id);
         self.holds.release(alarm_id);
@@ -237,6 +240,9 @@ impl SchedState {
             self.preview_alarm = None;
             self.payload = None;
             self.ring_generation = self.ring_generation.wrapping_add(1);
+        }
+        if !self.active_alarm_cycle() {
+            self.wake_hold = AlarmWakeHold::default();
         }
     }
 }
@@ -450,7 +456,8 @@ fn surface_window(app: &AppHandle) {
 fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str, pending: &mut Option<PendingSource>) -> bool {
     let state = app.state::<AppState>();
     let (one_shot, sleep, generation, claimed_alarm) = {
-        // Claim the occurrence and wake hold before any filesystem request.
+        // Claim the occurrence and its bounded snooze hold before any
+        // filesystem request.
         let data = state.store.data.lock().unwrap();
         let mut sched = state.sched.lock().unwrap();
         let wake_enabled = cfg!(windows) && data.settings.wake_for_alarms;
@@ -481,8 +488,6 @@ fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str, pending: &mut Option<Pend
             .insert(alarm.id.clone(), now.format("%Y-%m-%d %H:%M").to_string());
         let one_shot = current.days.is_empty() && current.enabled;
         let claimed_alarm = current.clone();
-        // Ending the sound must not send an unattended alarm wake back to
-        // sleep. Preview alarms use a separate path and never claim this hold.
         sched.wake_hold.alarm_fired(wake_enabled);
         sched.sleep.cancel(SleepOutcome::Alarm);
         (one_shot, sched.sleep.clone(), sched.ring_generation, claimed_alarm)
@@ -566,6 +571,9 @@ pub fn dismiss(app: &AppHandle, alarm_id: &str, occurrence: u64, automatic: bool
         sched.ring_generation = sched.ring_generation.wrapping_add(1);
     }
     if sched.ringing.is_none() {
+        if sched.snoozed.is_empty() {
+            sched.wake_hold = AlarmWakeHold::default();
+        }
         #[cfg(desktop)]
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.set_always_on_top(false);
@@ -585,6 +593,7 @@ pub fn snooze(app: &AppHandle, alarm_id: &str, occurrence: u64, minutes: u32, au
         if !data.alarms.iter().any(|alarm| alarm.id == alarm_id) {
             return Err("that alarm is no longer saved".into());
         }
+        let wake_enabled = cfg!(windows) && data.settings.wake_for_alarms;
         let mut sched = state.sched.lock().unwrap();
         if sched
             .preview_alarm
@@ -600,6 +609,10 @@ pub fn snooze(app: &AppHandle, alarm_id: &str, occurrence: u64, minutes: u32, au
         sched
             .snoozed
             .insert(alarm_id.to_string(), schedule::Snooze::new(at));
+        // A manual snooze may overtake an automatic dismissal after the ring
+        // and its old hold were cleared. This accepted action starts a new
+        // active wait for the same occurrence.
+        sched.wake_hold.alarm_fired(wake_enabled);
         if sched.ringing.as_deref() == Some(alarm_id) {
             sched.ringing = None;
             sched.payload = None;
@@ -788,28 +801,32 @@ fn update_power(app: &AppHandle, power: &mut power::PowerManager) {
     } else {
         None
     };
-    let (plan, sleep_active, wake_hold) = {
+    let (plan, sleep_active) = {
         let mut sched = state.sched.lock().unwrap();
         let ringing = sched.ringing.is_some();
-        let plan = sched
-            .wake_hold
-            .plan(Local::now().timestamp_millis(), next, ringing, enabled);
-        (plan, sched.sleep.timer.is_some(), sched.wake_hold.active())
+        let snoozing = !sched.snoozed.is_empty();
+        let plan = sched.wake_hold.plan(
+            Local::now().timestamp_millis(), next, ringing, snoozing, enabled,
+        );
+        (plan, sched.sleep.timer.is_some())
     };
     let awake_result = power.keep_awake(plan.keep_awake || sleep_active, plan.keep_display_awake);
-    let result = power.sync_wake(plan.arm_at_ms);
-    let (wake_at_ms, wake_error) = match result {
-        Ok(()) => (plan.arm_at_ms, awake_result.err()),
-        Err(error) => (None, Some(error)),
+    let wake_result = power.sync_wake(plan.arm_at_ms);
+    let wake_at_ms = wake_result.as_ref().ok().and(plan.arm_at_ms);
+    let alarm_awake = cfg!(windows) && plan.keep_awake && awake_result.is_ok();
+    let wake_error = match (awake_result.err(), wake_result.err()) {
+        (Some(awake), Some(wake)) => Some(format!("{awake} {wake}")),
+        (Some(error), None) | (None, Some(error)) => Some(error),
+        (None, None) => None,
     };
     let changed = {
         let mut sched = state.sched.lock().unwrap();
         let changed = sched.wake_at_ms != wake_at_ms
             || sched.wake_error != wake_error
-            || sched.reported_wake_hold != wake_hold;
+            || sched.reported_alarm_awake != alarm_awake;
         sched.wake_at_ms = wake_at_ms;
         sched.wake_error = wake_error;
-        sched.reported_wake_hold = wake_hold;
+        sched.reported_alarm_awake = alarm_awake;
         changed
     };
     // Saving only unparks this thread. Notify after the Windows calls finish
@@ -834,12 +851,14 @@ fn finish_power_action(
     result: Result<(), String>,
 ) {
     let state = app.state::<AppState>();
+    let wake_enabled = cfg!(windows) && state.store.data.lock().unwrap().settings.wake_for_alarms;
     let failed = {
         let mut sched = state.sched.lock().unwrap();
         sched.power_committed = false;
-        sched
-            .wake_hold
-            .finish_power_action(wake_hold, action, result.is_ok());
+        let active_cycle = sched.active_alarm_cycle();
+        sched.wake_hold.finish_power_action(
+            wake_hold, action, result.is_ok(), active_cycle, wake_enabled,
+        );
         result
             .err()
             .filter(|error| sched.sleep.fail(revision, error.clone()))
@@ -855,13 +874,7 @@ fn poll_power_action(app: &AppHandle, pending: &mut Option<PendingPowerAction>) 
         return;
     };
     let completed = pending.take().unwrap();
-    finish_power_action(
-        app,
-        completed.action,
-        completed.revision,
-        completed.wake_hold,
-        result,
-    );
+    finish_power_action(app, completed.action, completed.revision, completed.wake_hold, result);
 }
 
 fn tick_sleep(
@@ -944,8 +957,9 @@ fn tick_sleep(
             // afterwards report that Windows is starting the action, rather
             // than reporting success for a cancellation they cannot honor.
             sched.power_committed = true;
-            // A later, explicit power timer is still allowed. Release only
-            // at dispatch, so selecting or cancelling one cannot lose the hold.
+            // S0 display-off must see the old snooze request released. A
+            // successful Sleep keeps it suppressed until a fresh ring claims
+            // the cycle; a failed action can restore it while still active.
             let wake_hold = std::mem::take(&mut sched.wake_hold);
             (sched.sleep.clone(), wake_hold)
         };
@@ -954,11 +968,18 @@ fn tick_sleep(
         // needs this thread to restore power requests and fire the alarm even
         // while the Windows call is still pending on the worker.
         // Modern Standby starts through display power-off, so a leftover
-        // system request could leave only the screen asleep. Keep the failure
-        // visible and restore the prior alarm hold instead of claiming sleep.
+        // system request could leave only the screen asleep. Keep a failed
+        // release visible instead of claiming sleep.
         if let Err(error) = power.keep_awake(false, false) {
             finish_power_action(app, action, committed.revision, wake_hold, Err(error));
             return;
+        }
+        let status_changed = {
+            let mut sched = state.sched.lock().unwrap();
+            std::mem::take(&mut sched.reported_alarm_awake)
+        };
+        if status_changed {
+            let _ = app.emit("power-status-updated", ());
         }
         match power::PendingAction::spawn(action, move |action| {
             power::execute(action, power_window)

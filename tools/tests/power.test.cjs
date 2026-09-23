@@ -358,20 +358,83 @@ test("the wake switch saves the preference without changing startup intent", asy
   assert.match(h.el("#power-status").textContent, /Wake for alarms is off/);
 });
 
-test("persistent alarm wake status clears with the preference and does not claim a failed request succeeded", async () => {
+test("alarm wake status ends with the active need and does not claim a failed request succeeded", async () => {
   let error = null;
+  let stayingAwake = true;
   const h = powerHarness({ invoke: command => command === "power_status"
-    ? { ...capabilities, stayingAwake: true, error } : undefined });
+    ? { ...capabilities, stayingAwake, error } : undefined });
   await h.evaluate("refreshPowerStatus()");
-  assert.match(h.el("#power-status").textContent, /Keeping this PC awake after an alarm/);
+  assert.match(h.el("#power-status").textContent, /Keeping this PC awake for an active alarm or snooze/);
+  stayingAwake = false;
+  await h.evaluate("refreshPowerStatus()");
+  assert.doesNotMatch(h.el("#power-status").textContent, /Keeping this PC awake/);
+  stayingAwake = true;
+  h.evaluate("state.settings.wakeForAlarms = false");
+  await h.evaluate("refreshPowerStatus()");
+  assert.match(h.el("#power-status").textContent, /Keeping this PC awake for an active alarm or snooze/);
+  error = "Windows refused the wake timer";
+  await h.evaluate("refreshPowerStatus()");
+  assert.match(h.el("#power-status").textContent, /Keeping this PC awake for an active alarm or snooze/);
+  assert.match(h.el("#power-status").textContent, /Windows refused the wake timer/);
   error = "Windows refused the keep-awake request";
+  stayingAwake = false;
   await h.evaluate("refreshPowerStatus()");
   assert.doesNotMatch(h.el("#power-status").textContent, /Keeping this PC awake/);
   assert.match(h.el("#power-status").textContent, /Windows refused/);
-  error = null;
+});
+
+test("Modern Standby timer registration remains a visible unverified wake warning", async () => {
+  const h = powerHarness({ invoke: command => {
+    if (command === "power_status") return { ...capabilities, wakeAllowed: null,
+      message: "This PC uses Modern Standby; automatic alarm wake is unverified.", armedAtMs: 1789019005000 };
+    if (command === "local_time") return wallTime;
+  } });
+  await h.evaluate("refreshPowerStatus()");
+  assert.equal(h.el("#wake-switch").disabled, false);
+  assert.equal(h.el("#power-status").classList.contains("bad"), true);
+  assert.match(h.el("#power-status").textContent, /Modern Standby.*unverified/);
+  assert.match(h.el("#power-status").textContent, /Wake request registered for/);
+  assert.match(h.el("#power-status").textContent, /does not confirm that this PC will wake/);
+  assert.doesNotMatch(h.el("#power-status").textContent, /Wake timer armed for/);
+
   h.evaluate("state.settings.wakeForAlarms = false");
   await h.evaluate("refreshPowerStatus()");
-  assert.doesNotMatch(h.el("#power-status").textContent, /Keeping this PC awake/);
+  assert.equal(h.el("#power-status").classList.contains("bad"), false);
+  assert.doesNotMatch(h.el("#power-status").textContent, /Wake request registered for/);
+});
+
+test("an unknown wake policy warns until Windows confirms it is enabled", async () => {
+  let status = { ...capabilities, wakeAllowed: null };
+  const h = powerHarness({ invoke: command => command === "power_status" ? status : undefined });
+  await h.evaluate("refreshPowerStatus()");
+  assert.equal(h.el("#power-status").classList.contains("bad"), true);
+  status = capabilities;
+  await h.evaluate("refreshPowerStatus()");
+  assert.equal(h.el("#power-status").classList.contains("bad"), false);
+});
+
+test("Sleep PC countdown warns when alarm wake is off or unconfirmed", async () => {
+  let status = { ...capabilities, wakeAllowed: null };
+  const h = powerHarness({ invoke: command => command === "power_status" ? status : undefined });
+  await h.evaluate("refreshPowerStatus()");
+  pendingPower(h, 10, "sleep");
+  assert.equal(h.el("#power-wake-warning").hidden, false);
+  assert.equal(h.el("#power-countdown").open, true);
+
+  status = capabilities;
+  await h.evaluate("refreshPowerStatus()");
+  h.evaluate("renderSleepTimer()");
+  assert.equal(h.el("#power-wake-warning").hidden, true);
+  status = { ...capabilities, error: "Windows refused the wake timer" };
+  await h.evaluate("refreshPowerStatus()");
+  h.evaluate("renderSleepTimer()");
+  assert.equal(h.el("#power-wake-warning").hidden, false);
+  status = capabilities;
+  await h.evaluate("refreshPowerStatus()");
+  h.evaluate("state.settings.wakeForAlarms = false; renderSleepTimer()");
+  assert.equal(h.el("#power-wake-warning").hidden, false);
+  pendingPower(h, 11, "shutdown");
+  assert.equal(h.el("#power-wake-warning").hidden, true);
 });
 
 test("a completed scheduler update replaces a previously successful wake status", async () => {

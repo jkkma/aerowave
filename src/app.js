@@ -3930,6 +3930,8 @@ function renderSleepTimer() {
     $("#sleep-left").textContent = sleepActionLabel(timer.action) + " · " + left + "s";
     $("#power-title").textContent = timer.action === "shutdown" ? "This PC will shut down" : "This PC will sleep";
     $("#power-seconds").textContent = left + "s";
+    $("#power-wake-warning").hidden = timer.action !== "sleep" ||
+      (state.settings.wakeForAlarms !== false && powerStatus?.wakeSupported === true && powerStatus.wakeAllowed === true && !powerStatus.error);
     const dialog = $("#power-countdown");
     if (!ringing && !dialog.open) {
       powerFocusBefore = document.activeElement;
@@ -3937,6 +3939,7 @@ function renderSleepTimer() {
       $("#power-error").classList.add("hidden");
       dialog.showModal();
       $("#power-cancel").focus();
+      refreshPowerStatus();
       say(sleepActionLabel(timer.action) + " in " + left + " seconds. Cancel or press Escape to keep this PC on.");
     }
     return;
@@ -4021,20 +4024,22 @@ function renderPowerStatus() {
   wake.disabled = !powerStatus.wakeSupported;
   const details = [];
   if (state.settings.wakeForAlarms === false) details.push("Wake for alarms is off.");
-  if (powerStatus.stayingAwake && state.settings.wakeForAlarms !== false && !powerStatus.error) {
-    details.push("Keeping this PC awake after an alarm. You can still put it to sleep manually.");
+  if (powerStatus.stayingAwake) {
+    details.push("Keeping this PC awake for an active alarm or snooze.");
   }
   if (powerStatus.message) details.push(powerStatus.message);
   if (powerStatus.armedAtMs != null && powerWakeTime && state.settings.wakeForAlarms !== false) {
     const when = powerWakeTime;
     const day = new Date(Date.UTC(when.year, when.month - 1, when.day))
       .toLocaleDateString(undefined, { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
-    details.push("Wake timer armed for " + day + ", " + fmtClock(when, false) + ".");
+    const confirmed = powerStatus.wakeSupported && powerStatus.wakeAllowed === true;
+    details.push((confirmed ? "Wake timer armed for " : "Wake request registered for ") + day + ", " + fmtClock(when, false) + ".");
+    if (!confirmed) details.push("Timer registration does not confirm that this PC will wake.");
   }
   if (powerStatus.error) details.push(powerStatus.error);
   const line = $("#power-status");
   line.textContent = details.join(" ") || "Wake status is unavailable.";
-  line.classList.toggle("bad", !!powerStatus.error || (state.settings.wakeForAlarms !== false && (!powerStatus.wakeSupported || powerStatus.wakeAllowed === false)));
+  line.classList.toggle("bad", !!powerStatus.error || (state.settings.wakeForAlarms !== false && (!powerStatus.wakeSupported || powerStatus.wakeAllowed !== true)));
 }
 
 async function refreshPowerStatus() {

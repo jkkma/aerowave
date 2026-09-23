@@ -344,11 +344,11 @@
         <li class="row toggle" data-setting="showMetadata"><span>Show song information</span><button class="sw" aria-pressed="true"></button></li>
         <li class="row toggle android-unavailable" data-setting="minimizeToTray"><span>Keep running when closed<em>Alarms stay active in the tray</em></span><button class="sw" aria-pressed="true"></button></li>
         <li class="row toggle android-unavailable" data-setting="startWithWindows"><span>Start at login<em>Start quietly in the tray</em></span><button class="sw" aria-pressed="false"></button></li>
-        <li class="row toggle android-unavailable" data-setting="wakeForAlarms"><span>Wake this PC for alarms<em>Keeps the PC awake after alarms</em></span><button class="sw" aria-pressed="true" aria-describedby="power-status power-help"></button></li>
+        <li class="row toggle android-unavailable" data-setting="wakeForAlarms"><span>Wake this PC for alarms<em>Wake before alarms and snoozes</em></span><button class="sw" aria-pressed="true" aria-describedby="power-status power-help"></button></li>
       </ul>
       <div class="power-info android-unavailable">
         <p class="editor-note" id="power-status" role="status">Checking PC wake support…</p>
-        <p id="power-help">Keep Aerowave running, including in the tray. After a real alarm, the PC stays awake even when the sound stops; the screen can turn off normally. Turn this setting off or quit Aerowave to restore automatic sleep. Manual Sleep and Shut down still work. Waking requires compatible hardware and Windows wake timers to be allowed. Alarms cannot wake a shut-down PC.</p>
+        <p id="power-help">Keep Aerowave running, including in the tray. With wake for alarms on, the PC stays awake through an alarm and its snoozes. The display can turn off between rings. After final dismissal or automatic stopping without another snooze, Windows can sleep normally unless another alarm or activity needs it awake. Each snooze also requests a wake timer in case you put the PC to sleep yourself. Waking requires compatible hardware and Windows wake timers to be allowed. Modern Standby wake is unverified; keep the PC awake for dependable alarms on those systems. Alarms cannot wake a shut-down PC.</p>
       </div>
       <div class="about">
         <p class="hud-mini desktop-only">Aerowave · Radio &amp; alarms</p>
@@ -376,12 +376,13 @@
 </footer>
 
 <!-- ============================ alarm overlay ========================= -->
-<dialog class="power-dialog panel bevel android-unavailable" id="power-countdown" aria-labelledby="power-title" aria-describedby="power-description">
+<dialog class="power-dialog panel bevel android-unavailable" id="power-countdown" aria-labelledby="power-title" aria-describedby="power-description power-wake-warning">
   <div class="hud-mini">Sleep timer finished</div>
   <h2 id="power-title">PC power action</h2>
   <div class="power-seconds" id="power-seconds" role="timer" aria-live="off"></div>
   <p id="power-description">Audio has stopped. Cancel to keep this PC on.</p>
   <button class="gel primary big-wide" id="power-cancel" autofocus>Cancel</button>
+  <p class="editor-note bad" id="power-wake-warning" hidden>Automatic alarm wake is off or unconfirmed. This PC may not wake for an alarm. Cancel to keep this PC on.</p>
   <p class="editor-note bad hidden" id="power-error" role="alert"></p>
   <p class="editor-note">Escape also cancels.</p>
 </dialog>

@@ -242,8 +242,9 @@ pub struct WakePlan {
     pub keep_display_awake: bool,
 }
 
-/// A real alarm leaves the system awake after ringing ends. This is separate
-/// from the transient wake plan so an explicit power timer can still run.
+/// A real alarm owns a system request through its snooze chain. The scheduler
+/// supplies whether that chain still has a ring or pending snooze; a completed
+/// cycle cannot leave a process-lifetime execution-state request behind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AlarmWakeHold {
     active: bool,
@@ -264,11 +265,19 @@ impl AlarmWakeHold {
         }
     }
 
-    /// Sleep returns after resume, but shutdown can report success before
-    /// another application aborts it. Keep the hold until process exit in
-    /// that case so an aborted shutdown cannot leave the PC idle-sleeping.
-    pub fn finish_power_action(&mut self, saved_hold: Self, action: SleepAction, succeeded: bool) {
-        if !succeeded || action == SleepAction::Shutdown {
+    /// Restore a saved request only while an alarm cycle is still active. A
+    /// newer ring has its own request and an older completion cannot clear it.
+    pub fn finish_power_action(
+        &mut self,
+        saved_hold: Self,
+        action: SleepAction,
+        succeeded: bool,
+        active_cycle: bool,
+        wake_enabled: bool,
+    ) {
+        if !wake_enabled || !active_cycle {
+            self.active = false;
+        } else if !succeeded || action == SleepAction::Shutdown {
             self.active |= saved_hold.active;
         }
     }
@@ -278,9 +287,12 @@ impl AlarmWakeHold {
         now_ms: i64,
         next_alarm_ms: Option<i64>,
         ringing: bool,
+        snoozing: bool,
         wake_enabled: bool,
     ) -> WakePlan {
-        self.set_enabled(wake_enabled);
+        if !wake_enabled || (!ringing && !snoozing) {
+            self.active = false;
+        }
         let mut plan = wake_plan(
             now_ms,
             if wake_enabled { next_alarm_ms } else { None },
@@ -713,146 +725,173 @@ mod tests {
     }
 
     #[test]
-    fn preparation_and_test_ringing_do_not_leave_a_wake_hold() {
+    fn dismiss_and_automatic_stop_release_the_last_alarm_hold() {
+        for ended_at in [300_000, 360_000] {
+            let mut hold = AlarmWakeHold::default();
+            hold.alarm_fired(true);
+            assert!(hold.plan(ended_at, None, true, false, true).keep_awake);
+            assert_eq!(
+                hold.plan(ended_at, None, false, false, true),
+                WakePlan {
+                    arm_at_ms: None,
+                    keep_awake: false,
+                    keep_display_awake: false,
+                }
+            );
+            assert!(!hold.active());
+        }
+    }
+
+    #[test]
+    fn snooze_keeps_the_system_but_releases_the_display_between_rings() {
+        let snooze_at = 9 * 60_000;
         let mut hold = AlarmWakeHold::default();
-        let preparing = hold.plan(0, Some(WAKE_LEAD_MS), false, true);
+        hold.alarm_fired(true);
+        assert!(hold.plan(0, None, true, false, true).keep_display_awake);
+        assert_eq!(
+            hold.plan(0, Some(snooze_at), false, true, true),
+            WakePlan {
+                arm_at_ms: Some(snooze_at - WAKE_LEAD_MS),
+                keep_awake: true,
+                keep_display_awake: false,
+            }
+        );
+        let preparing = hold.plan(snooze_at - WAKE_LEAD_MS, Some(snooze_at), false, true, true);
+        assert_eq!(preparing.arm_at_ms, Some(snooze_at));
+        assert!(preparing.keep_awake && preparing.keep_display_awake);
+        assert!(hold.plan(snooze_at, None, true, false, true).keep_awake);
+        // Automatic give-up can schedule another snooze from this ring.
+        let again = hold.plan(snooze_at + 1, Some(2 * snooze_at), false, true, true);
+        assert!(again.keep_awake && !again.keep_display_awake);
+        assert!(!hold.plan(2 * snooze_at + 1, None, false, false, true).keep_awake);
+    }
+
+    #[test]
+    fn preparation_and_test_ringing_do_not_claim_a_snooze_hold() {
+        let mut hold = AlarmWakeHold::default();
+        let preparing = hold.plan(0, Some(WAKE_LEAD_MS), false, false, true);
         assert!(preparing.keep_awake && preparing.keep_display_awake);
         assert!(!hold.active());
-        assert!(!hold.plan(1, None, false, true).keep_awake);
+        assert!(!hold.plan(1, None, false, false, true).keep_awake);
 
-        // TEST uses ringing protection but does not report a scheduled fire.
-        let testing = hold.plan(2, None, true, true);
+        // TEST protects its current ring without claiming a real occurrence.
+        let testing = hold.plan(2, None, true, false, true);
         assert!(testing.keep_awake && testing.keep_display_awake);
         assert!(!hold.active());
-        assert!(!hold.plan(3, None, false, true).keep_awake);
+        assert!(!hold.plan(3, None, false, false, true).keep_awake);
     }
 
     #[test]
-    fn a_real_alarm_holds_the_system_through_snooze_and_end_without_playback() {
+    fn an_active_snooze_hold_does_not_cancel_an_explicit_power_timer() {
         let mut hold = AlarmWakeHold::default();
         hold.alarm_fired(true);
-        assert!(hold.active());
-        let ringing = hold.plan(0, None, true, true);
-        assert!(ringing.keep_awake && ringing.keep_display_awake);
+        let snooze_at = 600_000;
+        assert!(hold.plan(61_000, Some(snooze_at), false, true, true).keep_awake);
+        let imminent = wake_plan(61_000, Some(snooze_at), false).keep_awake;
+        assert!(!imminent);
 
-        // The hold depends on the alarm firing, even if audio never starts.
-        let snoozed = hold.plan(120_000, Some(720_000), false, true);
-        assert!(snoozed.keep_awake);
-        assert!(!snoozed.keep_display_awake);
-        assert_eq!(snoozed.arm_at_ms, Some(675_000));
-        let ended = hold.plan(720_000, None, false, true);
-        assert!(ended.keep_awake);
-        assert!(!ended.keep_display_awake);
-        assert_eq!(ended.arm_at_ms, None);
-        assert!(hold.plan(86_400_000, None, false, true).keep_awake);
+        let mut sleep = timer(SleepAction::Sleep);
+        assert_eq!(sleep.advance(61_000, false, imminent, false), SleepEffect::Countdown);
+        assert_eq!(
+            sleep.advance(91_000, false, imminent, false),
+            SleepEffect::Execute(SleepAction::Sleep)
+        );
+        assert!(sleep.commit_power(sleep.revision));
+        let saved = std::mem::take(&mut hold);
+        assert!(!hold.plan(91_000, Some(snooze_at), false, true, true).keep_awake);
+        hold.finish_power_action(saved, SleepAction::Sleep, true, true, true);
+        assert!(!hold.plan(92_000, Some(snooze_at), false, true, true).keep_awake);
     }
 
     #[test]
-    fn disabling_wake_clears_the_hold_without_resurrecting_it_when_reenabled() {
+    fn turning_wake_off_clears_snooze_hold_but_protects_a_current_ring() {
         let mut hold = AlarmWakeHold::default();
         hold.alarm_fired(true);
-        let disabled = hold.plan(0, Some(300_000), false, false);
-        assert!(!hold.active());
-        assert!(!disabled.keep_awake && !disabled.keep_display_awake);
-        assert_eq!(disabled.arm_at_ms, None);
-        hold.alarm_fired(false);
-        assert!(!hold.active());
-        let reenabled = hold.plan(0, Some(300_000), false, true);
-        assert!(!reenabled.keep_awake && !reenabled.keep_display_awake);
-        assert_eq!(reenabled.arm_at_ms, Some(255_000));
-
-        // Disabling automatic wake does not remove a ringing alarm's
-        // short-lived protection.
-        let ringing = hold.plan(0, Some(300_000), true, false);
-        assert!(ringing.keep_awake && ringing.keep_display_awake);
-        assert_eq!(ringing.arm_at_ms, None);
-        assert!(!hold.active());
-    }
-
-    #[test]
-    fn disabling_and_reenabling_between_ticks_clears_the_old_hold() {
-        let mut hold = AlarmWakeHold::default();
-        hold.alarm_fired(true);
+        assert!(hold.plan(0, Some(300_000), false, true, true).keep_awake);
         hold.set_enabled(false);
         hold.set_enabled(true);
+        assert!(!hold.plan(0, Some(300_000), false, true, true).keep_awake);
+        let disabled_ring = hold.plan(0, Some(300_000), true, false, false);
+        assert!(disabled_ring.keep_awake && disabled_ring.keep_display_awake);
+        assert_eq!(disabled_ring.arm_at_ms, None);
         assert!(!hold.active());
-        let next_tick = hold.plan(0, Some(300_000), false, true);
-        assert!(!next_tick.keep_awake);
-        assert_eq!(next_tick.arm_at_ms, Some(255_000));
     }
 
     #[test]
-    fn a_held_system_still_allows_a_later_explicit_power_timer() {
-        for action in [SleepAction::Sleep, SleepAction::Shutdown] {
-            let mut hold = AlarmWakeHold::default();
-            hold.alarm_fired(true);
-            assert!(hold.plan(0, None, false, true).keep_awake);
-            let mut s = timer(action);
-            let alarm_imminent = wake_plan(61_000, None, false).keep_awake;
-            assert!(!alarm_imminent);
-            assert_eq!(
-                s.advance(61_000, false, alarm_imminent, false),
-                SleepEffect::Countdown
-            );
-            assert!(hold.active());
-            assert_eq!(
-                s.advance(91_000, false, false, false),
-                SleepEffect::Execute(action)
-            );
-            assert!(s.commit_power(s.revision));
-            let held_before_dispatch = std::mem::take(&mut hold);
-            assert!(!hold.plan(91_000, None, false, true).keep_awake);
+    fn unrelated_next_alarm_and_stale_snoozes_do_not_end_a_live_chain() {
+        use crate::schedule::{next_due_snooze, Snooze};
+        use std::collections::HashMap;
 
-            // A failed OS call restores the previous keep-awake request.
-            assert!(s.fail(s.revision, "Power action failed".into()));
-            hold.finish_power_action(held_before_dispatch, action, false);
-            assert!(hold.plan(92_000, None, false, true).keep_awake);
-        }
-    }
-
-    #[test]
-    fn accepted_shutdown_keeps_the_hold_in_case_shutdown_is_aborted() {
-        for (action, expected_hold) in [(SleepAction::Shutdown, true), (SleepAction::Sleep, false)]
-        {
-            let mut hold = AlarmWakeHold::default();
-            hold.alarm_fired(true);
-            let saved_hold = std::mem::take(&mut hold);
-            assert!(!hold.active());
-            hold.finish_power_action(saved_hold, action, true);
-            assert_eq!(
-                hold.plan(92_000, None, false, true).keep_awake,
-                expected_hold
-            );
-        }
-    }
-
-    #[test]
-    fn an_alarm_that_fires_before_sleep_returns_keeps_its_new_wake_hold() {
-        for previously_held in [false, true] {
-            for succeeded in [false, true] {
-                let mut hold = AlarmWakeHold::default();
-                hold.alarm_fired(previously_held);
-                let before_sleep = std::mem::take(&mut hold);
-                hold.alarm_fired(true);
-                hold.finish_power_action(before_sleep, SleepAction::Sleep, succeeded);
-                assert!(hold.plan(300_000, None, false, true).keep_awake);
-            }
-        }
-    }
-
-    #[test]
-    fn selecting_cancelling_or_finishing_stop_timers_preserves_the_hold() {
         let mut hold = AlarmWakeHold::default();
         hold.alarm_fired(true);
-        let mut s = timer(SleepAction::Sleep);
-        assert!(hold.plan(1_000, None, false, true).keep_awake);
-        assert!(s.cancel(SleepOutcome::Cancelled));
-        assert!(hold.plan(2_000, None, false, true).keep_awake);
-        s.start(2_000, 1, SleepAction::Stop).unwrap();
-        assert_eq!(
-            s.advance(62_000, false, false, false),
-            SleepEffect::Execute(SleepAction::Stop)
-        );
-        assert!(hold.plan(62_000, None, false, true).keep_awake);
+        let mut pending = HashMap::from([
+            ("first".to_string(), Snooze::new(100)),
+            ("second".to_string(), Snooze::new(30_000)),
+        ]);
+        let (_, stale) = next_due_snooze(&mut pending, 20_000, false);
+        assert_eq!(stale, vec!["first"]);
+        // Another scheduled alarm can be earlier than the surviving snooze.
+        let plan = hold.plan(20_000_000, Some(21_000_000), false, !pending.is_empty(), true);
+        assert!(plan.keep_awake && !plan.keep_display_awake);
+        assert_eq!(plan.arm_at_ms, Some(20_955_000));
+
+        let (_, stale) = next_due_snooze(&mut pending, 50_000, false);
+        assert_eq!(stale, vec!["second"]);
+        assert!(pending.is_empty());
+        assert!(!hold.plan(50_000_000, None, false, false, true).keep_awake);
+    }
+
+    #[test]
+    fn power_completion_restores_only_an_active_pending_chain() {
+        for (action, succeeded, restore) in [
+            (SleepAction::Sleep, true, false),
+            (SleepAction::Sleep, false, true),
+            (SleepAction::Shutdown, true, true),
+        ] {
+            let mut hold = AlarmWakeHold::default();
+            hold.alarm_fired(true);
+            let saved = std::mem::take(&mut hold);
+            assert!(!hold.plan(0, Some(600_000), false, true, true).keep_awake);
+            hold.finish_power_action(saved, action, succeeded, true, true);
+            assert_eq!(hold.plan(0, Some(600_000), false, true, true).keep_awake, restore);
+
+            let mut ended = AlarmWakeHold::default();
+            ended.finish_power_action(saved, action, succeeded, false, true);
+            assert!(!ended.plan(0, None, false, false, true).keep_awake);
+            let mut disabled = AlarmWakeHold::default();
+            disabled.finish_power_action(saved, action, succeeded, true, false);
+            assert!(!disabled.active());
+        }
+    }
+
+    #[test]
+    fn old_power_completion_never_clears_a_newer_ring() {
+        let mut hold = AlarmWakeHold::default();
+        hold.alarm_fired(true);
+        let saved = std::mem::take(&mut hold);
+        hold.alarm_fired(true);
+        for succeeded in [true, false] {
+            let mut current = hold;
+            current.finish_power_action(saved, SleepAction::Sleep, succeeded, true, true);
+            assert!(current.plan(0, None, true, false, true).keep_awake);
+            let snoozed = current.plan(1, Some(600_000), false, true, true);
+            assert!(snoozed.keep_awake && !snoozed.keep_display_awake);
+        }
+    }
+
+    #[test]
+    fn manual_snooze_after_automatic_dismiss_reclaims_the_hold() {
+        use crate::ring::{RingAction, RingActions};
+
+        let mut actions = RingActions::default();
+        actions.begin("alarm", 7, false, 1);
+        let mut hold = AlarmWakeHold::default();
+        hold.alarm_fired(true);
+        assert!(actions.complete("alarm", 7, RingAction::Dismiss, true).unwrap());
+        assert!(!hold.plan(0, None, false, false, true).keep_awake);
+        assert!(actions.complete("alarm", 7, RingAction::Snooze, false).unwrap());
+        hold.alarm_fired(true);
+        let snoozed = hold.plan(1, Some(600_000), false, true, true);
+        assert!(snoozed.keep_awake && !snoozed.keep_display_awake);
     }
 }
