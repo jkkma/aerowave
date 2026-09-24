@@ -4,6 +4,7 @@
 //! and everything that has to keep working while the window is hidden. The
 //! webview owns playback and the face.
 
+mod backup;
 mod browse;
 mod hls;
 mod library;
@@ -32,6 +33,7 @@ use tauri_plugin_dialog::DialogExt;
 
 use aerowave_core::sleep::{SleepAction, SleepSnapshot};
 use aerowave_core::window_action::{Action as WindowAction, Requests as WindowActionRequests};
+use backup::{create_backup, inspect_backup, read_backup_file, read_recovery_backup, restore_backup, save_backup_file};
 use library::{FolderInfo, RecentTracks};
 use scheduler::{FirePayload, NextAlarm};
 use store::{Alarm, AppData, Settings, Station, Store};
@@ -129,7 +131,18 @@ fn save_alarms(app: AppHandle, state: State<AppState>, alarms: Vec<Alarm>) -> Re
     require_desktop_feature()?;
     let _power_update = state.power_updates.lock().unwrap();
     scheduler::ensure_power_idle(&app)?;
-    state.store.update_with(|candidate| candidate.alarms = alarms, |current, candidate| {
+    state.store.update_with(|candidate| {
+        let mut alarms = alarms;
+        for alarm in &mut alarms {
+            alarm.skip_date = candidate.alarms.iter().find(|old| {
+                old.id == alarm.id && aerowave_core::schedule::skip_survives_edit(
+                    old.enabled, old.hour, old.minute, &old.days,
+                    alarm.enabled, alarm.hour, alarm.minute, &alarm.days,
+                )
+            }).and_then(|old| old.skip_date.clone());
+        }
+        candidate.alarms = alarms;
+    }, |current, candidate| {
         let previous: Vec<_> = current.alarms.iter().map(|a| (a.id.as_str(), a.enabled)).collect();
         let next: Vec<_> = candidate.alarms.iter().map(|a| (a.id.as_str(), a.enabled)).collect();
         let cancelled = aerowave_core::schedule::cancelled_alarms(&previous, &next);
@@ -142,6 +155,39 @@ fn save_alarms(app: AppHandle, state: State<AppState>, alarms: Vec<Alarm>) -> Re
     scheduler::refresh(&app);
     let _ = app.emit("alarms-updated", ());
     Ok(())
+}
+
+#[tauri::command]
+fn alarm_occurrences(app: AppHandle) -> Result<Vec<scheduler::AlarmOccurrence>, String> {
+    require_desktop_feature()?;
+    Ok(scheduler::alarm_occurrences(&app))
+}
+
+#[tauri::command]
+fn skip_alarm(app: AppHandle, state: State<AppState>, id: String, skip: bool, expected_at_ms: i64) -> Result<Vec<Alarm>, String> {
+    require_desktop_feature()?;
+    let _power_update = state.power_updates.lock().unwrap();
+    scheduler::ensure_power_idle(&app)?;
+    let mut saved = Vec::new();
+    state.store.update_checked_with(|candidate| {
+        let alarm = candidate.alarms.iter_mut().find(|alarm| alarm.id == id)
+            .ok_or_else(|| "That alarm is no longer saved".to_string())?;
+        if !alarm.enabled || alarm.days.is_empty() {
+            return Err("Only enabled repeating alarms can skip an occurrence".into());
+        }
+        alarm.skip_date = aerowave_core::schedule::skip_change(
+            alarm.hour, alarm.minute, &alarm.days, alarm.skip_date.as_deref(),
+            &chrono::Local::now(), skip, expected_at_ms,
+            |key| state.sched.lock().unwrap().fired_at_key(&id, key),
+        ).map_err(str::to_string)?;
+        Ok(())
+    }, |current, candidate| {
+        saved = candidate.alarms.clone();
+        *current = candidate;
+    })?;
+    scheduler::refresh(&app);
+    let _ = app.emit("alarms-updated", ());
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -395,6 +441,18 @@ async fn random_track(app: AppHandle, state: State<'_, AppState>, path: String) 
             .unwrap_or_default(),
         path: track.to_string_lossy().to_string(),
         total,
+    })
+}
+
+/// A readiness check must not consume the shuffle history used by real listening.
+#[tauri::command]
+async fn preview_track(app: AppHandle, state: State<'_, AppState>, path: String) -> Result<TrackPick, String> {
+    require_desktop_feature()?;
+    let picked = pick_track(&app, &state, &path, false).await?;
+    Ok(TrackPick {
+        name: picked.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        path: picked.path.to_string_lossy().to_string(),
+        total: picked.total,
     })
 }
 
@@ -1071,14 +1129,23 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            create_backup,
+            inspect_backup,
+            read_backup_file,
+            read_recovery_backup,
+            save_backup_file,
+            restore_backup,
             get_state,
             local_time,
             save_stations,
             save_alarms,
+            alarm_occurrences,
+            skip_alarm,
             save_settings,
             pick_folder,
             folder_info,
             random_track,
+            preview_track,
             backup_track,
             probe_stream,
             relay_url,

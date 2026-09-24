@@ -17,6 +17,7 @@ Allows Aerowave to control its Android background radio player.
 - `allow-get-sleep-timer`
 - `allow-sync-alarms`
 - `allow-get-alarm-state`
+- `allow-skip-alarm`
 - `allow-snooze-alarm`
 - `allow-dismiss-alarm`
 - `allow-test-alarm`
@@ -24,6 +25,8 @@ Allows Aerowave to control its Android background radio player.
 - `allow-pick-folder`
 - `allow-folder-info`
 - `allow-random-track`
+- `allow-read-backup-file`
+- `allow-save-backup-file`
 
 ## Permission Table
 
@@ -323,6 +326,58 @@ Denies the random_track command without any pre-configured scope.
 <tr>
 <td>
 
+`android-audio:allow-read-backup-file`
+
+</td>
+<td>
+
+Enables the read_backup_file command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-read-backup-file`
+
+</td>
+<td>
+
+Denies the read_backup_file command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-restore-alarms`
+
+</td>
+<td>
+
+Enables the restore_alarms command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-restore-alarms`
+
+</td>
+<td>
+
+Denies the restore_alarms command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `android-audio:allow-resume`
 
 </td>
@@ -342,6 +397,32 @@ Enables the resume command without any pre-configured scope.
 <td>
 
 Denies the resume command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-save-backup-file`
+
+</td>
+<td>
+
+Enables the save_backup_file command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-save-backup-file`
+
+</td>
+<td>
+
+Denies the save_backup_file command without any pre-configured scope.
 
 </td>
 </tr>
@@ -420,6 +501,32 @@ Enables the set_volume command without any pre-configured scope.
 <td>
 
 Denies the set_volume command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-skip-alarm`
+
+</td>
+<td>
+
+Enables the skip_alarm command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-skip-alarm`
+
+</td>
+<td>
+
+Denies the skip_alarm command without any pre-configured scope.
 
 </td>
 </tr>

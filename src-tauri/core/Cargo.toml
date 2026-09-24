@@ -1,6 +1,6 @@
 [package]
 name = "aerowave-core"
-version = "0.12.6"
+version = "0.13.0"
 edition = "2021"
 license = "MIT"
 description = "Parsing and scheduling rules, with no GUI dependencies so they can be unit tested"
@@ -14,8 +14,9 @@ lofty = { version = "=0.21.1", default-features = false }
 # 0.40 raised its MSRV above Aerowave's Rust 1.77 floor.
 quick-xml = "=0.39.4"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
 
 [dev-dependencies]
 # Real DST transitions for the scheduling tests; FixedOffset cannot express one.
 chrono-tz = "0.10"
-serde_json = "1"

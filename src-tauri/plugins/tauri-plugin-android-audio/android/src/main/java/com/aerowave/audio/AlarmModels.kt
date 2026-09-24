@@ -21,6 +21,7 @@ internal data class NativeAlarm(
   val snoozeMins: Int,
   val autoStopMins: Int,
   val autoSnoozes: Int,
+  val skipDate: String? = null,
 )
 
 internal data class NativeStation(val id: String, val name: String, val url: String)
@@ -82,6 +83,7 @@ internal fun NativeAlarm.toJson(): JSONObject = JSONObject().apply {
   put("snoozeMins", snoozeMins)
   put("autoStopMins", autoStopMins)
   put("autoSnoozes", autoSnoozes)
+  put("skipDate", skipDate)
 }
 
 internal fun alarmFromJson(value: JSONObject): NativeAlarm {
@@ -114,6 +116,9 @@ internal fun alarmFromJson(value: JSONObject): NativeAlarm {
     snoozeMins = value.optInt("snoozeMins", 10).coerceAtLeast(1),
     autoStopMins = value.optInt("autoStopMins", 30).coerceAtLeast(0),
     autoSnoozes = value.optInt("autoSnoozes", 0).coerceAtLeast(0),
+    skipDate = value.optNullableString("skipDate")?.also {
+      require(java.time.LocalDate.parse(it).toString() == it) { "Alarm skip date is invalid" }
+    },
   )
 }
 

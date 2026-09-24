@@ -6,8 +6,8 @@ use tauri::{
 use crate::models::{
     AlarmIdPayload, AlarmSettingsPayload, AlarmState, ArtworkPayload, FolderInfo,
     FolderPathPayload, MetadataEnabledPayload, PlayPayload, PlaybackState, RandomTrackPayload,
-    SleepTimerPayload, SleepTimerSnapshot, StreamTitlePayload, SyncAlarmsPayload, TestAlarmPayload,
-    TrackPick, VolumePayload,
+    SaveBackupFilePayload, SkipAlarmPayload, SleepTimerPayload, SleepTimerSnapshot,
+    StreamTitlePayload, SyncAlarmsPayload, TestAlarmPayload, TrackPick, VolumePayload,
 };
 use serde::Serialize;
 
@@ -18,6 +18,23 @@ struct NativeAlarmSync {
     expected_revision: Option<u64>,
     stations_json: String,
     backup_folder: Option<String>,
+}
+
+impl TryFrom<SyncAlarmsPayload> for NativeAlarmSync {
+    type Error = String;
+
+    fn try_from(payload: SyncAlarmsPayload) -> Result<Self, Self::Error> {
+        Ok(Self {
+            expected_revision: payload.expected_revision,
+            alarms_json: payload
+                .alarms
+                .map(|v| serde_json::to_string(&v))
+                .transpose()
+                .map_err(|e| e.to_string())?,
+            stations_json: serde_json::to_string(&payload.stations).map_err(|e| e.to_string())?,
+            backup_folder: payload.backup_folder,
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -120,24 +137,28 @@ impl<R: Runtime> AndroidAudio<R> {
     }
 
     pub fn sync_alarms(&self, payload: SyncAlarmsPayload) -> Result<AlarmState, String> {
-        let native = NativeAlarmSync {
-            expected_revision: payload.expected_revision,
-            alarms_json: payload
-                .alarms
-                .map(|v| serde_json::to_string(&v))
-                .transpose()
-                .map_err(|e| e.to_string())?,
-            stations_json: serde_json::to_string(&payload.stations).map_err(|e| e.to_string())?,
-            backup_folder: payload.backup_folder,
-        };
+        let native = NativeAlarmSync::try_from(payload)?;
         self.0
             .run_mobile_plugin("syncAlarms", native)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn restore_alarms(&self, payload: SyncAlarmsPayload) -> Result<AlarmState, String> {
+        let native = NativeAlarmSync::try_from(payload)?;
+        self.0
+            .run_mobile_plugin("restoreAlarms", native)
             .map_err(|e| e.to_string())
     }
 
     pub fn get_alarm_state(&self) -> Result<AlarmState, String> {
         self.0
             .run_mobile_plugin("getAlarmState", ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn skip_alarm(&self, payload: SkipAlarmPayload) -> Result<AlarmState, String> {
+        self.0
+            .run_mobile_plugin("skipAlarm", payload)
             .map_err(|e| e.to_string())
     }
 
@@ -183,6 +204,21 @@ impl<R: Runtime> AndroidAudio<R> {
     pub fn random_track(&self, payload: RandomTrackPayload) -> Result<TrackPick, String> {
         self.0
             .run_mobile_plugin("randomTrack", payload)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn read_backup_file(&self) -> Result<Option<String>, String> {
+        self.0
+            .run_mobile_plugin("readBackupFile", ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn save_backup_file(
+        &self,
+        payload: SaveBackupFilePayload,
+    ) -> Result<Option<String>, String> {
+        self.0
+            .run_mobile_plugin("saveBackupFile", payload)
             .map_err(|e| e.to_string())
     }
 }

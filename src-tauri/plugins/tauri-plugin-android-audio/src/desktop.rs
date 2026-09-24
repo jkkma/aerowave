@@ -5,8 +5,8 @@ use tauri::{plugin::PluginApi, AppHandle, Runtime};
 use crate::models::{
     AlarmIdPayload, AlarmSettingsPayload, AlarmState, ArtworkPayload, FolderInfo,
     FolderPathPayload, MetadataEnabledPayload, PlayPayload, PlaybackState, RandomTrackPayload,
-    SleepTimerPayload, SleepTimerSnapshot, SyncAlarmsPayload, TestAlarmPayload, TrackPick,
-    VolumePayload,
+    SaveBackupFilePayload, SkipAlarmPayload, SleepTimerPayload, SleepTimerSnapshot,
+    SyncAlarmsPayload, TestAlarmPayload, TrackPick, VolumePayload,
 };
 
 pub struct AndroidAudio<R: Runtime>(PhantomData<fn() -> R>);
@@ -73,8 +73,15 @@ impl<R: Runtime> AndroidAudio<R> {
         Err("Android alarms are only available on Android".into())
     }
 
+    pub fn restore_alarms(&self, _payload: SyncAlarmsPayload) -> Result<AlarmState, String> {
+        Err("Android alarms are only available on Android".into())
+    }
+
     pub fn get_alarm_state(&self) -> Result<AlarmState, String> {
         Ok(AlarmState::default())
+    }
+    pub fn skip_alarm(&self, _payload: SkipAlarmPayload) -> Result<AlarmState, String> {
+        Err("Android alarms are only available on Android".into())
     }
     pub fn snooze_alarm(&self, _payload: AlarmIdPayload) -> Result<AlarmState, String> {
         Err("Android alarms are only available on Android".into())
@@ -99,5 +106,14 @@ impl<R: Runtime> AndroidAudio<R> {
     }
     pub fn random_track(&self, _payload: RandomTrackPayload) -> Result<TrackPick, String> {
         Err("Android folders are only available on Android".into())
+    }
+    pub fn read_backup_file(&self) -> Result<Option<String>, String> {
+        Err("Android documents are only available on Android".into())
+    }
+    pub fn save_backup_file(
+        &self,
+        _payload: SaveBackupFilePayload,
+    ) -> Result<Option<String>, String> {
+        Err("Android documents are only available on Android".into())
     }
 }

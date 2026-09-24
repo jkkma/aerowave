@@ -12,6 +12,8 @@ const COMMANDS: &[&str] = &[
     "get_sleep_timer",
     "sync_alarms",
     "get_alarm_state",
+    "restore_alarms",
+    "skip_alarm",
     "snooze_alarm",
     "dismiss_alarm",
     "test_alarm",
@@ -19,6 +21,8 @@ const COMMANDS: &[&str] = &[
     "pick_folder",
     "folder_info",
     "random_track",
+    "read_backup_file",
+    "save_backup_file",
 ];
 
 fn main() {

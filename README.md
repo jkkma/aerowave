@@ -17,6 +17,14 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   leaving the saved order intact. Each row has separate listen, favourite and
   edit controls; Discover stations opens Browse. The station editor keeps its
   actions and stream-test feedback visible while the fields scroll.
+- **Recent** keeps the last 20 stations that actually started playing, newest
+  first, including stations tried in Browse. Unsaved discoveries can be saved
+  from that list. History survives restarting the app and travels with backups.
+- **Reorder** reveals up/down controls for the saved station order. Moves save
+  before the list changes; a failed write leaves the previous order intact.
+  Search and A–Z sorting remain separate views of the saved collection.
+- The main tabs support Left/Right (including wraparound), Home and End, with
+  one tab stop for the active tab.
 - **Ordinary stations play through a local relay, not straight off the web.** A
   media element cannot choose its own request headers, cannot see an ICY
   response, and cannot follow a playlist. Rust binds a listener on `127.0.0.1`,
@@ -312,8 +320,26 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 
 **Alarms**
 
+- The next-alarm card brings the scheduled time, source, backup music and
+  platform wake or permission status together. Check source and Check backup
+  run only when requested, without replacing the current listening session.
+  Desktop checks use a muted decoder; a folder check samples one track without
+  consuming shuffle history. Android checks report server or folder availability,
+  not native decoding. Results expire after five minutes and are discarded when
+  their source or occurrence changes. These checks cover current conditions;
+  they do not establish speaker volume, future network access or unattended wake.
+  Use Test in the alarm editor to hear an alarm through the normal playback path.
 - Any number of them, each with its own time, repeat days, source, volume,
   fade-in, snooze length, give-up timeout and auto-snooze.
+- **Skip next** on a repeating alarm skips one scheduled date without turning
+  off the routine. The card shows the skipped date and the following ring;
+  **Undo skip** restores it before its scheduled time. Skips survive a restart,
+  and snoozes keep their own timer. Changing the time or repeat days, or turning
+  the alarm off, clears its skip.
+- **Duplicate** opens an editable copy of an alarm. Its time, repeat days,
+  source, volume and snooze settings are carried over; skipped dates are not.
+  The copy is saved only when you choose Save alarm, and the original stays
+  unchanged. A copy of an alarm that is off also starts off.
 - A ringing alarm keeps going until you dismiss it, or until its give-up
   timeout: anything from a minute to two hours, or `never` to make dismissing
   it the only way to stop it. It does not fall quiet between tracks either -
@@ -554,6 +580,17 @@ at, and prints its SHA-256.
 
 ## Notes and limits
 
+- **Backup & restore** in Settings exports a versioned JSON file containing
+  stations, alarms, preferences, and recent stations. Restore validates the
+  file and previews its counts before replacing the setup. Imported alarms
+  start off and skipped occurrences are cleared; review folders and alarms
+  before enabling them. Startup, PC wake, and sleep-action choices stay local.
+  A recovery copy is kept before replacement and can be previewed with
+  **Previous setup**. Export uses a new file so older backups are preserved.
+  Android uses its system document picker; folder access does not transfer
+  between devices. Its alarm store and settings file are separate: if the
+  final settings commit fails after native restore, the error gives the
+  recovery location and asks for a retry, while imported alarms remain off.
 - Closing the window hides it to the tray by default, so alarms keep working.
   Turn that off in Settings, or use Quit Aerowave to really exit. Alarms only ring
   while Aerowave is running. Close and Quit finish pending settings saves first,

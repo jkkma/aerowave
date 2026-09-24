@@ -4,7 +4,8 @@
 //! temp file first and are renamed over the original, so a crash mid-write
 //! cannot leave a half-written config behind.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -62,6 +63,9 @@ pub struct Alarm {
     pub days: Vec<u32>,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// One local YYYY-MM-DD occurrence to omit from an enabled recurring alarm.
+    #[serde(default)]
+    pub skip_date: Option<String>,
     #[serde(default)]
     pub source: AlarmSource,
     #[serde(default = "default_volume")]
@@ -129,6 +133,9 @@ pub struct Settings {
     pub volume: f64,
     #[serde(default)]
     pub last_station: Option<String>,
+    /// Recent listening history includes stations that were never saved.
+    #[serde(default)]
+    pub recent_stations: Vec<Station>,
     /// Played when an alarm's own source will not make a sound.
     #[serde(default)]
     pub backup_folder: Option<String>,
@@ -156,6 +163,7 @@ impl Default for Settings {
             wake_for_alarms: true,
             volume: 0.8,
             last_station: None,
+            recent_stations: Vec::new(),
             backup_folder: None,
             shuffle_folder: None,
             minimize_to_tray: true,
@@ -305,10 +313,22 @@ impl Store {
     }
 
     fn write_snapshot(&self, data: &AppData) -> Result<(), String> {
+        let tmp = self.stage_snapshot(data)?;
+        self.commit_staged(&tmp)
+    }
+
+    fn stage_snapshot(&self, data: &AppData) -> Result<PathBuf, String> {
         let json = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
         let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, json).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        fs::rename(&tmp, &self.path).map_err(|e| format!("rename config: {e}"))
+        let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(&tmp)
+            .map_err(|e| format!("open {}: {e}", tmp.display()))?;
+        file.write_all(json.as_bytes()).and_then(|_| file.sync_all())
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        Ok(tmp)
+    }
+
+    fn commit_staged(&self, tmp: &std::path::Path) -> Result<(), String> {
+        fs::rename(tmp, &self.path).map_err(|e| format!("rename config: {e}"))
     }
 
     /// A failed Add must not enter memory and hitch a ride on the next save.
@@ -328,16 +348,120 @@ impl Store {
         F: FnOnce(&mut AppData),
         C: FnOnce(&mut AppData, AppData),
     {
+        self.update_checked_with(|candidate| { change(candidate); Ok(()) }, commit)
+    }
+
+    /// Validate and stage under the same writer lock as persistence. A rejected
+    /// change leaves both the file and scheduler-visible data untouched.
+    pub fn update_checked_with<F, C>(&self, change: F, commit: C) -> Result<(), String>
+    where
+        F: FnOnce(&mut AppData) -> Result<(), String>,
+        C: FnOnce(&mut AppData, AppData),
+    {
         let _writing = self.write_lock.lock().unwrap();
         let mut staged = self.snapshot();
+        change(&mut staged)?;
         aerowave_core::persistence::update_with(
             &mut staged,
-            change,
+            |_| {},
             |candidate| self.write_snapshot(candidate),
             |_, candidate| {
                 let mut data = self.data.lock().unwrap();
                 commit(&mut data, candidate);
             },
         )
+    }
+
+    /// Restore under the writer lock. Keep the previous full state beside the
+    /// config before another system (Android's alarm store) is changed.
+    /// Stage and sync the candidate before the callback changes native alarms.
+    /// Only the final rename then remains as a cross-store failure point.
+    pub fn restore_with<F, C>(
+        &self,
+        mut imported: AppData,
+        recovery_alarms: Option<Vec<Alarm>>,
+        before_write: F,
+        commit: C,
+    ) -> Result<(AppData, PathBuf), String>
+    where
+        F: FnOnce(&AppData, &PathBuf) -> Result<(), String>,
+        C: FnOnce(&mut AppData, AppData),
+    {
+        let _writing = self.write_lock.lock().unwrap();
+        let current = self.snapshot();
+        let mut recovery = current.clone();
+        if let Some(alarms) = recovery_alarms { recovery.alarms = alarms; }
+        let recovery_data = serde_json::to_value(&recovery).map_err(|e| e.to_string())?;
+        let recovery_content = aerowave_core::backup::encode(&recovery_data)?;
+        let recovery_path = self.write_recovery(&recovery_content)?;
+        // The clock may move backward between restores. Record creation order
+        // durably before changing either store, and never rely on file names
+        // to find the latest completed recovery copy.
+        self.write_latest_recovery_pointer(&recovery_path).map_err(|e| format!(
+            "{e}. Restore stopped before changing settings or alarms. Recovery backup: {}",
+            recovery_path.display()
+        ))?;
+
+        imported.settings.start_with_windows = current.settings.start_with_windows;
+        imported.settings.wake_for_alarms = current.settings.wake_for_alarms;
+        imported.settings.sleep_timer_action = current.settings.sleep_timer_action;
+        let staged_path = self.stage_snapshot(&imported).map_err(|e| format!(
+            "Restore could not stage settings ({e}). Settings and alarms are unchanged. Recovery backup: {}",
+            recovery_path.display()
+        ))?;
+        before_write(&imported, &recovery_path)?;
+        self.commit_staged(&staged_path).map_err(|e| format!(
+            "Restore could not save settings ({e}). Recovery backup: {}. On Android, imported alarms may already be disabled; retry the import.",
+            recovery_path.display()
+        ))?;
+        let mut data = self.data.lock().unwrap();
+        commit(&mut data, imported);
+        Ok((data.clone(), recovery_path))
+    }
+
+    fn write_recovery(&self, content: &str) -> Result<PathBuf, String> {
+        let stamp = Local::now().format("%Y%m%d-%H%M%S");
+        for suffix in 0..100 {
+            let path = self.path.with_file_name(format!("aerowave.before-restore-{stamp}-{suffix}.json"));
+            let file = OpenOptions::new().write(true).create_new(true).open(&path);
+            let mut file = match file {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("Could not create recovery backup: {e}")),
+            };
+            file.write_all(content.as_bytes()).and_then(|_| file.sync_all())
+                .map_err(|e| format!("Could not finish recovery backup {}: {e}", path.display()))?;
+            return Ok(path);
+        }
+        Err("Could not choose a unique recovery backup name".into())
+    }
+
+    fn write_latest_recovery_pointer(&self, recovery_path: &std::path::Path) -> Result<(), String> {
+        let name = recovery_path.file_name().and_then(|n| n.to_str())
+            .filter(|name| aerowave_core::backup::recovery_pointer_target(name).is_some())
+            .ok_or_else(|| "Recovery backup name is invalid".to_string())?;
+        let pointer = self.path.with_file_name("aerowave.latest-recovery");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        for suffix in 0..100 {
+            let staged = self.path.with_file_name(format!(
+                "aerowave.latest-recovery-{}-{nonce}-{suffix}.tmp",
+                std::process::id()
+            ));
+            let file = OpenOptions::new().write(true).create_new(true).open(&staged);
+            let mut file = match file {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("Could not stage recovery pointer: {e}")),
+            };
+            file.write_all(name.as_bytes()).and_then(|_| file.sync_all())
+                .map_err(|e| format!("Could not sync recovery pointer: {e}"))?;
+            fs::rename(&staged, &pointer)
+                .map_err(|e| format!("Could not record latest recovery backup: {e}"))?;
+            return Ok(());
+        }
+        Err("Could not choose a unique recovery pointer name".into())
     }
 }

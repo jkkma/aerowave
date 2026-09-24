@@ -13,8 +13,9 @@ use mobile::AndroidAudio;
 pub use models::{
     AlarmDefinition, AlarmIdPayload, AlarmSettingsPayload, AlarmSource, AlarmState, AlarmStation,
     ArtworkPayload, FolderInfo, FolderPathPayload, MetadataEnabledPayload, PlayPayload,
-    PlaybackState, RandomTrackPayload, SleepTimer, SleepTimerPayload, SleepTimerSnapshot,
-    SyncAlarmsPayload, TestAlarmPayload, TrackPick, VolumePayload,
+    PlaybackState, RandomTrackPayload, SaveBackupFilePayload, SkipAlarmPayload, SleepTimer,
+    SleepTimerPayload, SleepTimerSnapshot, SyncAlarmsPayload, TestAlarmPayload, TrackPick,
+    VolumePayload,
 };
 
 use tauri::{
@@ -118,7 +119,32 @@ fn sync_alarms<R: Runtime>(
 }
 #[tauri::command]
 fn get_alarm_state<R: Runtime>(app: AppHandle<R>) -> Result<AlarmState, String> {
+    android_alarm_state(&app)
+}
+
+pub fn android_alarm_state<R: Runtime>(app: &AppHandle<R>) -> Result<AlarmState, String> {
     app.state::<AndroidAudio<R>>().get_alarm_state()
+}
+#[tauri::command]
+fn restore_alarms<R: Runtime>(
+    app: AppHandle<R>,
+    payload: SyncAlarmsPayload,
+) -> Result<AlarmState, String> {
+    restore_android_alarms(&app, payload)
+}
+
+pub fn restore_android_alarms<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: SyncAlarmsPayload,
+) -> Result<AlarmState, String> {
+    app.state::<AndroidAudio<R>>().restore_alarms(payload)
+}
+#[tauri::command]
+fn skip_alarm<R: Runtime>(
+    app: AppHandle<R>,
+    payload: SkipAlarmPayload,
+) -> Result<AlarmState, String> {
+    app.state::<AndroidAudio<R>>().skip_alarm(payload)
 }
 #[tauri::command]
 fn snooze_alarm<R: Runtime>(
@@ -167,6 +193,30 @@ fn random_track<R: Runtime>(
     app.state::<AndroidAudio<R>>().random_track(payload)
 }
 
+#[tauri::command]
+fn read_backup_file<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
+    read_android_backup_file(&app)
+}
+
+pub fn read_android_backup_file<R: Runtime>(app: &AppHandle<R>) -> Result<Option<String>, String> {
+    app.state::<AndroidAudio<R>>().read_backup_file()
+}
+
+#[tauri::command]
+fn save_backup_file<R: Runtime>(
+    app: AppHandle<R>,
+    payload: SaveBackupFilePayload,
+) -> Result<Option<String>, String> {
+    save_android_backup_file(&app, payload)
+}
+
+pub fn save_android_backup_file<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: SaveBackupFilePayload,
+) -> Result<Option<String>, String> {
+    app.state::<AndroidAudio<R>>().save_backup_file(payload)
+}
+
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("android-audio")
         .invoke_handler(tauri::generate_handler![
@@ -183,13 +233,17 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             get_sleep_timer,
             sync_alarms,
             get_alarm_state,
+            restore_alarms,
+            skip_alarm,
             snooze_alarm,
             dismiss_alarm,
             test_alarm,
             open_alarm_settings,
             pick_folder,
             folder_info,
-            random_track
+            random_track,
+            read_backup_file,
+            save_backup_file
         ])
         .setup(|app, api| {
             #[cfg(target_os = "android")]
