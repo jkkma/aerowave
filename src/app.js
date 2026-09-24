@@ -2075,6 +2075,7 @@ let browseName = "";
 let browseOffset = 0;
 let browseMore = false;
 let browseBusy = false;
+let browseError = "";
 let browseLooked = false;
 /** Whether the current result query has completed successfully. */
 let browseSearched = false;
@@ -2139,12 +2140,78 @@ function browseNote(text, mood) {
   note.textContent = text;
 }
 
+const browseBitrateLabel = (value) => value === "low" ? "Under 48 kbps"
+  : value === "high" ? "Over 320 kbps" : value ? `${value} kbps` : "";
+
+function activeBrowseFilters() {
+  return [
+    ["name", browseName, `Name: ${browseName}`],
+    ["country", browseCountry, browseCountryLabel || browseCountry],
+    ["tag", browseTag, browseTagLabel || browseTag],
+    ["codec", browseCodec, browseCodec],
+    ["bitrate", browseBitrate, browseBitrateLabel(browseBitrate)],
+  ].filter(([, value]) => value);
+}
+
+function updateBrowseResetVisibility() {
+  $("#browse-reset").hidden = !activeBrowseFilters().length && !$("#browse-query").value.trim();
+}
+
+function renderBrowseFilters() {
+  const container = $("#browse-active-filters");
+  const filters = activeBrowseFilters();
+  container.replaceChildren();
+  container.hidden = !filters.length;
+  for (const [key, , label] of filters) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "browse-filter-chip";
+    chip.dataset.filter = key;
+    chip.textContent = `${label} ×`;
+    chip.title = `Remove ${label}`;
+    chip.setAttribute("aria-label", chip.title);
+    chip.addEventListener("click", () => {
+      const request = clearBrowseFilter(key);
+      // The clicked chip disappears immediately; leave keyboard users at the
+      // remaining filters instead of dropping focus onto the document.
+      ($("#browse-active-filters").children[0] || $("#browse-query")).focus();
+      return request;
+    });
+    container.append(chip);
+  }
+  $("#browse-quality-summary").textContent = [browseCodec, browseBitrateLabel(browseBitrate)]
+    .filter(Boolean).join(" · ") || "Any";
+  updateBrowseResetVisibility();
+}
+
+function clearBrowseFilter(key) {
+  if (key === "name") { browseName = ""; $("#browse-query").value = ""; }
+  if (key === "country") { browseCountry = ""; browseCountryLabel = ""; }
+  if (key === "tag") { browseTag = ""; browseTagLabel = ""; }
+  if (key === "codec") browseCodec = "";
+  if (key === "bitrate") browseBitrate = "";
+  if (key !== "name") $("#browse-" + key).value = "";
+  return browseSearch(false, browseName);
+}
+
+function clearBrowseFilters() {
+  browseName = browseCountry = browseCountryLabel = browseTag = browseTagLabel = browseCodec = browseBitrate = "";
+  for (const id of ["query", "country", "tag", "codec", "bitrate"]) $("#browse-" + id).value = "";
+  $("#browse-query").focus();
+  return browseSearch(false);
+}
+
 /** Run a search. `more` adds the next page instead of starting over. */
-async function browseSearch(more) {
+async function browseSearch(more, nameOverride) {
+  if (more && (browseBusy || !browseMore)) return;
+  const trigger = document.activeElement;
+  const restoreListFocus = trigger?.classList.contains("browse-more") || trigger?.classList.contains("browse-retry");
+  const firstNewRow = more ? browseResults.length : 0;
   const mine = ++browseRequest;
   const couldLoadMore = browseMore;
   browseBusy = true;
-  const name = more ? browseName : $("#browse-query").value.trim();
+  browseError = "";
+  const name = more ? browseName : nameOverride ?? $("#browse-query").value.trim();
   if (!more) {
     browseName = name;
     browseSearched = false;
@@ -2155,6 +2222,7 @@ async function browseSearch(more) {
     // Search is also the retry affordance for an initial list that failed.
     // Successful lists stay cached, and concurrent retries share one request.
     loadBrowseFilters();
+    renderBrowseFilters();
   }
   browseNote(more ? "Fetching more…" : "Searching the directory…");
   renderBrowse();
@@ -2198,7 +2266,7 @@ async function browseSearch(more) {
     browseSearched = true;
     browseNote(
       browseResults.length
-        ? `${browseResults.length} from radio-browser.info — press a row to listen, + to keep it`
+        ? "From radio-browser.info · Listen to try a station. Save to keep it."
         : browseMore
           ? "Nothing usable was on this page — try More stations."
           : "Nothing in the directory matches that."
@@ -2207,11 +2275,23 @@ async function browseSearch(more) {
     if (mine !== browseRequest) return;
     // A transient failure on MORE leaves the same page available to retry.
     browseMore = more && couldLoadMore;
-    browseNote(String(e), "bad");
+    browseError = String(e);
+    browseNote(`${more ? "Could not load more stations" : "Could not reach the directory"}. ${browseError}`, "bad");
   } finally {
     if (mine === browseRequest) {
       browseBusy = false;
+      const canRestoreFocus = restoreListFocus &&
+        (document.activeElement === document.body || document.activeElement === trigger);
       renderBrowse();
+      if (canRestoreFocus) {
+        const list = $("#browse-list");
+        const rows = Array.from(list.children).filter((row) => row.classList.contains("browse-row"));
+        const retry = list.querySelector(".browse-retry") || list.querySelector(".browse-more");
+        const target = (browseError ? retry : rows[firstNewRow]?.querySelector(".browse-listen")) ||
+          retry || rows[rows.length - 1]?.querySelector(".browse-listen") ||
+          list.querySelector(".browse-clear") || $("#browse-query");
+        target.focus({ preventScroll: true });
+      }
     }
   }
 }
@@ -2575,10 +2655,17 @@ function updateBrowseAddButton(add, station) {
   const saving = browseSaving(station.url);
   const saved = !saving && browseSaved(station.url);
   add.classList.toggle("done", saved);
-  add.textContent = saving ? "…" : saved ? "✓" : "+";
+  add.textContent = saving ? "Saving…" : saved ? "Saved" : "+ Save";
   add.title = saving ? "Saving station" : saved ? "Already in your stations" : "Add to your stations";
   add.disabled = saving || saved;
-  add.setAttribute("aria-label", add.title);
+  add.setAttribute("aria-label", `${add.title}: ${station.name}`);
+}
+
+function updateBrowseListenButton(button, station) {
+  const selected = !!player.source && sameStream(player.source.url, station.url);
+  button.textContent = selected ? "Selected" : "Listen";
+  button.setAttribute("aria-label", `Listen to ${station.name}`);
+  button.setAttribute("aria-pressed", String(selected));
 }
 
 /** Update playback/save marks without replacing rows and throwing away focus. */
@@ -2588,6 +2675,8 @@ function refreshBrowseIndicators() {
     const station = browseResults[index];
     if (!station) return;
     row.classList.toggle("on", !!player.source && sameStream(player.source.url, station.url));
+    const listen = row.querySelector(".browse-listen");
+    if (listen) updateBrowseListenButton(listen, station);
     const add = row.children[row.children.length - 1];
     if (add?.matches("button")) updateBrowseAddButton(add, station);
   });
@@ -2595,57 +2684,76 @@ function refreshBrowseIndicators() {
 
 function renderBrowse() {
   const list = $("#browse-list");
+  const scrollTop = list.scrollTop;
+  const focused = document.activeElement;
+  const focusedRow = focused?.closest(".browse-row");
+  const focusedUrl = focusedRow?.dataset.url;
+  const focusedAction = focused?.classList.contains("browse-save") ? ".browse-save" : ".browse-listen";
   list.innerHTML = "";
+  list.setAttribute("aria-busy", String(browseBusy));
+  $("#browse-count").textContent = browseResults.length
+    ? `${browseResults.length} station${browseResults.length === 1 ? "" : "s"} loaded`
+    : browseBusy ? "Searching…" : browseError ? "Search unavailable" : browseSearched ? "No matches" : "Station directory";
 
   if (!browseResults.length) {
     const li = document.createElement("li");
     li.className = "empty";
     li.textContent = browseBusy
       ? "Searching…"
+      : browseError
+        ? "The directory is unavailable. Try again in a moment."
       : browseMore
         ? "Nothing usable was on this page."
         : browseSearched
           ? "No stations match this search."
           : "Search for a station, or explore by country and genre.";
+    if (!browseBusy && (browseError || (browseSearched && !browseMore && activeBrowseFilters().length))) {
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = "gel " + (browseError ? "browse-retry" : "browse-clear");
+      action.textContent = browseError ? "Try again" : "Clear filters";
+      action.addEventListener("click", () => browseError ? browseSearch(browseMore, browseName) : clearBrowseFilters());
+      li.append(action);
+    }
     list.append(li);
-  } else browseResults.forEach((st, i) => {
+  } else browseResults.forEach((st) => {
     const li = document.createElement("li");
-    li.className = "row";
+    li.className = "row browse-row";
+    li.dataset.url = st.url;
     if (player.source && sameStream(player.source.url, st.url)) li.classList.add("on");
 
-    const idx = document.createElement("span");
-    idx.className = "idx";
-    idx.textContent = pad2(i + 1);
+    const mark = document.createElement("span");
+    mark.className = "browse-station-mark";
+    mark.textContent = (st.name || "Radio").trim().slice(0, 2).toLocaleUpperCase();
+    mark.setAttribute("aria-hidden", "true");
 
     const name = document.createElement("span");
     name.className = "name";
     const b = document.createElement("b");
     b.textContent = st.name;
+    b.title = st.name;
     const small = document.createElement("small");
-    small.textContent = [
-      st.country,
-      [st.codec, st.bitrate ? st.bitrate + "k" : ""].filter(Boolean).join(" "),
-      st.tags,
-    ]
-      .filter(Boolean)
-      .join("  ·  ");
+    small.textContent = [st.country, st.tags].filter(Boolean).join(" · ") || "Internet radio";
+    small.title = small.textContent;
     name.append(b, small);
-    li.append(idx, name);
-
-    // Still worth flagging, but as a fact rather than a warning: HLS plays,
-    // it just takes the other player to do it.
-    if (st.hls) {
-      const flag = document.createElement("span");
-      flag.className = "tag";
-      flag.textContent = "HLS";
-      flag.title = IS_ANDROID
-        ? "Played by Android's native media player."
-        : "Played through hls.js rather than by the webview itself.";
-      li.append(flag);
-    }
+    const format = document.createElement("span");
+    format.className = "browse-format";
+    format.textContent = [st.codec, st.bitrate ? `${st.bitrate} kbps` : "", st.hls ? "HLS" : ""]
+      .filter(Boolean).join(" · ");
+    format.title = format.textContent;
+    const listen = document.createElement("button");
+    listen.type = "button";
+    listen.className = "gel browse-listen";
+    updateBrowseListenButton(listen, st);
+    listen.addEventListener("click", (e) => {
+      e.stopPropagation();
+      return previewBrowse(st);
+    });
+    li.append(mark, name, format, listen);
 
     const add = document.createElement("button");
-    add.className = "icon";
+    add.type = "button";
+    add.className = "icon browse-save";
     updateBrowseAddButton(add, st);
     add.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -2653,30 +2761,27 @@ function renderBrowse() {
     });
     li.append(add);
 
-    // Same bargain as the station list: the row itself is the play control.
-    li.tabIndex = 0;
-    li.setAttribute("role", "button");
-    li.setAttribute("aria-label", `Listen to ${st.name}`);
+    // Keep the generous pointer target; the two real buttons handle keyboard
+    // input without nesting a Save button inside another accessible button.
     li.addEventListener("click", () => previewBrowse(st));
-    li.addEventListener("keydown", (e) => {
-      if (e.target === li && (e.key === "Enter" || e.code === "Space")) {
-        e.preventDefault();
-        previewBrowse(st);
-      }
-    });
     list.append(li);
+    if (focusedUrl && sameStream(st.url, focusedUrl)) {
+      li.querySelector(focusedAction)?.focus({ preventScroll: true });
+    }
   });
 
+  list.scrollTop = scrollTop;
   if (!browseMore) return;
   const tail = document.createElement("li");
   tail.className = "empty";
   const more = document.createElement("button");
-  more.className = "gel";
+  more.className = "gel browse-more";
   more.textContent = browseBusy ? "Loading…" : "More stations";
   more.disabled = browseBusy;
   more.addEventListener("click", () => browseSearch(true));
   tail.append(more);
   list.append(tail);
+  list.scrollTop = scrollTop;
 }
 
 /**
@@ -4341,6 +4446,8 @@ function wire() {
 
   // browse
   $("#btn-browse").addEventListener("click", () => browseSearch(false));
+  $("#browse-reset").addEventListener("click", clearBrowseFilters);
+  $("#browse-query").addEventListener("input", updateBrowseResetVisibility);
   $("#browse-query").addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
     e.preventDefault();

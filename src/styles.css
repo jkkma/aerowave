@@ -605,13 +605,132 @@ body.playing .gel.big { box-shadow: 0 0 22px rgba(120, 236, 255, .45), 0 5px 16p
    the switches into a second, tiny scrolling area. */
 #pane-settings.on { grid-template-rows: repeat(4, max-content); align-content: start; }
 #pane-settings .settings { overflow: visible; }
-#pane-browse.on { grid-template-rows: auto auto 1fr auto; }
 #pane-alarms.on { grid-template-rows: auto minmax(0, 1fr) auto; }
 #pane-alarms.on.editing { grid-template-rows: minmax(0, 1fr); overflow: hidden; }
 #pane-alarms.editing > :not(#alarm-editor) { display: none !important; }
-/* The directory filters, two to a row and evenly split. */
-.browsefilters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-width: 0; }
-.browsefilters .field { min-width: 0; }
+#pane-browse.on {
+  grid-template-rows: max-content max-content minmax(120px, 1fr) max-content;
+  gap: 8px;
+  container-type: inline-size;
+}
+.browse-controls {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(170, 231, 247, .18);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(3, 30, 43, .37), rgba(3, 26, 39, .24));
+}
+.browse-intro h2 { margin: 0; color: var(--foam); font-size: 15px; font-weight: 650; line-height: 1.25; }
+.browse-intro p { margin: 2px 0 0; color: #c2e2f2; font-size: 11px; line-height: 1.35; }
+.browse-search-line { display: flex; gap: 8px; min-width: 0; }
+.browse-search-line .field { min-width: 0; }
+.browsefilters, .browse-quality-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; min-width: 0; }
+.browsefilters .lbl, .browse-quality-fields .lbl { min-width: 0; }
+.browse-quality {
+  min-width: 0;
+  border: 1px solid rgba(150, 214, 236, .2);
+  border-radius: 8px;
+  background: rgba(1, 22, 33, .27);
+}
+.browse-quality summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 5px 9px;
+  list-style: none;
+  color: #d6f1f8;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.browse-quality summary::-webkit-details-marker { display: none; }
+.browse-quality summary::before { content: "▸"; color: var(--aqua); font-size: 14px; line-height: 1; }
+.browse-quality[open] summary::before { transform: rotate(90deg); }
+.browse-quality summary:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+#browse-quality-summary { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--aqua-hi); font-weight: 500; }
+.browse-quality-fields { padding: 0 9px 9px; }
+.browse-active-filters { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
+.browse-active-filters[hidden], .browse-reset[hidden] { display: none; }
+.browse-filter-chip {
+  max-width: 100%;
+  min-height: 27px;
+  padding: 4px 9px;
+  border: 1px solid rgba(155, 232, 247, .4);
+  border-radius: 999px;
+  background: rgba(101, 207, 229, .16);
+  color: var(--aqua-hi);
+  font: 600 11px var(--hud);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.browse-filter-chip:hover { background: rgba(138, 228, 245, .27); }
+.browse-filter-chip:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+.browse-toolbar { display: flex; align-items: center; gap: 8px; min-height: 28px; min-width: 0; }
+#browse-count { flex: 1; min-width: 0; color: #c2e2f2; font-size: 11px; }
+.browse-reset { padding: 5px 10px; font-size: 11px; }
+#browse-list { min-height: 120px; }
+#browse-list .browse-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto auto auto;
+  grid-template-areas: "mark name format listen save";
+  gap: 8px;
+  min-width: 0;
+}
+#browse-list .browse-station-mark {
+  grid-area: mark;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(182, 239, 249, .34);
+  border-radius: 9px;
+  background: linear-gradient(150deg, rgba(134, 228, 245, .23), rgba(30, 115, 143, .23));
+  color: var(--aqua-hi);
+  font: 700 11px var(--hud);
+  letter-spacing: .02em;
+}
+#browse-list .browse-row .name { grid-area: name; white-space: normal; }
+#browse-list .browse-row .name b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#browse-list .browse-row .name small { white-space: nowrap; }
+#browse-list .browse-format {
+  grid-area: format;
+  min-width: 0;
+  max-width: 105px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #b5d9e8;
+  font-size: 11px;
+}
+#browse-list .browse-listen { grid-area: listen; min-height: 30px; padding: 5px 10px; }
+#browse-list .browse-row.on .browse-listen { background: linear-gradient(180deg, #ffe9b6, #f5b84e); color: #2b1500; }
+#browse-list .browse-save {
+  grid-area: save;
+  width: auto;
+  height: auto;
+  min-height: 30px;
+  padding: 5px 9px;
+  white-space: nowrap;
+  font: 600 11px var(--hud);
+}
+#browse-list .browse-save.done { color: var(--alien); }
+#browse-list .empty p { margin: 0 0 8px; line-height: 1.45; }
+#browse-list .empty > .gel { display: block; margin: 8px auto 0; }
+#browse-list .browse-error { color: #ffd9c6; }
+#browse-list .browse-error .gel { margin-top: 8px; }
+
+@container (max-width: 465px) {
+  #browse-list .browse-row {
+    grid-template-columns: 34px minmax(0, 1fr) auto auto;
+    grid-template-areas: "mark name name name" "mark format listen save";
+    row-gap: 4px;
+  }
+}
 
 .paneheader { display: flex; gap: 8px; align-items: center; min-width: 0; }
 .paneheader .field { min-width: 0; }
@@ -1282,7 +1401,11 @@ body.android {
 .android .pane { overscroll-behavior: contain; }
 .android .paneheader { align-items: stretch; flex-wrap: wrap; }
 .android .paneheader .field { flex: 1 1 160px; }
-.android .browsefilters { gap: 7px; }
+.android .browse-controls { gap: 7px; padding: 8px; }
+.android .browsefilters, .android .browse-quality-fields { gap: 7px; }
+.android .browse-quality summary { min-height: 44px; }
+.android .browse-filter-chip { min-height: 44px; padding-inline: 12px; }
+.android #browse-list .browse-listen, .android #browse-list .browse-save { min-height: 44px; }
 .android .row { min-height: 52px; padding: 7px 8px; gap: 7px; }
 .android .row .icon { width: 42px; height: 42px; }
 .android .editor { padding: 11px; }
