@@ -1,8 +1,6 @@
-"""Run the aerowave-core tests after an edit to the crate they cover.
+"""Run the aerowave-core tests with toolchain discovery and a timeout.
 
-They take about a second and they are the only tests in the project that can
-run at all, so there is no reason to defer them to a build. Nothing happens
-for edits anywhere else.
+Optional file arguments limit the run to edits affecting the core crate.
 """
 
 import argparse
@@ -12,14 +10,14 @@ import shutil
 import subprocess
 import sys
 
-from hook_input import edited_paths, read_event
+from paths import resolve_paths
 from process_tree import run_process
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 CORE = ROOT / "src-tauri" / "core"
 
-# rustup-gnu is installed through Scoop and is not always on the PATH a hook
-# inherits, so fall back to where Scoop puts it.
+# rustup-gnu is installed through Scoop and is not always on PATH,
+# so fall back to where Scoop puts it.
 FALLBACKS = [
     pathlib.Path.home() / "scoop" / "apps" / "rustup-gnu" / "current" / ".cargo" / "bin",
     pathlib.Path.home() / "scoop" / "persist" / "rustup-gnu" / ".cargo" / "bin",
@@ -46,17 +44,14 @@ def touches_core(paths):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hook", action="store_true", help="Read a Codex event from stdin")
     parser.add_argument("paths", nargs="*", help="Only run if these edits affect the core crate")
     args = parser.parse_args(argv)
     try:
-        paths = edited_paths(read_event()) if args.hook else {
-            pathlib.Path(raw).resolve() for raw in args.paths
-        }
+        paths = resolve_paths(args.paths)
     except (ValueError, OSError) as error:
         print(f"Cannot inspect core edits: {error}", file=sys.stderr)
         return 2
-    if (args.hook or args.paths) and not touches_core(paths):
+    if args.paths and not touches_core(paths):
         return 0
 
     cargo, extra_path = find_cargo()
@@ -93,8 +88,7 @@ def main(argv=None):
             file=sys.stderr,
         )
         return 2
-    if not args.hook:
-        print(result.stdout.strip())
+    print(result.stdout.strip())
     return 0
 
 

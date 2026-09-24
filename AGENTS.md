@@ -1,10 +1,9 @@
 # Aerowave
 
 Codex project instructions. Reviewer agents live in `.codex/agents/`, reusable
-workflows in `.agents/skills/`, and native hook wiring in `.codex/hooks.json`.
-Read `docs/checks.md` for hook trust and manual checks, `docs/windows-testing.md`
-before native input tests, and `docs/development-handoff.md` when resuming the
-older local work described there.
+workflows in `.agents/skills/`, and manual checks in `tools/checks/`. Read
+`docs/windows-testing.md` before native input tests, and
+`docs/development-handoff.md` when resuming the older local work described there.
 
 Internet radio player and alarm clock. Rust + Tauri v2 behind a plain
 HTML/CSS/JS front end — no bundler, no framework, the Tauri API reached
@@ -32,6 +31,15 @@ cargo run --manifest-path src-tauri/Cargo.toml --example relaycheck
 It permanently removes existing staging/output files: review the release skill's
 artifact-retention steps before running it against existing output.
 
+Run the repository checks explicitly when relevant:
+
+```powershell
+python tools/checks/check_version.py --strict
+python tools/checks/check_seam.py
+python -B -m unittest discover -s tools/checks/tests -p test_checks.py
+python tools/checks/guard_vendor.py src/app.js
+```
+
 Use `$release` for a requested release, including the manifest in the separate
 Scoop bucket repository linked from `README.md`. `$station-triage` works through why a
 station will not play, starting from `relaycheck` rather than from the code.
@@ -47,15 +55,14 @@ station will not play, starting from `relaycheck` rather than from the code.
 | `src-tauri/src/stream.rs` | Playlist resolution, ICY metadata, Shoutcast v1 fallback |
 | `src-tauri/src/relay.rs` | The loopback relay ordinary stations play through |
 | `src-tauri/src/hls.rs` | HLS over a Tauri custom protocol — deliberately not the relay |
-| `src-tauri/core/` | Pure logic, no GUI deps — **the only place tests can run** |
-| `tools/hooks/` | The four hook scripts below. Plain Python, run by the harness, not by the app. |
+| `src-tauri/core/` | Pure logic, no GUI deps — **the only place Rust tests can run** |
+| `tools/checks/` | Version, IPC, core-test and vendor helpers with their Python tests; all run manually. |
 | `.codex/agents/` | Read-only playback and core-testability reviewers; inherit the session model |
 | `.agents/skills/` | Release and station-triage workflows |
-| `.codex/hooks.json` | Native hook wiring; requires trust before execution |
 
 ## Gotchas
 
-**Tests only run in `core/`.** The app crate links WebView2 and the Win32 GUI
+**Rust tests only run in `core/`.** The app crate links WebView2 and the Win32 GUI
 stack, so a test binary built from it will not load outside a real app process;
 that is what `test = false` in `Cargo.toml` is for. Anything worth testing goes
 in `core/`.
@@ -89,20 +96,16 @@ fields), `src-tauri/Cargo.toml`, `src-tauri/core/Cargo.toml`,
 `src-tauri/tauri.conf.json` — plus two in `Cargo.lock` that only a build
 rewrites, so build between the bump and the commit.
 
-**Two hooks can refuse to end a turn.** `tools/hooks/check_version.py` blocks
-while those five files disagree, and `check_seam.py` blocks when `app.js`
-invokes a command that is not in the `invoke_handler` list. Both stay silent
-when things are clean, and both exist because the failure they catch produces
-no compile error and no failing test — it surfaces as a button that does
-nothing, or an installer whose version contradicts its own Scoop manifest.
-Editing anything under `core/` also runs `cargo test -p aerowave-core`, and
-edits to `src/vendor/` are refused outright: those are upstream builds to be
-replaced wholesale, licence and all.
-
-The scripts and native Codex wiring are tracked. Review and trust the hooks
-through `/hooks` before expecting them to run; see `docs/checks.md`. Until the
-runtime reports them trusted, run the documented standalone checks explicitly.
-Do not claim automated coverage from the presence of a configuration file.
+**Run the version and IPC checks manually.** `tools/checks/check_version.py`
+checks whether those five files agree, and `tools/checks/check_seam.py` checks
+whether `app.js` invokes a command that is not in the `invoke_handler` list.
+Both catch failures that produce no compile error or failing test: a button that
+does nothing, or an installer whose version contradicts its Scoop manifest.
+After editing anything under `core/`, run
+`cargo test --manifest-path src-tauri/Cargo.toml -p aerowave-core`.
+Do not edit `src/vendor/`: those are upstream builds to be replaced wholesale,
+licence and all. Pass changed paths explicitly to `tools/checks/guard_vendor.py`
+to check that none is under `src/vendor/`.
 
 ## Conventions
 
@@ -126,7 +129,7 @@ Do not claim automated coverage from the presence of a configuration file.
   the front end reaches it as `invoke("name")`. The events crossing the seam
   are `alarm-fire`, `alarms-updated`, `settings-updated`, `tray-stop`,
   `icy-title`.
-  `check_seam.py` will not let a turn end with one side of that missing.
+  Run `python tools/checks/check_seam.py` to catch a missing side of that registration.
 - The CSP in `tauri.conf.json` allows scripts from the app's own origin only.
   Libraries are vendored into `src/vendor/` with their licence beside them,
   never fetched from a CDN. New window permissions go in

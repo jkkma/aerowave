@@ -1,12 +1,9 @@
-"""Refuse to end a turn with the version bumped in some files but not others.
+"""Check that the release version agrees across manifests and the Cargo lockfile.
 
 The version lives in five files, and nothing in the build fails when they
 disagree - the installer just ships a number that its own About box and the
 Scoop manifest contradict. `tauri.conf.json` is treated as the truth because
 that is the one `tools/package.py` reads when it names the zip.
-
-Runs as a Stop hook, not on each edit: mid-bump the files legitimately
-disagree, and only a bump left unfinished at the end of a turn is a mistake.
 """
 
 import argparse
@@ -14,8 +11,6 @@ import json
 import pathlib
 import re
 import sys
-
-from hook_input import read_event
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 TAURI = ROOT / "src-tauri"
@@ -62,20 +57,8 @@ def cargo_lock_versions(path):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hook", action="store_true", help="Read a Codex Stop event from stdin")
     parser.add_argument("--strict", action="store_true", help="Also fail on stale or missing workspace lock entries")
     args = parser.parse_args(argv)
-    try:
-        payload = read_event() if args.hook else {}
-    except (ValueError, OSError) as error:
-        print(f"Cannot read hook input: {error}", file=sys.stderr)
-        return 2
-    # A second pass would block on the same thing forever if the first could
-    # not fix it.
-    if payload.get("stop_hook_active"):
-        print("{}")
-        return 0
-
     want = json_version(TAURI / "tauri.conf.json", "version")
 
     others = {
@@ -115,12 +98,7 @@ def main(argv=None):
         if args.strict:
             print(message, file=sys.stderr)
             return 2
-        if args.hook:
-            print(json.dumps({"systemMessage": message}))
-        else:
-            print(message, file=sys.stderr)
-    elif args.hook:
-        print("{}")
+        print(message, file=sys.stderr)
     return 0
 
 

@@ -35,7 +35,7 @@ reads, so it decides what the zip is called.
 Then check the bump landed everywhere:
 
 ```powershell
-python tools/hooks/check_version.py
+python tools/checks/check_version.py
 ```
 
 Silence means the five agree. It will also say if `Cargo.lock` is lagging —
@@ -63,7 +63,7 @@ After the build, require both workspace entries in `src-tauri/Cargo.lock` to
 match the release version before committing:
 
 ```powershell
-python tools/hooks/check_version.py --strict
+python tools/checks/check_version.py --strict
 ```
 
 A running installed copy does not block the build, but it does block
