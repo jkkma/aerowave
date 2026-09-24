@@ -82,6 +82,24 @@ stop-playing action and cancellation behavior; arrange an explicit user-approved
 test window before actually suspending or shutting down the machine. Preserve
 test evidence and follow the Recycle Bin rule when cleaning up test files.
 
+## Backup and station library checks
+
+Use an isolated portable profile to export a backup through the native file
+picker, inspect the restore preview, and restore it. Imported alarms must be off
+with skipped dates cleared; startup, PC wake, and the sleep action must keep their
+device-local values. Block the settings staging path with a temporary directory
+to check that a failed restore leaves the setup unchanged and offers a retry.
+Retain that directory elsewhere before retrying. Previous setup should preview
+the recovery copy and restore it with its alarms off too.
+
+A 2026-09-24 rebuilt Windows app passed these checks through native mouse input.
+Native input also saved a recent discovery and reordered saved stations. FIP
+decoded at readyState 3 with an advancing playhead before appearing in Recent;
+history and saved order survived closing and restarting the app. Home, End, and
+Left selected and wrapped the main tabs through real keyboard input. Android
+document transport compiled and its alarm restore logic passed JVM tests, but
+the system document pickers still need an Android device check.
+
 ## Closing and quitting
 
 With disposable settings, change volume, Wake PC for alarms, or the selected

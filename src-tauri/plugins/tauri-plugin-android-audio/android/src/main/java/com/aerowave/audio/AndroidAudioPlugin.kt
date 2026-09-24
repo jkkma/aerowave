@@ -101,9 +101,20 @@ class SyncAlarmsArgs {
 }
 
 @InvokeArg
+class SaveBackupFileArgs { lateinit var content: String }
+
+@InvokeArg
 class AlarmIdArgs {
   lateinit var id: String
   var occurrenceId: String? = null
+}
+
+@InvokeArg
+class SkipAlarmArgs {
+  lateinit var id: String
+  var skip: Boolean = false
+  var expectedAtMs: Long = -1
+  var expectedRevision: Long? = null
 }
 
 @InvokeArg
@@ -366,13 +377,14 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
           throw IllegalStateException("Alarms changed on Android; refresh and try again")
         }
         previousAlarms = old.alarms
-        val cancelled = incoming?.let {
+        val merged = incoming?.let { AlarmStateTransitions.syncSkipDates(old.alarms, it) }
+        val cancelled = merged?.let {
           AlarmStateTransitions.cancelledAlarmIds(old.alarms, it)
         }.orEmpty()
         old.copy(
           initialized = old.initialized || incoming != null,
           revision = old.revision + 1,
-          alarms = incoming ?: old.alarms,
+          alarms = merged ?: old.alarms,
           stations = stations,
           backupFolder = args.backupFolder,
           snoozes = old.snoozes - cancelled,
@@ -390,10 +402,52 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
   }
 
   @Command
+  fun restoreAlarms(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(SyncAlarmsArgs::class.java)
+      val incoming = args.alarmsJson?.let { JSONArray(it).mapObjects(::alarmFromJson) }
+        ?: throw IllegalArgumentException("Backup must include alarms")
+      val stations = JSONArray(args.stationsJson).mapObjects(::stationFromJson)
+      var previousAlarmIds: Set<String> = emptySet()
+      val changed = AlarmStateStore.update(activity) { old ->
+        previousAlarmIds = old.alarms.mapTo(mutableSetOf()) { it.id } +
+          old.scheduled.keys + old.snoozes.keys
+        AlarmStateTransitions.restore(
+          old, incoming, stations, args.backupFolder, args.expectedRevision,
+          AlarmPlaybackService.activeOccurrenceId(),
+        )
+      }
+      // The replacement is durable before any old alarm clock is cancelled.
+      // A receiver racing this cleanup can no longer claim its old occurrence.
+      previousAlarmIds.forEach { AndroidAlarmScheduler.cancelAlarm(activity, it) }
+      invoke.resolve(changed.toAlarmJsObject(activity))
+    } catch (error: Exception) {
+      invoke.reject(error.message ?: "Unable to restore Android alarms")
+    }
+  }
+
+  @Command
   fun getAlarmState(invoke: Invoke) {
     val state = AlarmStateStore.snapshot(activity)
     clearAlarmWindowIfIdle(state)
     invoke.resolve(state.toAlarmJsObject(activity))
+  }
+
+  @Command
+  fun skipAlarm(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(SkipAlarmArgs::class.java)
+      val now = System.currentTimeMillis()
+      val changed = AlarmStateStore.update(activity) { old ->
+        AlarmStateTransitions.skipAlarm(
+          old, args.id, args.skip, args.expectedAtMs, args.expectedRevision, now,
+        )
+      }
+      AndroidAlarmScheduler.replaceRegular(activity, args.id)
+      invoke.resolve(changed.toAlarmJsObject(activity))
+    } catch (error: Exception) {
+      invoke.reject(error.message ?: "Unable to change the skipped alarm")
+    }
   }
 
   @Command
@@ -493,6 +547,34 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
   @Command
   fun randomTrack(invoke: Invoke) = LibraryCommands.randomTrack(activity, invoke)
 
+  @Command
+  fun readBackupFile(invoke: Invoke) =
+    startActivityForResult(invoke, BackupDocuments.openIntent(), "readBackupFileResult")
+
+  @ActivityCallback
+  fun readBackupFileResult(invoke: Invoke, result: ActivityResult) =
+    BackupDocuments.readResult(activity, invoke, result)
+
+  @Command
+  fun saveBackupFile(invoke: Invoke) {
+    try {
+      BackupDocuments.encodeUtf8(invoke.parseArgs(SaveBackupFileArgs::class.java).content)
+      startActivityForResult(invoke, BackupDocuments.createIntent(), "saveBackupFileResult")
+    } catch (error: Exception) {
+      invoke.reject(error.message ?: "Unable to save backup")
+    }
+  }
+
+  @ActivityCallback
+  fun saveBackupFileResult(invoke: Invoke, result: ActivityResult) {
+    try {
+      val content = invoke.parseArgs(SaveBackupFileArgs::class.java).content
+      BackupDocuments.writeResult(activity, invoke, result, content)
+    } catch (error: Exception) {
+      invoke.reject(error.message ?: "Unable to save backup")
+    }
+  }
+
   private fun requireMatchingRing(args: AlarmIdArgs): RingingRecord {
     val ring = AlarmStateStore.snapshot(activity).ringing
       ?: throw IllegalStateException("That alarm is no longer ringing")
@@ -555,6 +637,14 @@ private fun PersistedAlarmState.toAlarmJsObject(context: Context): JSObject = JS
   put("initialized", initialized)
   put("revision", revision)
   put("alarms", JSONArray().also { out -> alarms.forEach { out.put(it.toJson()) } })
+  val now = System.currentTimeMillis()
+  put("occurrences", JSONArray().also { out -> alarms.forEach { alarm ->
+    out.put(JSObject().apply {
+      put("alarmId", alarm.id)
+      put("nextAtMs", if (alarm.enabled) AlarmSchedule.nextAt(alarm, now) else null)
+      put("skippedAtMs", AlarmStateTransitions.skippedAt(alarm, now))
+    })
+  } })
   val upcoming = (scheduled.values + snoozes.values).minByOrNull { it.atMs }
   put("next", upcoming?.let { occurrence ->
     val alarm = alarms.find { it.id == occurrence.alarmId }

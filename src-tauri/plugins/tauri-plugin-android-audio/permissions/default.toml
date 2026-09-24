@@ -16,6 +16,7 @@ permissions = [
   "allow-get-sleep-timer",
   "allow-sync-alarms",
   "allow-get-alarm-state",
+  "allow-skip-alarm",
   "allow-snooze-alarm",
   "allow-dismiss-alarm",
   "allow-test-alarm",
@@ -23,4 +24,6 @@ permissions = [
   "allow-pick-folder",
   "allow-folder-info",
   "allow-random-track",
+  "allow-read-backup-file",
+  "allow-save-backup-file",
 ]

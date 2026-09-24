@@ -106,11 +106,11 @@
     <div class="corner tl"></div><div class="corner tr"></div>
     <div class="corner bl"></div><div class="corner br"></div>
 
-    <nav class="tabs" role="tablist">
+    <nav class="tabs" role="tablist" aria-label="Main navigation">
       <button class="tab on" id="tab-radio" data-pane="radio" role="tab" aria-selected="true" aria-controls="pane-radio">Stations</button>
-      <button class="tab" id="tab-browse" data-pane="browse" role="tab" aria-selected="false" aria-controls="pane-browse">Browse</button>
-      <button class="tab" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms">Alarms</button>
-      <button class="tab" id="tab-settings" data-pane="settings" role="tab" aria-selected="false" aria-controls="pane-settings">Settings</button>
+      <button class="tab" id="tab-browse" data-pane="browse" role="tab" aria-selected="false" aria-controls="pane-browse" tabindex="-1">Browse</button>
+      <button class="tab" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms" tabindex="-1">Alarms</button>
+      <button class="tab" id="tab-settings" data-pane="settings" role="tab" aria-selected="false" aria-controls="pane-settings" tabindex="-1">Settings</button>
     </nav>
 
     <!-- ---------------------------- radio ---------------------------- -->
@@ -125,12 +125,13 @@
         </div>
         <label class="station-search">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
-          <input type="search" id="station-filter" class="field" placeholder="Search by name or tag" aria-label="Search saved stations">
+          <input type="search" id="station-filter" class="field" placeholder="Search by name or tag" aria-label="Search stations">
         </label>
         <div class="station-toolbar">
           <div class="station-views" role="group" aria-label="Show stations">
             <button type="button" id="station-all" class="station-view on" aria-pressed="true">All <span id="station-all-count">0</span></button>
             <button type="button" id="station-favorites" class="station-view" aria-pressed="false"><span aria-hidden="true">★</span> Favourites <span id="station-favorites-count">0</span></button>
+            <button type="button" id="station-recent" class="station-view" aria-pressed="false">Recent</button>
           </div>
           <select id="station-sort" class="field" aria-label="Sort saved stations">
             <option value="saved">Saved order</option>
@@ -140,8 +141,10 @@
         <div class="station-results">
           <span id="station-count" role="status" aria-live="polite"></span>
           <button type="button" class="station-link" id="station-reset" hidden>Clear filters</button>
+          <button type="button" class="station-link" id="station-reorder" aria-pressed="false" hidden>Reorder</button>
           <button type="button" class="station-link" id="btn-discover-stations">Discover stations <span aria-hidden="true">↗</span></button>
         </div>
+        <p class="editor-note" id="station-order-hint" hidden>Move stations with the arrows. Your order saves automatically.</p>
       </div>
       <ul class="list" id="station-list" aria-label="Saved stations"></ul>
 
@@ -245,16 +248,50 @@
 
     <!-- ---------------------------- alarms --------------------------- -->
     <div class="pane" id="pane-alarms" role="tabpanel" aria-labelledby="tab-alarms">
-      <div class="paneheader">
-        <div class="nextalarm" id="next-alarm">No alarm set</div>
-        <button class="gel wide" id="btn-add-alarm">+ Add alarm</button>
+      <div class="paneheader alarm-paneheader">
+        <h2>Alarms</h2>
+        <button type="button" class="gel wide" id="btn-add-alarm">+ Add alarm</button>
       </div>
+      <section class="alarm-readiness" id="alarm-readiness" data-tone="neutral" aria-labelledby="readiness-title">
+        <div class="readiness-heading">
+          <h3 id="readiness-title">Next alarm</h3>
+          <span class="readiness-status" id="readiness-status">No alarm scheduled</span>
+        </div>
+        <div class="nextalarm" id="next-alarm">No alarm set</div>
+        <p class="readiness-description" id="readiness-description">Set an alarm to see what is ready.</p>
+        <div class="readiness-checks" id="readiness-checks">
+          <div class="readiness-check">
+            <div class="readiness-check-heading">
+              <span class="readiness-check-label">Source</span>
+              <button type="button" class="gel readiness-action" id="readiness-source-check">Check source</button>
+            </div>
+            <span class="readiness-detail" id="readiness-source-detail" data-tone="neutral" role="status" aria-live="polite">Waiting for a check</span>
+          </div>
+          <div class="readiness-check">
+            <div class="readiness-check-heading">
+              <span class="readiness-check-label">Backup</span>
+              <button type="button" class="gel readiness-action" id="readiness-backup-check">Check backup</button>
+            </div>
+            <span class="readiness-detail" id="readiness-backup-detail" data-tone="neutral" role="status" aria-live="polite">Waiting for a check</span>
+          </div>
+          <div class="readiness-check">
+            <div class="readiness-check-heading">
+              <span class="readiness-check-label" id="readiness-wake-label">Wake &amp; permissions</span>
+            </div>
+            <span class="readiness-detail" id="readiness-wake-detail" data-tone="neutral">Checking platform settings…</span>
+          </div>
+        </div>
+        <div class="readiness-footer">
+          <p id="readiness-note">Checks show current conditions, which can change before the alarm.</p>
+          <button type="button" class="gel readiness-action" id="readiness-settings">Review settings</button>
+        </div>
+      </section>
       <ul class="list alarms" id="alarm-list"></ul>
 
       <p class="android-only editor-note" id="android-alarm-hint">Checking Android alarm permissions…</p>
 
       <form class="editor hidden" id="alarm-editor" autocomplete="off">
-        <div class="editor-title" id="al-editor-title">New alarm</div>
+        <div class="editor-title"><span id="al-editor-title">New alarm</span><p class="hidden" id="al-copy-note"></p></div>
         <div class="alarm-editor-body">
           <section class="alarm-editor-section" aria-labelledby="al-time-heading">
             <h3 id="al-time-heading">Time &amp; repeat</h3>
@@ -393,7 +430,7 @@
           <span class="flex"></span>
           <button type="button" class="gel danger hidden" id="al-delete">Delete</button>
           <button type="button" class="gel" id="al-cancel">Cancel</button>
-          <button type="submit" class="gel primary">Save alarm</button>
+          <button type="submit" class="gel primary" id="al-save">Save alarm</button>
         </div>
       </form>
     </div>
@@ -405,6 +442,18 @@
         <p>Changes save automatically.</p>
       </div>
       <div class="settings-body">
+        <section class="settings-section settings-transfer" aria-labelledby="settings-transfer">
+          <div class="settings-section-heading">
+            <h3 id="settings-transfer">Backup &amp; restore</h3>
+          </div>
+          <p class="editor-note">Keep a copy of your stations, alarms, and preferences.</p>
+          <div class="transfer-actions">
+            <button class="gel" id="backup-export">Export backup…</button>
+            <button class="gel" id="backup-import">Restore backup…</button>
+            <button class="station-link" id="backup-previous">Previous setup…</button>
+          </div>
+          <p class="editor-note" id="backup-status" role="status"></p>
+        </section>
         <div class="settings-preferences">
           <section class="settings-section" aria-labelledby="settings-display">
             <h3 id="settings-display">Display</h3>
@@ -502,6 +551,18 @@
 </footer>
 
 <!-- ============================ alarm overlay ========================= -->
+<dialog class="backup-dialog panel bevel" id="backup-preview" aria-labelledby="backup-title" aria-describedby="backup-summary backup-warning">
+  <h2 id="backup-title">Restore your backup</h2>
+  <p id="backup-summary"></p>
+  <p id="backup-warning">This replaces your saved stations, alarms, and preferences. Restored alarms start off so you can review them. A recovery copy of the current setup is kept on this device.</p>
+  <p class="editor-note">Startup, PC wake, and sleep-action choices stay as they are on this device. Folder locations may need to be chosen again.</p>
+  <p class="editor-note bad" id="backup-error" role="alert"></p>
+  <div class="editor-actions">
+    <button class="gel" id="backup-cancel">Cancel</button>
+    <button class="gel primary" id="backup-restore">Restore backup</button>
+  </div>
+</dialog>
+
 <dialog class="power-dialog panel bevel android-unavailable" id="power-countdown" aria-labelledby="power-title" aria-describedby="power-description power-wake-warning">
   <div class="hud-mini">Sleep timer finished</div>
   <h2 id="power-title">PC power action</h2>

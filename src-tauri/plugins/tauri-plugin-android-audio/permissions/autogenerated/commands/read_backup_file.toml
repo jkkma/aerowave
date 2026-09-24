@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-read-backup-file"
+description = "Enables the read_backup_file command without any pre-configured scope."
+commands.allow = ["read_backup_file"]
+
+[[permission]]
+identifier = "deny-read-backup-file"
+description = "Denies the read_backup_file command without any pre-configured scope."
+commands.deny = ["read_backup_file"]

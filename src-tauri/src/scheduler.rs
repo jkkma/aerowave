@@ -169,6 +169,9 @@ pub fn cancel_sleep_timer(app: &AppHandle) -> Result<SleepSnapshot, String> {
 pub async fn test_alarm(app: &AppHandle, alarm: Alarm) -> Result<FirePayload, String> {
     let (snapshot, generation) = {
         let state = app.state::<AppState>();
+        // Restore holds this gate through persistence; a test ring must not
+        // appear after its idle check and then be silently cancelled.
+        let _power_update = state.power_updates.lock().unwrap();
         let mut sched = state.sched.lock().unwrap();
         if sched.power_committed {
             return Err("Windows is already starting the power action".into());
@@ -218,6 +221,19 @@ pub async fn test_alarm(app: &AppHandle, alarm: Alarm) -> Result<FirePayload, St
 }
 
 impl SchedState {
+    pub fn ensure_restore_idle(&self) -> Result<(), String> {
+        if self.power_committed {
+            return Err("Wait for the power action to finish before restoring a backup".into());
+        }
+        if self.ringing.is_some() || !self.snoozed.is_empty() {
+            return Err("Dismiss the ringing or snoozed alarm before restoring a backup".into());
+        }
+        Ok(())
+    }
+    pub fn fired_at_key(&self, alarm_id: &str, key: &str) -> bool {
+        self.fired.get(alarm_id).is_some_and(|fired| fired == key)
+    }
+
     pub fn set_wake_enabled(&mut self, enabled: bool) {
         self.wake_hold.set_enabled(enabled);
     }
@@ -287,6 +303,14 @@ pub struct NextAlarm {
     pub at_ms: i64,
     pub in_secs: i64,
     pub snoozed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlarmOccurrence {
+    pub alarm_id: String,
+    pub next_at_ms: Option<i64>,
+    pub skipped_at_ms: Option<i64>,
 }
 
 /// What a track shows under: its file name, with the extension trimmed off
@@ -456,6 +480,9 @@ fn surface_window(app: &AppHandle) {
 fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str, pending: &mut Option<PendingSource>) -> bool {
     let state = app.state::<AppState>();
     let (one_shot, sleep, generation, claimed_alarm) = {
+        // A skip save holds this gate through persistence. Its success cannot
+        // overtake a claim of the skipped occurrence.
+        let _power_update = state.power_updates.lock().unwrap();
         // Claim the occurrence and its bounded snooze hold before any
         // filesystem request.
         let data = state.store.data.lock().unwrap();
@@ -643,7 +670,8 @@ pub fn next_alarm(app: &AppHandle) -> Option<NextAlarm> {
             candidates.push((snooze.at, true));
         }
         if alarm.enabled {
-            if let Some(at) = schedule::next_occurrence(alarm.hour, alarm.minute, &alarm.days, &now)
+            if let Some(at) = schedule::next_occurrence_except(alarm.hour, alarm.minute, &alarm.days,
+                alarm.skip_date.as_deref(), &now)
             {
                 candidates.push((at, false));
             }
@@ -662,6 +690,21 @@ pub fn next_alarm(app: &AppHandle) -> Option<NextAlarm> {
         in_secs: at - now.timestamp(),
         snoozed: is_snooze,
     })
+}
+
+pub fn alarm_occurrences(app: &AppHandle) -> Vec<AlarmOccurrence> {
+    let state = app.state::<AppState>();
+    let alarms = state.store.data.lock().unwrap().alarms.clone();
+    let now = Local::now();
+    alarms.into_iter().map(|alarm| {
+        let next_at_ms = alarm.enabled.then(|| schedule::next_occurrence_except(
+            alarm.hour, alarm.minute, &alarm.days, alarm.skip_date.as_deref(), &now,
+        )).flatten().and_then(|seconds| seconds.checked_mul(1000));
+        let skipped_at_ms = alarm.enabled.then(|| schedule::future_skipped_occurrence(
+            alarm.hour, alarm.minute, &alarm.days, alarm.skip_date.as_deref(), &now,
+        )).flatten().and_then(|seconds| seconds.checked_mul(1000));
+        AlarmOccurrence { alarm_id: alarm.id, next_at_ms, skipped_at_ms }
+    }).collect()
 }
 
 /// One pass of the clock. Split out from the thread so the logic stays
@@ -714,10 +757,12 @@ fn tick(app: &AppHandle, power: &mut power::PowerManager, pending_source: &mut O
             sched.fired.get(&alarm.id).cloned()
         };
 
-        let on_time = schedule::due_now(alarm.hour, alarm.minute, &alarm.days, &now);
+        let on_time = schedule::due_now_except(alarm.hour, alarm.minute, &alarm.days,
+            alarm.skip_date.as_deref(), &now);
         // Did its moment pass while the machine was asleep?
         let missed =
-            schedule::missed_while_asleep(alarm.hour, alarm.minute, &alarm.days, &now, last_tick);
+            schedule::missed_while_asleep_except(alarm.hour, alarm.minute, &alarm.days,
+                alarm.skip_date.as_deref(), &now, last_tick);
 
         if !(on_time || missed) {
             continue;
@@ -932,8 +977,8 @@ fn tick_sleep(
             }
             let now = Local::now();
             let now_ms = now.timestamp_millis();
-            let due = data.alarms.iter().any(|alarm| alarm.enabled && schedule::unclaimed_due_alarm(
-                alarm.hour, alarm.minute, &alarm.days, &now, sched.last_tick,
+            let due = data.alarms.iter().any(|alarm| alarm.enabled && schedule::unclaimed_due_alarm_except(
+                alarm.hour, alarm.minute, &alarm.days, alarm.skip_date.as_deref(), &now, sched.last_tick,
                 sched.fired.get(&alarm.id).map(String::as_str),
             ));
             let alarm_priority = due || wake_plan(now_ms, next, sched.ringing.is_some()).keep_awake;

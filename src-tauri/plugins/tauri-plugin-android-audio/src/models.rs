@@ -149,6 +149,8 @@ pub struct AlarmDefinition {
     pub auto_stop_mins: u32,
     #[serde(default)]
     pub auto_snoozes: u32,
+    #[serde(default)]
+    pub skip_date: Option<String>,
 }
 
 fn enabled_by_default() -> bool {
@@ -179,11 +181,26 @@ pub struct SyncAlarmsPayload {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SaveBackupFilePayload {
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlarmIdPayload {
     pub id: String,
     #[serde(default)]
     pub occurrence_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkipAlarmPayload {
+    pub id: String,
+    pub skip: bool,
+    pub expected_at_ms: i64,
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -243,6 +260,14 @@ pub struct NextAlarm {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AlarmOccurrence {
+    pub alarm_id: String,
+    pub next_at_ms: Option<i64>,
+    pub skipped_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RingingAlarm {
     pub alarm_id: String,
     pub occurrence_id: String,
@@ -266,6 +291,8 @@ pub struct AlarmState {
     pub initialized: bool,
     pub revision: u64,
     pub alarms: Vec<AlarmDefinition>,
+    #[serde(default)]
+    pub occurrences: Vec<AlarmOccurrence>,
     pub next: Option<NextAlarm>,
     pub ringing: Option<RingingAlarm>,
     pub permissions: AlarmPermissions,

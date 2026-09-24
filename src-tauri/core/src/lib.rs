@@ -8,6 +8,7 @@
 //! `cargo test` can actually run these.
 
 pub mod clock;
+pub mod backup;
 pub mod directory;
 pub mod icy;
 pub mod local_media;

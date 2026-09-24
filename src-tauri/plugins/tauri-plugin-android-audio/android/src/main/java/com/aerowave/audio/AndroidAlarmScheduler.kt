@@ -70,6 +70,9 @@ internal object AndroidAlarmScheduler {
         expected.atMs != expectedAt || (!snoozed && !alarm.enabled)) {
         return@update old
       }
+      if (!snoozed && AlarmStateTransitions.isSkipped(alarm, expectedAt)) {
+        return@update AlarmStateTransitions.expire(old, alarm, expected, now)
+      }
       if (!AlarmSchedule.isDeliverable(expectedAt, now)) {
         return@update AlarmStateTransitions.expire(old, alarm, expected, now)
       }
@@ -154,6 +157,12 @@ internal object AndroidAlarmScheduler {
   fun cancelAlarm(context: Context, alarmId: String) {
     cancel(context, alarmId, false)
     cancel(context, alarmId, true)
+  }
+
+  /** Change only the regular clock; a pending snooze belongs to the current ring. */
+  fun replaceRegular(context: Context, alarmId: String) {
+    cancel(context, alarmId, false)
+    AlarmStateStore.snapshot(context).scheduled[alarmId]?.let { schedule(context, it) }
   }
 
   private fun schedulePersisted(context: Context, state: PersistedAlarmState) {

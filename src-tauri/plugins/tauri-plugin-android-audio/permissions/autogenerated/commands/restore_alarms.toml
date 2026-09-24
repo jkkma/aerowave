@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-restore-alarms"
+description = "Enables the restore_alarms command without any pre-configured scope."
+commands.allow = ["restore_alarms"]
+
+[[permission]]
+identifier = "deny-restore-alarms"
+description = "Denies the restore_alarms command without any pre-configured scope."
+commands.deny = ["restore_alarms"]
