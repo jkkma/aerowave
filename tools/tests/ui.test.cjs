@@ -79,17 +79,33 @@ test("station row keys leave Favourite and Edit buttons available", async () => 
   assert.equal(h.evaluate("player.source.stationId"), "one");
 });
 
-test("the browse Add button does not start its station on Enter", async () => {
+test("Browse Listen and Save are separate native controls and Save does not play", async () => {
   const h = createHarness();
   h.evaluate('browseResults = [{name:"Candidate",url:"https://example.test/live",country:"",tags:""}]; renderBrowse()');
   const row = h.el("#browse-list").children[0];
-  const add = row.children.at(-1);
-  const event = await add.dispatch("keydown", {key:"Enter", code:"Enter"});
+  const listen = row.querySelector(".browse-listen");
+  const save = row.querySelector(".browse-save");
+  assert.equal(row.tagName, "LI");
+  assert.equal(row.getAttribute("role"), null);
+  assert.equal(row.tabIndex, undefined);
+  assert.equal(listen.tagName, "BUTTON");
+  assert.equal(save.tagName, "BUTTON");
+
+  listen.focus();
+  assert.equal(h.document.activeElement, listen);
+  await listen.dispatch("click");
+  assert.equal(h.evaluate("player.source.url"), "https://example.test/live");
+
+  h.evaluate("stopPlayback(true)");
+  const event = await save.dispatch("keydown", {key:"Enter", code:"Enter"});
   assert.equal(event.defaultPrevented, false);
   assert.equal(h.evaluate("player.source"), null);
-  await add.dispatch("click");
+  assert.equal(save.textContent, "+ Save");
+  await save.dispatch("click");
   assert.equal(h.evaluate("state.stations.length"), 1);
   assert.equal(h.evaluate("player.source"), null);
+  assert.equal(save.textContent, "Saved");
+  assert.equal(h.calls.filter(c => c.command === "save_stations").length, 1);
 });
 
 test("test rings cannot schedule a snooze or dismiss a real pending occurrence", async () => {

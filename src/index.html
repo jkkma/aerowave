@@ -148,40 +148,67 @@
 
     <!-- ---------------------------- browse --------------------------- -->
     <div class="pane" id="pane-browse" role="tabpanel" aria-labelledby="tab-browse">
-      <div class="paneheader">
-        <input type="search" id="browse-query" class="field" placeholder="Search stations">
-        <button class="gel wide" id="btn-browse">Search</button>
+      <div class="browse-controls">
+        <div class="browse-intro">
+          <h2>Discover radio</h2>
+          <p>Find a station to listen to, then save the ones you like.</p>
+        </div>
+        <div class="browse-search">
+          <label class="lbl" for="browse-query">Search stations</label>
+          <div class="browse-search-line">
+            <input type="search" id="browse-query" class="field" placeholder="Station name">
+            <button type="button" class="gel wide" id="btn-browse">Search</button>
+          </div>
+        </div>
+        <div class="browsefilters">
+          <label class="lbl" for="browse-country">Country
+            <select class="field" id="browse-country">
+              <option value="">Any country</option>
+            </select>
+          </label>
+          <label class="lbl" for="browse-tag">Genre
+            <select class="field" id="browse-tag">
+              <option value="">Any genre</option>
+            </select>
+          </label>
+        </div>
+        <details class="browse-quality" id="browse-quality">
+          <summary>Audio quality <span id="browse-quality-summary">Any</span></summary>
+          <div class="browse-quality-fields">
+            <label class="lbl" for="browse-codec">Format
+              <select class="field" id="browse-codec">
+                <option value="">Any format</option>
+                <option value="MP3">MP3</option>
+                <option value="AAC">AAC</option>
+                <option value="AAC+">AAC+</option>
+                <option value="OGG">OGG</option>
+                <option value="FLAC">FLAC</option>
+              </select>
+            </label>
+            <label class="lbl" for="browse-bitrate">Bitrate
+              <select class="field" id="browse-bitrate">
+                <option value="">Any bitrate</option>
+                <option value="low">Under 48 kbps</option>
+                <option value="48">48 kbps</option>
+                <option value="64">64 kbps</option>
+                <option value="96">96 kbps</option>
+                <option value="128">128 kbps</option>
+                <option value="192">192 kbps</option>
+                <option value="256">256 kbps</option>
+                <option value="320">320 kbps</option>
+                <option value="high">Over 320 kbps</option>
+              </select>
+            </label>
+          </div>
+        </details>
+        <div id="browse-active-filters" class="browse-active-filters" role="group" hidden aria-label="Active filters"></div>
       </div>
-      <div class="browsefilters">
-        <select class="field" id="browse-country" aria-label="Country">
-          <option value="">Any country</option>
-        </select>
-        <select class="field" id="browse-tag" aria-label="Genre">
-          <option value="">Any genre</option>
-        </select>
-        <select class="field" id="browse-codec" aria-label="Format">
-          <option value="">Any format</option>
-          <option value="MP3">MP3</option>
-          <option value="AAC">AAC</option>
-          <option value="AAC+">AAC+</option>
-          <option value="OGG">OGG</option>
-          <option value="FLAC">FLAC</option>
-        </select>
-        <select class="field" id="browse-bitrate" aria-label="Bitrate">
-          <option value="">Any bitrate</option>
-          <option value="low">low</option>
-          <option value="48">48k</option>
-          <option value="64">64k</option>
-          <option value="96">96k</option>
-          <option value="128">128k</option>
-          <option value="192">192k</option>
-          <option value="256">256k</option>
-          <option value="320">320k</option>
-          <option value="high">high</option>
-        </select>
+      <div class="browse-toolbar">
+        <span id="browse-count" role="status" aria-live="polite"></span>
+        <button type="button" class="gel browse-reset" id="browse-reset" hidden>Clear all</button>
       </div>
-      <ul class="list" id="browse-list"></ul>
-      <p class="editor-note" id="browse-note"></p>
+      <ul class="list" id="browse-list" aria-label="Radio stations"></ul>
+      <p class="editor-note" id="browse-note" role="status" aria-live="polite"></p>
     </div>
 
     <!-- ---------------------------- alarms --------------------------- -->

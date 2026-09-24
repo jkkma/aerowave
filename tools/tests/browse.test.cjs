@@ -113,6 +113,42 @@ test("a failed More request keeps its retry and offset", async () => {
   assert.equal(h.evaluate("browseResults.length"), 2);
 });
 
+test("retrying a failed More from an empty page keeps its offset and submitted name", async () => {
+  const requests = [];
+  const h = browseHarness(({ query }) => {
+    requests.push({ name: query.name, offset: query.offset });
+    if (requests.length === 1) return { offered: 40, hasMore: true, stations: [] };
+    if (requests.length === 2) throw new Error("temporary page outage");
+    return {
+      offered: 1, hasMore: false,
+      stations: [directoryStation("Later", "https://later.test/live")],
+    };
+  });
+  seedSelects(h);
+  h.el("#browse-query").value = "ambient radio";
+  await h.evaluate("browseSearch(false)");
+  assert.equal(h.evaluate("browseOffset"), 40);
+  assert.equal(h.evaluate("browseMore"), true);
+  assert.equal(h.el("#browse-list").children[0].textContent, "Nothing usable was on this page.");
+
+  await h.el("#browse-list").children.at(-1).children[0].dispatch("click");
+  assert.equal(h.evaluate("browseOffset"), 40);
+  assert.equal(h.evaluate("browseMore"), true);
+  const retry = h.el("#browse-list").querySelector(".browse-retry");
+  assert.ok(retry);
+  h.el("#browse-query").value = "unsubmitted draft";
+  await retry.dispatch("click");
+
+  assert.deepEqual(requests, [
+    { name: "ambient radio", offset: 0 },
+    { name: "ambient radio", offset: 40 },
+    { name: "ambient radio", offset: 40 },
+  ]);
+  assert.equal(h.evaluate("browseOffset"), 41);
+  assert.equal(h.evaluate("browseResults[0].name"), "Later");
+  assert.equal(h.el("#browse-query").value, "unsubmitted draft");
+});
+
 test("More appends new rows without moving the old countryless tail", async () => {
   const requests = [];
   const station = (name, url, country, votes = 0) => ({ ...directoryStation(name, url, votes), country });
@@ -146,6 +182,216 @@ test("More appends new rows without moving the old countryless tail", async () =
   await h.el("#browse-list").children.at(-1).children[0].dispatch("click");
   assert.equal(h.evaluate("JSON.stringify(browseResults.map(s => s.name))"), '["Bitlis updated","Avant","France","Drone","Australia"]');
   assert.deepEqual(requests, [0, 40, 80]);
+});
+
+test("Clear all supersedes pending search and facet replies with one unfiltered request", async () => {
+  const stalePage = deferred();
+  const staleFacets = deferred();
+  const stationQueries = [];
+  const h = createHarness({ invoke(command, args) {
+    if (command === "browse_countries") return [];
+    if (command === "browse_tags") return [];
+    if (command === "browse_facets") {
+      return args.query.countryCode ? staleFacets.promise : {
+        countries: [], tags: [], codecs: [], bitrates: [], sampled: false,
+      };
+    }
+    if (command === "browse_stations") {
+      stationQueries.push(JSON.parse(JSON.stringify(args.query)));
+      return stationQueries.length === 1
+        ? stalePage.promise
+        : { offered: 0, hasMore: false, stations: [] };
+    }
+    return undefined;
+  } });
+  seedSelects(h);
+  h.evaluate(`browseCountries = []; browseTags = [];
+    browseCountry = "FR"; browseCountryLabel = "France";
+    browseTag = "jazz"; browseTagLabel = "Jazz"; browseCodec = "MP3"; browseBitrate = "128"`);
+  h.el("#browse-query").value = "stale query";
+  h.el("#browse-quality").open = true;
+  h.evaluate("wire()");
+  const oldSearch = h.evaluate("browseSearch(false)");
+  await flush();
+
+  await h.el("#browse-reset").dispatch("click");
+  assert.equal(stationQueries.length, 2);
+  assert.deepEqual(stationQueries[1], {
+    name: "", tag: "", countryCode: "", codec: "", bitrate: "", limit: 40, offset: 0,
+  });
+  assert.equal(h.el("#browse-query").value, "");
+  assert.equal(h.el("#browse-quality").open, true);
+  assert.equal(h.el("#browse-quality-summary").textContent, "Any");
+
+  stalePage.resolve({ offered: 40, hasMore: true, stations: [directoryStation("Stale", "https://stale.test/live")] });
+  staleFacets.resolve({
+    countries: [{ code: "FR", name: "France", stations: 20 }],
+    tags: [{ value: "jazz", name: "Jazz", stations: 20 }],
+    codecs: [{ key: "MP3", stations: 20 }], bitrates: [{ key: "128", stations: 20 }], sampled: false,
+  });
+  await oldSearch;
+  await flush();
+  assert.equal(h.evaluate("browseResults.length"), 0);
+  assert.equal(h.evaluate("browseMore"), false);
+  assert.equal(h.el("#browse-active-filters").children.length, 0);
+  assert.deepEqual(h.el("#browse-country").options.map((entry) => entry.value), [""]);
+  assert.equal(h.el("#browse-codec").options.find((entry) => entry.value === "MP3").textContent, "MP3");
+  assert.equal(stationQueries.length, 2);
+});
+
+test("removing one filter preserves the submitted query, its draft, and other filters", async () => {
+  const stationQueries = [];
+  const h = createHarness({ invoke(command, args) {
+    if (command === "browse_countries" || command === "browse_tags") return [];
+    if (command === "browse_facets") return {
+      countries: [], tags: [], codecs: [], bitrates: [], sampled: false,
+    };
+    if (command === "browse_stations") {
+      stationQueries.push(JSON.parse(JSON.stringify(args.query)));
+      return { offered: 0, hasMore: false, stations: [] };
+    }
+    return undefined;
+  } });
+  seedSelects(h);
+  h.el("#browse-country").append(option("FR", "France"));
+  h.el("#browse-tag").append(option("jazz", "Jazz"));
+  h.el("#browse-country").options[1].dataset.label = "France";
+  h.el("#browse-tag").options[1].dataset.label = "Jazz";
+  h.el("#browse-country").value = "FR";
+  h.el("#browse-tag").value = "jazz";
+  h.el("#browse-codec").value = "MP3";
+  h.el("#browse-bitrate").value = "128";
+  h.el("#browse-query").value = "draft text";
+  h.evaluate(`browseCountries = []; browseTags = []; browseName = "submitted";
+    browseCountry = "FR"; browseCountryLabel = "France";
+    browseTag = "jazz"; browseTagLabel = "Jazz"; browseCodec = "MP3"; browseBitrate = "128";
+    renderBrowseFilters()`);
+  h.evaluate("wire()");
+
+  const codecChip = h.el("#browse-active-filters").children.find((chip) => chip.dataset.filter === "codec");
+  assert.ok(codecChip);
+  await codecChip.dispatch("click");
+
+  assert.equal(stationQueries.length, 1);
+  assert.equal(stationQueries[0].name, "submitted");
+  assert.equal(stationQueries[0].countryCode, "FR");
+  assert.equal(stationQueries[0].tag, "jazz");
+  assert.equal(stationQueries[0].codec, "");
+  assert.equal(stationQueries[0].bitrate, "128");
+  assert.equal(h.el("#browse-query").value, "draft text");
+  assert.equal(h.evaluate("browseName"), "submitted");
+});
+
+test("a failed first search offers a retry for the submitted query", async () => {
+  const stationQueries = [];
+  const h = createHarness({ invoke(command, args) {
+    if (command === "browse_countries" || command === "browse_tags") return [];
+    if (command === "browse_facets") return {
+      countries: [], tags: [], codecs: [], bitrates: [], sampled: false,
+    };
+    if (command === "browse_stations") {
+      stationQueries.push(JSON.parse(JSON.stringify(args.query)));
+      if (stationQueries.length === 1) throw new Error("directory unavailable");
+      return { offered: 1, hasMore: false, stations: [directoryStation("Jazz FM", "https://jazz.test/live")] };
+    }
+    return undefined;
+  } });
+  seedSelects(h);
+  h.evaluate("browseCountries = []; browseTags = []");
+  h.el("#browse-query").value = "jazz";
+  h.evaluate("wire()");
+  await h.evaluate("browseSearch(false)");
+
+  const retry = h.el("#browse-list").querySelector(".browse-retry");
+  assert.ok(retry);
+  assert.match(h.evaluate("browseError"), /directory unavailable/);
+  h.el("#browse-query").value = "unsubmitted draft";
+  await retry.dispatch("click");
+
+  assert.deepEqual(stationQueries.map((query) => query.name), ["jazz", "jazz"]);
+  assert.equal(h.evaluate("browseError"), "");
+  assert.equal(h.evaluate("browseResults[0].name"), "Jazz FM");
+  assert.equal(h.el("#browse-query").value, "unsubmitted draft");
+});
+
+test("Browse count reports loaded rows rather than stations offered by the directory", async () => {
+  const nextPage = deferred();
+  let requests = 0;
+  const h = createHarness({ invoke(command) {
+    if (command === "browse_countries" || command === "browse_tags") return [];
+    if (command === "browse_facets") return {
+      countries: [], tags: [], codecs: [], bitrates: [], sampled: false,
+    };
+    if (command === "browse_stations") {
+      requests += 1;
+      if (requests === 1) return {
+        offered: 40, hasMore: true, stations: [directoryStation("First", "https://first.test/live")],
+      };
+      return nextPage.promise;
+    }
+    return undefined;
+  } });
+  seedSelects(h);
+  h.evaluate("browseCountries = []; browseTags = []");
+  await h.evaluate("browseSearch(false)");
+  assert.equal(h.el("#browse-count").textContent, "1 station loaded");
+
+  const more = h.el("#browse-list").children.at(-1).children[0];
+  const pending = more.dispatch("click");
+  await flush();
+  assert.equal(requests, 2);
+  const loadingMore = h.el("#browse-list").children.at(-1).children[0];
+  assert.equal(loadingMore.disabled, true);
+  assert.match(loadingMore.textContent, /Loading/);
+  await loadingMore.dispatch("click");
+  assert.equal(requests, 2);
+
+  nextPage.resolve({ offered: 40, hasMore: false, stations: [directoryStation("Second", "https://second.test/live")] });
+  await pending;
+  assert.equal(h.el("#browse-count").textContent, "2 stations loaded");
+});
+
+test("More restores focus to a new Listen button unless the user moved away", async () => {
+  const secondPage = deferred();
+  const thirdPage = deferred();
+  const offsets = [];
+  const h = browseHarness(({ query }) => {
+    offsets.push(query.offset);
+    if (offsets.length === 1) return {
+      offered: 40, hasMore: true, stations: [directoryStation("First", "https://first.test/live")],
+    };
+    return offsets.length === 2 ? secondPage.promise : thirdPage.promise;
+  });
+  seedSelects(h);
+  await h.evaluate("browseSearch(false)");
+
+  const more = h.el("#browse-list").querySelector(".browse-more");
+  more.focus();
+  const loadingSecond = more.dispatch("click");
+  await flush();
+  assert.deepEqual(offsets, [0, 40]);
+  secondPage.resolve({
+    offered: 40, hasMore: true, stations: [directoryStation("Second", "https://second.test/live")],
+  });
+  await loadingSecond;
+
+  const rows = h.el("#browse-list").children.filter((entry) => entry.classList.contains("browse-row"));
+  assert.equal(rows.length, 2);
+  assert.equal(rows[1].querySelector(".name").querySelector("b").textContent, "Second");
+  assert.equal(h.document.activeElement, rows[1].querySelector(".browse-listen"));
+
+  const moreAgain = h.el("#browse-list").querySelector(".browse-more");
+  moreAgain.focus();
+  const loadingThird = moreAgain.dispatch("click");
+  await flush();
+  h.el("#browse-query").focus();
+  thirdPage.resolve({
+    offered: 1, hasMore: false, stations: [directoryStation("Third", "https://third.test/live")],
+  });
+  await loadingThird;
+
+  assert.deepEqual(offsets, [0, 40, 80]);
+  assert.equal(h.document.activeElement, h.el("#browse-query"));
 });
 
 test("submitted name and selected filters produce matching counts and empty state", async () => {
@@ -497,7 +743,7 @@ test("clearing a fixed filter removes a narrowed subset when its global list is 
   assert.deepEqual(h.el("#browse-tag").options.map((entry) => entry.value), [""]);
 });
 
-test("Browse Add stays pending until persistence and becomes retryable after failure", async () => {
+test("Browse Save stays pending until persistence and becomes retryable after failure", async () => {
   const first = deferred();
   let saves = 0;
   const h = createHarness({ invoke(command) {
@@ -507,24 +753,24 @@ test("Browse Add stays pending until persistence and becomes retryable after fai
   h.evaluate(`browseResults = [{name:"Candidate",url:"https://candidate.test/live",country:"",tags:"",tag:""}]; renderBrowse()`);
   const pending = h.evaluate("addBrowseStation(browseResults[0])");
   await flush();
-  let add = h.el("#browse-list").children[0].children.at(-1);
+  let add = h.el("#browse-list").children[0].querySelector(".browse-save");
   assert.equal(h.evaluate("state.stations.length"), 0);
-  assert.equal(add.textContent, "…");
+  assert.equal(add.textContent, "Saving…");
   assert.equal(add.disabled, true);
   assert.equal(h.evaluate("addBrowseStation(browseResults[0])"), undefined);
   assert.equal(saves, 1);
 
   first.reject(new Error("disk full"));
   assert.equal(await pending, false);
-  add = h.el("#browse-list").children[0].children.at(-1);
+  add = h.el("#browse-list").children[0].querySelector(".browse-save");
   assert.equal(h.evaluate("state.stations.length"), 0);
-  assert.equal(add.textContent, "+");
+  assert.equal(add.textContent, "+ Save");
   assert.equal(add.disabled, false);
 
   assert.equal(await h.evaluate("addBrowseStation(browseResults[0])"), true);
-  add = h.el("#browse-list").children[0].children.at(-1);
+  add = h.el("#browse-list").children[0].querySelector(".browse-save");
   assert.equal(h.evaluate("state.stations.length"), 1);
-  assert.equal(add.textContent, "✓");
+  assert.equal(add.textContent, "Saved");
   assert.equal(saves, 2);
 });
 
@@ -599,21 +845,22 @@ test("stop, state reload and station deletion immediately refresh Browse indicat
   h.evaluate(`browseResults = [{name:"Candidate",url:"https://radio.test/live",country:"",tags:""}];
     player.source = {kind:"station",url:"https://radio.test/live"}; renderBrowse()`);
   const row = h.el("#browse-list").children[0];
-  row.focus();
+  const listen = row.querySelector(".browse-listen");
+  listen.focus();
   assert.equal(row.classList.contains("on"), true);
   h.evaluate("stopPlayback(true)");
   assert.equal(h.el("#browse-list").children[0], row);
   assert.equal(row.classList.contains("on"), false);
-  assert.equal(h.document.activeElement, row);
+  assert.equal(h.document.activeElement, listen);
 
   await h.evaluate("loadState()");
-  let add = h.el("#browse-list").children[0].children.at(-1);
-  assert.equal(add.textContent, "✓");
+  let add = h.el("#browse-list").children[0].querySelector(".browse-save");
+  assert.equal(add.textContent, "Saved");
   add.focus();
 
   h.evaluate("wire(); editingStation = state.stations[0]");
   await h.el("#st-delete").dispatch("click");
   assert.equal(h.el("#browse-list").children[0], row);
-  assert.equal(add.textContent, "+");
+  assert.equal(add.textContent, "+ Save");
   assert.equal(h.document.activeElement, add);
 });

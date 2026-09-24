@@ -188,11 +188,16 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - The BROWSE tab searches [radio-browser.info](https://www.radio-browser.info/), a
   community-run directory of tens of thousands of public stations. Type a name, and
   narrow it by country or genre — both dropdowns are the directory's own lists, with
-  station counts beside each entry. Press a row to listen without keeping it, `+` to
-  add it to your stations. Nothing is saved until you press `+`, and nothing is
+  station counts beside each entry. Press Listen or a row to try a station, and
+  Save to add it to your stations. Nothing is saved until you press Save, and nothing is
   fetched until you open the tab.
+- Country and genre stay beside the search; the Audio quality section opens
+  format and bitrate choices when needed. Applied filters can be removed one at
+  a time, and Clear all starts over. The results count says how many stations
+  are loaded, not how many exist in the directory. A failed search offers Try
+  again without applying unfinished edits in the search field.
 - Adding a station shows a pending state until its settings file is written.
-  If the write fails, `+` becomes available to retry. Failed additions cannot
+  If the write fails, Save becomes available to retry. Failed additions cannot
   be swept into a later settings save.
 - Each page is listed by country, and alphabetically inside each one. MORE
   appends the next page without moving the rows already loaded, so stations
