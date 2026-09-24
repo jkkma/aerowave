@@ -601,10 +601,8 @@ body.playing .gel.big { box-shadow: 0 0 22px rgba(120, 236, 255, .45), 0 5px 16p
 
 .pane { display: none; min-height: 0; min-width: 0; grid-template-rows: auto 1fr auto; gap: 10px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(120, 220, 245, .5) transparent; }
 .pane.on { display: grid; }
-/* Settings form one scrollable page; a long about section must not squeeze
-   the switches into a second, tiny scrolling area. */
-#pane-settings.on { grid-template-rows: repeat(4, max-content); align-content: start; }
-#pane-settings .settings { overflow: visible; }
+/* Keep the page heading and exit action in view while the settings scroll. */
+#pane-settings.on { grid-template-rows: auto minmax(0, 1fr) auto; gap: 10px; overflow: hidden; container-type: inline-size; }
 #pane-alarms.on { grid-template-rows: auto minmax(0, 1fr) auto; }
 #pane-alarms.on.editing { grid-template-rows: minmax(0, 1fr); overflow: hidden; }
 #pane-alarms.editing > :not(#alarm-editor) { display: none !important; }
@@ -1056,13 +1054,45 @@ body.playing .gel.big { box-shadow: 0 0 22px rgba(120, 236, 255, .45), 0 5px 16p
 }
 .sw[aria-pressed="true"]::after { transform: translateX(21px); background: radial-gradient(circle at 35% 28%, #fff, #eafff2 45%, #74b592 80%); }
 
-.settings .row { cursor: default; }
-.settings .row:hover { background: none; border-color: transparent; box-shadow: none; }
-.settings .row span { flex: 1; min-width: 0; font-size: 14px; }
-.settings .row em { display: block; margin-top: 3px; font-style: normal; font-size: 11px; color: #b7d7e4; }
-.power-info { padding: 0 8px; font-size: 12px; line-height: 1.5; color: #c2e2f2; }
-.power-info p { margin: 6px 0; }
-.power-info .editor-note { font-size: 11px; }
+.settings-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 6px 12px; flex-wrap: wrap; }
+.settings-heading h2 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.3px; }
+.settings-heading p { margin: 0; font-size: 11px; color: #bcdde7; }
+.settings-body { display: grid; align-content: start; gap: 10px; min-height: 0; min-width: 0; padding: 3px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(120, 220, 245, .5) transparent; }
+.settings-preferences { display: grid; gap: 10px; min-width: 0; }
+.settings-section { min-width: 0; padding: 11px 12px; border: 1px solid rgba(170, 231, 247, .18); border-radius: 12px; background: linear-gradient(180deg, rgba(3, 30, 43, .42), rgba(3, 26, 39, .3)); }
+.settings-section h3 { margin: 0 0 5px; color: var(--aqua-hi); font-size: 12px; font-weight: 650; }
+.settings { list-style: none; margin: 0; padding: 0; }
+.settings .row { padding: 0; gap: 12px; cursor: default; border: 0; border-radius: 0; }
+.settings .row + .row { margin-top: 0; border-top: 1px solid rgba(170, 231, 247, .1); }
+.settings .row:hover { background: none; box-shadow: none; }
+.settings .row label { flex: 1; min-width: 0; padding: 9px 0; cursor: pointer; }
+.settings .row span { display: block; font-size: 13px; line-height: 1.35; }
+.settings .row em { display: block; margin-top: 3px; font-style: normal; font-size: 11px; line-height: 1.4; color: #b7d7e4; }
+.settings .row:has(.sw:disabled) label { cursor: default; }
+.settings .sw { width: 46px; height: 26px; }
+.settings .sw::after { width: 22px; height: 22px; }
+.settings .sw[aria-pressed="true"]::after { transform: translateX(20px); }
+.settings-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.settings-section-heading h3 { margin: 0; }
+.settings-section-heading .gel { padding: 6px 10px; font-size: 11px; }
+.settings-backup .folderpath { margin-top: 8px; white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
+.settings-backup .android-only { margin-top: 8px; }
+.power-info { font-size: 12px; line-height: 1.5; color: #c2e2f2; }
+.power-info > .editor-note { margin: 0 0 4px; padding: 8px 10px; border-left: 2px solid var(--aqua); border-radius: 0 6px 6px 0; background: rgba(2, 16, 25, .3); font-size: 11px; }
+.power-info > .editor-note.bad { border-left-color: var(--alert-text); }
+.settings-details { min-width: 0; color: #c2e2f2; font-size: 11px; line-height: 1.5; }
+.settings-details summary { width: fit-content; max-width: 100%; padding: 7px 0; cursor: pointer; color: #d5edf4; }
+.settings-details summary:hover { color: var(--aqua-hi); }
+.settings-details summary:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; border-radius: 3px; }
+.settings-details p { margin: 4px 0 10px; }
+.settings-details p:last-child { margin-bottom: 0; }
+.settings-storage { padding: 0 12px 5px; }
+.settings-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 3px 0; border-top: 1px solid rgba(170, 231, 247, .17); }
+.settings-footer p { margin: 0; font-size: 11px; line-height: 1.4; color: #b7d7e4; }
+.settings-footer .gel { flex: none; font-size: 11px; }
+@container (min-width: 540px) {
+  .settings-preferences { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
 .sw:disabled { opacity: .5; cursor: not-allowed; }
 
 .about { min-width: 0; overflow-wrap: anywhere; padding: 12px 6px 2px; font-size: 12.5px; line-height: 1.5; color: rgba(206, 236, 248, .78); }
@@ -1399,6 +1429,9 @@ body:not(.android) #alarm-editor .sourcerow .editor-note { grid-column: 1 / -1; 
    both panels usable and scroll the main area instead of clipping the tabs. */
 @media (max-width: 904px) {
   main { grid-template-columns: 1fr; grid-template-rows: max-content minmax(400px, 1fr); gap: 18px; overflow-y: auto; }
+  main:has(#pane-settings.on) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+  main:has(#pane-settings.on) .stage { display: none; }
+  main:has(#pane-settings.on) .console { height: 100%; min-height: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1512,11 +1545,19 @@ body.android {
 .android .station-music .folderpath { white-space: nowrap; }
 .android .editor { padding: 11px; }
 .android .editor-actions { row-gap: 7px; }
-.android #pane-settings.on { grid-template-rows: repeat(5, max-content); }
+.android #pane-settings.on { grid-template-rows: auto minmax(0, 1fr); }
+.android .settings-preferences { grid-template-columns: minmax(0, 1fr); }
+.android .settings .row { padding: 0; gap: 12px; }
+.android .settings .sw { height: 44px; border: 0; background: none; box-shadow: none; }
+.android .settings .sw::before { content: ""; position: absolute; inset: 9px 0; border: 1px solid rgba(160, 216, 236, .25); border-radius: 999px; background: linear-gradient(180deg, rgba(4, 28, 40, .6), rgba(80, 120, 140, .25)); box-shadow: inset 0 1px 3px rgba(0, 0, 0, .28); }
+.android .settings .sw[aria-pressed="true"]::before { background: linear-gradient(180deg, #7ce0a0, #1e9e63); border-color: rgba(190, 255, 214, .45); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .4); }
+.android .settings .sw::after { top: 10px; }
+.android .settings-section-heading .gel, .android .settings-details summary { min-height: 44px; }
+.android .settings-details summary { display: list-item; align-content: center; }
 .android #pane-alarms.on { grid-template-rows: repeat(4, max-content); align-content: start; }
 .android #pane-alarms.on.editing { grid-template-rows: minmax(0, 1fr); align-content: stretch; overflow: hidden; }
 .android #pane-alarms .list { overflow: visible; }
-.android .android-alarm-settings { padding: 8px 4px; }
+.android .android-alarm-settings { padding: 11px 12px; }
 .android .android-alarm-settings p { margin: 10px 0; line-height: 1.5; }
 .android .timerow, .android .sourcerow, .android .folderpick { flex-wrap: wrap; }
 .android .timerow .grow { flex: 1 1 150px; }

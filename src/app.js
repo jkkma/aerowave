@@ -3489,6 +3489,7 @@ function showFolderCounts(info, selector) {
     ? `${info.name || info.path}  —  ${info.count} playable file${info.count === 1 ? "" : "s"}`
     : `${info.name || info.path}  —  nothing playable in here`;
   $(selector).title = info.path;
+  $(selector).classList.toggle("warn", selector === "#backup-path" && !info.count);
   say(
     info.count ? info.count + " tracks found" : "no playable audio in that folder",
     info.count ? "good" : "bad"
@@ -4734,7 +4735,7 @@ function wire() {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
     // Space belongs to whichever control has focus. The exception is a ringing
     // alarm: a field left focused overnight must not swallow the dismiss.
-    const onControl = document.activeElement.closest("button, .row");
+    const onControl = document.activeElement.closest("button, summary, .row");
     if (e.code === "Space" && (ringing || (!typing && !onControl))) {
       e.preventDefault();
       if (ringing) dismissRing();
@@ -4776,6 +4777,7 @@ async function showConfigLocation() {
       problem.className = "wherefrom warn";
       problem.textContent = where.loadError;
       line.after(problem);
+      $("#config-details").open = true;
       say("Settings could not be loaded. See Settings for details.", "bad", true);
     }
   } catch {

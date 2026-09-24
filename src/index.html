@@ -400,49 +400,92 @@
 
     <!-- --------------------------- settings -------------------------- -->
     <div class="pane" id="pane-settings" role="tabpanel" aria-labelledby="tab-settings">
-      <div class="folderbox backup">
-        <div class="hud-mini">Backup music</div>
-        <p class="editor-note">Choose music to play if a station or alarm source is unavailable.</p>
-        <p class="editor-note android-only">If no backup track can play, alarms use the phone’s default alarm sound.</p>
-        <div class="folderpick">
-          <span class="folderpath" id="backup-path">No folder chosen</span>
-          <button class="gel" id="btn-pick-backup">Choose…</button>
-        </div>
+      <div class="settings-heading">
+        <h2>Settings</h2>
+        <p>Changes save automatically.</p>
       </div>
-      <div class="android-only android-alarm-settings">
-        <p class="hud-mini">Android alarms</p>
-        <p id="android-alarm-status" class="editor-note" role="status">Checking permissions…</p>
-        <div class="editor-actions">
-          <button class="gel" data-android-setting="exact">Alarms &amp; reminders</button>
-          <button class="gel" data-android-setting="notifications">Notifications</button>
+      <div class="settings-body">
+        <div class="settings-preferences">
+          <section class="settings-section" aria-labelledby="settings-display">
+            <h3 id="settings-display">Display</h3>
+            <ul class="settings">
+              <li class="row toggle" data-setting="clock24h">
+                <label for="setting-clock"><span id="setting-clock-label">24-hour clock</span><em id="setting-clock-help">Use 14:00 instead of 2:00 PM.</em></label>
+                <button id="setting-clock" class="sw" aria-pressed="true" aria-labelledby="setting-clock-label" aria-describedby="setting-clock-help"></button>
+              </li>
+              <li class="row toggle" data-setting="showMetadata">
+                <label for="setting-metadata"><span id="setting-metadata-label">Song information</span><em id="setting-metadata-help">Show titles supplied by stations.</em></label>
+                <button id="setting-metadata" class="sw" aria-pressed="true" aria-labelledby="setting-metadata-label" aria-describedby="setting-metadata-help"></button>
+              </li>
+            </ul>
+          </section>
+          <section class="settings-section android-unavailable" aria-labelledby="settings-startup">
+            <h3 id="settings-startup">Startup &amp; closing</h3>
+            <ul class="settings">
+              <li class="row toggle" data-setting="minimizeToTray">
+                <label for="setting-tray"><span id="setting-tray-label">Keep running when closed</span><em id="setting-tray-help">Keep alarms active in the tray.</em></label>
+                <button id="setting-tray" class="sw" aria-pressed="true" aria-labelledby="setting-tray-label" aria-describedby="setting-tray-help"></button>
+              </li>
+              <li class="row toggle" data-setting="startWithWindows">
+                <label for="setting-startup"><span id="setting-startup-label">Start at login</span><em id="setting-startup-help">Open quietly in the tray.</em></label>
+                <button id="setting-startup" class="sw" aria-pressed="false" aria-labelledby="setting-startup-label" aria-describedby="setting-startup-help"></button>
+              </li>
+            </ul>
+          </section>
         </div>
-        <p id="android-fullscreen-status" class="editor-note"></p>
-        <button class="gel" data-android-setting="fullscreen">Lock-screen alarms</button>
-        <p id="android-battery-status" class="editor-note"></p>
-        <button class="gel" data-android-setting="battery">Battery settings</button>
-        <p class="editor-note">Keep the phone powered on. After restarting, music folders may need the first unlock; the system alarm sound is the fallback. Force-stopping Aerowave prevents alarms until you open it again.</p>
+        <section class="settings-section settings-backup" aria-labelledby="settings-backup">
+          <div class="settings-section-heading">
+            <h3 id="settings-backup">Backup music</h3>
+            <button class="gel" id="btn-pick-backup">Choose folder…</button>
+          </div>
+          <p class="editor-note">Plays when a station or alarm source is unavailable.</p>
+          <p class="folderpath" id="backup-path" role="status">No backup folder chosen</p>
+          <p class="editor-note android-only">If no backup track can play, alarms use the phone’s default alarm sound.</p>
+        </section>
+        <section class="settings-section android-unavailable" aria-labelledby="settings-wake">
+          <h3 id="settings-wake">Alarms &amp; sleep</h3>
+          <ul class="settings">
+            <li class="row toggle" data-setting="wakeForAlarms">
+              <label for="setting-wake"><span id="setting-wake-label">Wake this PC for alarms</span><em id="setting-wake-help">Request a wake timer before alarms and snoozes.</em></label>
+              <button id="setting-wake" class="sw" aria-pressed="true" aria-labelledby="setting-wake-label" aria-describedby="setting-wake-help power-status"></button>
+            </li>
+          </ul>
+          <div class="power-info">
+            <p class="editor-note" id="power-status" role="status">Checking PC wake support…</p>
+            <details class="settings-details">
+              <summary>How waking works</summary>
+              <div id="power-help">
+                <p>Keep Aerowave running, including in the tray. The PC stays awake through an alarm and its snoozes; the display can turn off between rings. Each snooze also requests a wake timer if you put the PC to sleep yourself.</p>
+                <p>After the final dismissal or automatic stop, Windows can sleep normally unless another alarm or activity needs it awake.</p>
+                <p>Waking needs compatible hardware and Windows wake timers enabled. Modern Standby wake is unverified; keep those PCs awake for dependable alarms. Alarms cannot wake a shut-down PC.</p>
+              </div>
+            </details>
+          </div>
+        </section>
+        <section class="settings-section android-only android-alarm-settings" aria-labelledby="settings-android">
+          <h3 id="settings-android">Android alarms</h3>
+          <p id="android-alarm-status" class="editor-note" role="status">Checking permissions…</p>
+          <div class="editor-actions">
+            <button class="gel" data-android-setting="exact">Alarms &amp; reminders</button>
+            <button class="gel" data-android-setting="notifications">Notifications</button>
+          </div>
+          <p id="android-fullscreen-status" class="editor-note"></p>
+          <button class="gel" data-android-setting="fullscreen">Lock-screen alarms</button>
+          <p id="android-battery-status" class="editor-note"></p>
+          <button class="gel" data-android-setting="battery">Battery settings</button>
+          <details class="settings-details">
+            <summary>Alarms after a restart</summary>
+            <p>Keep the phone powered on. After restarting, music folders may need the first unlock; the system alarm sound is the fallback. Force-stopping Aerowave prevents alarms until you open it again.</p>
+          </details>
+        </section>
+        <details class="settings-details settings-storage desktop-only" id="config-details">
+          <summary>Settings storage</summary>
+          <p class="wherefrom" id="config-where"></p>
+        </details>
       </div>
-      <ul class="list settings">
-        <li class="row toggle" data-setting="clock24h"><span>24-hour clock</span><button class="sw" aria-pressed="true"></button></li>
-        <li class="row toggle" data-setting="showMetadata"><span>Show song information</span><button class="sw" aria-pressed="true"></button></li>
-        <li class="row toggle android-unavailable" data-setting="minimizeToTray"><span>Keep running when closed<em>Alarms stay active in the tray</em></span><button class="sw" aria-pressed="true"></button></li>
-        <li class="row toggle android-unavailable" data-setting="startWithWindows"><span>Start at login<em>Start quietly in the tray</em></span><button class="sw" aria-pressed="false"></button></li>
-        <li class="row toggle android-unavailable" data-setting="wakeForAlarms"><span>Wake this PC for alarms<em>Wake before alarms and snoozes</em></span><button class="sw" aria-pressed="true" aria-describedby="power-status power-help"></button></li>
-      </ul>
-      <div class="power-info android-unavailable">
-        <p class="editor-note" id="power-status" role="status">Checking PC wake support…</p>
-        <p id="power-help">Keep Aerowave running, including in the tray. With wake for alarms on, the PC stays awake through an alarm and its snoozes. The display can turn off between rings. After final dismissal or automatic stopping without another snooze, Windows can sleep normally unless another alarm or activity needs it awake. Each snooze also requests a wake timer in case you put the PC to sleep yourself. Waking requires compatible hardware and Windows wake timers to be allowed. Modern Standby wake is unverified; keep the PC awake for dependable alarms on those systems. Alarms cannot wake a shut-down PC.</p>
-      </div>
-      <div class="about">
-        <p class="hud-mini desktop-only">Aerowave · Radio &amp; alarms</p>
-        <p class="desktop-only">Keep Aerowave running for alarms to ring. You can hide it in the tray.
-           If a station cannot connect, your backup music takes over.</p>
-        <p class="android-only">Radio keeps playing when you leave Aerowave. Return here to browse stations or change playback.</p>
-        <p class="wherefrom" id="config-where"></p>
-        <div class="editor-actions">
-          <span class="flex"></span>
-          <button class="gel danger desktop-only" id="btn-quit">Quit Aerowave</button>
-        </div>
+      <div class="settings-footer desktop-only">
+        <p>Quitting stops playback and alarms.</p>
+        <button class="gel danger" id="btn-quit">Quit Aerowave</button>
       </div>
     </div>
   </section>

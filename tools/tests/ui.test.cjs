@@ -422,6 +422,37 @@ test("close and quit controls use the native window-action gate", async () => {
     .map(c => c.args.action), ["close", "quit"]);
 });
 
+test("Space on a settings disclosure belongs to the disclosure, not playback", async () => {
+  const h = createHarness();
+  h.evaluate("wire()");
+  h.document.activeElement = new Element("summary");
+  const event = await h.document.dispatch("keydown", { code: "Space", key: " " });
+  assert.equal(event.defaultPrevented, false);
+  assert.equal(h.calls.length, 0);
+});
+
+test("settings storage expands when configuration loading failed", async () => {
+  const h = createHarness({ invoke: command => command === "config_location"
+    ? { portable: true, path: "data/aerowave.json", loadError: "Could not read settings" }
+    : undefined });
+  const problems = [];
+  h.el("#config-where").after = problem => problems.push(problem);
+  await h.evaluate("showConfigLocation()");
+  assert.equal(h.el("#config-details").open, true);
+  assert.equal(problems[0].textContent, "Could not read settings");
+  assert.equal(problems[0].className, "wherefrom warn");
+});
+
+test("choosing backup music clears or restores the empty-folder warning", () => {
+  const h = createHarness();
+  h.el("#backup-path").classList.add("warn");
+  h.evaluate('showFolderCounts({ path: "Music", count: 3 }, "#backup-path")');
+  assert.equal(h.el("#backup-path").classList.contains("warn"), false);
+  assert.match(h.el("#backup-path").textContent, /3 playable files/);
+  h.evaluate('showFolderCounts({ path: "Empty", count: 0 }, "#backup-path")');
+  assert.equal(h.el("#backup-path").classList.contains("warn"), true);
+});
+
 test("boot listens for native window actions before loading settings", async () => {
   let h;
   h = createHarness({ invoke: command => {
