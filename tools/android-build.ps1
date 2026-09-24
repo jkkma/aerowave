@@ -83,6 +83,7 @@ function Publish-VerifiedReleaseApk {
         throw "The release APK recorded by Gradle is missing: $sourceApk"
     }
     $androidAbi = Confirm-ApkTargetAbi -ApkPath $sourceApk -Target $Target
+    & (Join-Path $PSScriptRoot 'android-check-startup.ps1') -ApkPath $sourceApk
 
     $packageVersion = ([IO.File]::ReadAllText((Join-Path $repoRoot 'package.json')) | ConvertFrom-Json).version
     if ($element.versionName -ne $packageVersion) {
