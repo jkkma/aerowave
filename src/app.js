@@ -27,7 +27,6 @@ document.body.classList.toggle("android", IS_ANDROID);
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const pad2 = (n) => String(n).padStart(2, "0");
-const DAY_LETTERS = ["M", "T", "W", "T", "F", "S", "S"];
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 if (IS_ANDROID) {
@@ -3121,8 +3120,11 @@ async function refreshNextAlarm() {
   if (request !== nextAlarmRequest) return;
   const box = $("#next-alarm");
   const bar = $("#status-next");
+  box.classList.toggle("idle", !next);
+  box.classList.toggle("scheduled", !!next);
   if (!next) {
-    box.textContent = "No alarm set";
+    box.textContent = !state.alarms.length ? "No alarm set"
+      : state.alarms.some((alarm) => alarm.enabled) ? "No upcoming alarm" : "All alarms are off";
     bar.textContent = "";
     return;
   }
@@ -3222,14 +3224,12 @@ function renderStations() {
 }
 
 function daysLabel(days) {
-  if (!days || !days.length) return "ONCE";
-  if (days.length === 7) return "EVERY DAY";
+  if (!days || !days.length) return "Once";
+  if (days.length === 7) return "Every day";
   const weekdays = [0, 1, 2, 3, 4];
-  if (days.length === 5 && weekdays.every((d) => days.includes(d))) return "WEEKDAYS";
-  if (days.length === 2 && days.includes(5) && days.includes(6)) return "WEEKENDS";
-  return DAY_LETTERS.map((letter, i) =>
-    days.includes(i) ? letter : `<i>${letter}</i>`
-  ).join("");
+  if (days.length === 5 && weekdays.every((d) => days.includes(d))) return "Weekdays";
+  if (days.length === 2 && days.includes(5) && days.includes(6)) return "Weekends";
+  return DAY_NAMES.filter((_, i) => days.includes(i)).join(", ");
 }
 
 function sourceLabel(source) {
@@ -3252,31 +3252,57 @@ function renderAlarms() {
 
   if (!sorted.length) {
     const li = document.createElement("li");
-    li.className = "empty";
-    li.textContent = "Wake up to a station or your own music. Add your first alarm.";
+    li.className = "alarm-empty";
+    const clock = document.createElement("span");
+    clock.className = "alarm-empty-clock";
+    clock.setAttribute("aria-hidden", "true");
+    const title = document.createElement("h3");
+    title.textContent = "Make time for a good morning";
+    const note = document.createElement("p");
+    note.textContent = "Wake up to your favourite station or music from a folder. Set a daily routine or a one-time alarm.";
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "gel primary";
+    add.textContent = "Create an alarm";
+    add.addEventListener("click", () => openAlarmEditor(null));
+    li.append(clock, title, note, add);
     list.append(li);
     return;
   }
 
   sorted.forEach((alarm) => {
     const li = document.createElement("li");
-    li.className = "row" + (alarm.enabled ? "" : " off");
+    li.className = "alarm-card" + (alarm.enabled ? "" : " off");
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "alarm-card-main";
+    edit.dataset.alarmId = alarm.id;
+    edit.setAttribute("aria-label", `Edit ${alarm.label || "alarm"} at ${fmtAlarmTime(alarm.hour, alarm.minute)}, ${daysLabel(alarm.days)}, ${sourceLabel(alarm.source)}, ${alarm.enabled ? "on" : "off"}`);
+    edit.addEventListener("click", () => openAlarmEditor(alarm));
 
     const when = document.createElement("span");
     when.className = "when";
     when.textContent = fmtAlarmTime(alarm.hour, alarm.minute);
 
     const name = document.createElement("span");
-    name.className = "name";
-    const b = document.createElement("b");
-    b.textContent = alarm.label || "Alarm";
-    const days = document.createElement("small");
-    days.className = "days-mini";
-    days.innerHTML = daysLabel(alarm.days);
-    days.append("  ·  " + sourceLabel(alarm.source).toUpperCase());
-    name.append(b, days);
+    name.className = "alarm-card-name";
+    name.textContent = alarm.label || "Alarm";
+    const days = document.createElement("span");
+    days.className = "alarm-card-schedule";
+    days.textContent = daysLabel(alarm.days);
+    const source = document.createElement("span");
+    source.className = "alarm-card-source";
+    source.textContent = sourceLabel(alarm.source);
+    source.title = source.textContent;
+    edit.append(when, name, days, source);
 
+    const toggle = document.createElement("div");
+    toggle.className = "alarm-card-toggle";
+    const status = document.createElement("span");
+    status.className = "alarm-card-status";
+    status.textContent = alarm.enabled ? "On" : "Off";
     const sw = document.createElement("button");
+    sw.type = "button";
     sw.className = "sw";
     sw.setAttribute("aria-pressed", String(!!alarm.enabled));
     sw.setAttribute("aria-label", `${alarm.label || "Alarm"} at ${fmtAlarmTime(alarm.hour, alarm.minute)}`);
@@ -3287,17 +3313,8 @@ function renderAlarms() {
       renderAlarms();
     });
 
-    const edit = document.createElement("button");
-    edit.className = "icon";
-    edit.textContent = "✎";
-    edit.title = "Edit";
-    edit.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openAlarmEditor(alarm);
-    });
-
-    li.append(when, name, sw, edit);
-    li.addEventListener("click", () => openAlarmEditor(alarm));
+    toggle.append(status, sw);
+    li.append(edit, toggle);
     list.append(li);
   });
 }
@@ -3570,6 +3587,8 @@ let editingAlarm = null;
 let editorDays = [];
 let editorKind = "station";
 let editorFolder = null;
+let editorReturnFocus = null;
+const ALARM_REPEATS = { once: [], weekdays: [0, 1, 2, 3, 4], weekends: [5, 6], daily: [0, 1, 2, 3, 4, 5, 6] };
 
 function newId() {
   return "a" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -3617,10 +3636,34 @@ function syncTimeUi() {
     btn.classList.toggle("on", lit);
     btn.setAttribute("aria-pressed", String(lit));
   });
-  $$("#al-quick .chip").forEach((chip) =>
-    chip.classList.toggle("on", +chip.dataset.mins === editorQuickMins)
-  );
+  $$("#al-quick .chip").forEach((chip) => {
+    const selected = +chip.dataset.mins === editorQuickMins;
+    chip.classList.toggle("on", selected);
+    chip.setAttribute("aria-pressed", String(selected));
+  });
+  syncRepeatUi();
   updateDayHint();
+}
+
+function syncRepeatUi() {
+  $$("#al-days button").forEach((button) => {
+    const selected = editorDays.includes(+button.dataset.day);
+    button.classList.toggle("on", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  $$("#al-repeat-presets .chip").forEach((button) => {
+    const days = ALARM_REPEATS[button.dataset.repeat];
+    const selected = days.length === editorDays.length && days.every((day) => editorDays.includes(day));
+    button.classList.toggle("on", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+}
+
+function setEditorRepeat(preset) {
+  ++editorTimeRequest;
+  editorDays = [...ALARM_REPEATS[preset]];
+  editorQuickMins = 0;
+  syncTimeUi();
 }
 
 /**
@@ -3645,7 +3688,6 @@ async function setEditorTimeIn(mins) {
   // A span from now can only happen once. Leaving days selected would give
   // an alarm that repeats at that time instead - not what the chip says.
   editorDays = [];
-  $$("#al-days button").forEach((b) => b.classList.remove("on"));
   setEditorTime(at.hour, at.minute, mins);
 }
 
@@ -3659,14 +3701,11 @@ function applyClockMode(hour, minute) {
 function updateDayHint() {
   const hint = $("#al-dayhint");
   if (editorDays.length) {
-    hint.textContent = editorDays
-      .slice()
-      .sort((a, b) => a - b)
-      .map((d) => DAY_NAMES[d])
-      .join(" ");
+    const { hour, minute } = readEditorTime();
+    hint.textContent = `${daysLabel(editorDays)} at ${fmtAlarmTime(hour, minute)}`;
   } else {
     const { hour, minute } = readEditorTime();
-    hint.textContent = `Once, at the next ${fmtAlarmTime(hour, minute)}`;
+    hint.textContent = `Once, at the next ${fmtAlarmTime(hour, minute)} · turns off after ringing`;
   }
 }
 
@@ -3682,7 +3721,7 @@ function setKind(kind) {
   note.className = "editor-note";
   note.textContent =
     kind === "folder"
-      ? "One file is picked at random from the folder and repeats until the alarm is answered — snoozes included, so it comes back with the same track."
+      ? "A random track repeats until you answer the alarm. Snoozing keeps the same track."
       : IS_ANDROID
         ? "If the stream cannot play, backup music takes over, followed by the phone’s alarm sound."
         : "If the stream will not start within twelve seconds, the backup folder plays instead.";
@@ -3740,8 +3779,13 @@ function syncAutoSnooze() {
   const select = $("#al-autosnooze");
   select.disabled = +$("#al-autostop").value === 0;
   select.title = select.disabled
-    ? "Only applies when the alarm gives up"
-    : "When it gives up, snooze instead of stopping";
+    ? "Choose a ring duration to use auto-snooze"
+    : "When the ring duration ends, snooze instead of stopping";
+  const snooze = +$("#al-snooze").value;
+  const duration = +$("#al-autostop").value;
+  const repeats = +select.value;
+  $("#al-options-summary").textContent = `Snooze ${snooze} min · ${duration ? `Ring ${duration} min` : "Ring until dismissed"}` +
+    (duration && repeats ? ` · Auto-snooze ${repeats}×` : "");
 }
 
 function openAlarmEditor(alarm) {
@@ -3750,6 +3794,7 @@ function openAlarmEditor(alarm) {
     tickClock();
     return;
   }
+  editorReturnFocus = document.activeElement;
   editingAlarm = alarm || null;
   // A new alarm opens on the last one that was saved. Somebody who wakes to
   // the same station, fading in over the same twenty seconds, should not have
@@ -3771,21 +3816,16 @@ function openAlarmEditor(alarm) {
 
   $("#al-label").value = base.label || "";
   editorDays = [...(base.days || [])];
-  $$("#al-days button").forEach((b) => {
-    const selected = editorDays.includes(+b.dataset.day);
-    b.classList.toggle("on", selected);
-    b.setAttribute("aria-pressed", String(selected));
-  });
   applyClockMode(base.hour, base.minute);
 
   const src = base.source || { kind: "station" };
   editorFolder = src.kind === "folder" ? src.path : null;
-  $("#al-folderpath").textContent = editorFolder || "No folder chosen";
+  showEditorFolder();
   fillStationSelect(src.kind === "station" ? src.stationId : (state.stations[0] || {}).id);
   setKind(src.kind);
 
   $("#al-volume").value = Math.round((base.volume ?? 0.8) * 100);
-  $("#al-volval").textContent = $("#al-volume").value;
+  $("#al-volval").textContent = $("#al-volume").value + "%";
   $("#al-volume").style.setProperty("--fill", $("#al-volume").value + "%");
   setSelectValue($("#al-fade"), base.fadeSecs ?? 20, (v) => v + " s");
   setSelectValue($("#al-snooze"), base.snoozeMins ?? 10, (v) => v + " min");
@@ -3797,8 +3837,20 @@ function openAlarmEditor(alarm) {
   );
   syncAutoSnooze();
 
+  $("#al-editor-title").textContent = alarm ? "Edit alarm" : "New alarm";
+  $("#al-options").open = false;
   $("#al-delete").classList.toggle("hidden", !alarm);
+  $("#pane-alarms").classList.add("editing");
   $("#alarm-editor").classList.remove("hidden");
+  $("#alarm-editor .alarm-editor-body").scrollTop = 0;
+  $("#al-hour").focus({ preventScroll: true });
+  $("#al-hour").select();
+}
+
+function showEditorFolder(name) {
+  const field = $("#al-folderpath");
+  field.textContent = name || (editorFolder ? editorFolder.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || editorFolder : "No folder chosen");
+  field.title = editorFolder || "";
 }
 
 /**
@@ -3821,8 +3873,17 @@ function rememberAlarmSetup(alarm) {
 
 function closeAlarmEditor() {
   ++editorTimeRequest;
+  const wasOpen = !$("#alarm-editor").classList.contains("hidden");
+  const editedId = editingAlarm?.id;
   editingAlarm = null;
   $("#alarm-editor").classList.add("hidden");
+  $("#pane-alarms").classList.remove("editing");
+  if (wasOpen && !ringing) {
+    const savedRow = $$("#alarm-list .alarm-card-main").find((button) => button.dataset.alarmId === editedId);
+    const target = editorReturnFocus?.isConnected ? editorReturnFocus : savedRow || $("#btn-add-alarm");
+    target.focus({ preventScroll: true });
+  }
+  editorReturnFocus = null;
 }
 
 function readAlarmEditor() {
@@ -4325,6 +4386,9 @@ function wire() {
   // alarms
   $("#btn-add-alarm").addEventListener("click", () => openAlarmEditor(null));
   $("#al-cancel").addEventListener("click", closeAlarmEditor);
+  $$("#al-repeat-presets .chip").forEach((button) =>
+    button.addEventListener("click", () => setEditorRepeat(button.dataset.repeat))
+  );
 
   $$("#al-days button").forEach((btn) =>
     btn.addEventListener("click", () => {
@@ -4333,8 +4397,6 @@ function wire() {
       const i = editorDays.indexOf(day);
       if (i >= 0) editorDays.splice(i, 1);
       else editorDays.push(day);
-      btn.classList.toggle("on", i < 0);
-      btn.setAttribute("aria-pressed", String(i < 0));
       editorQuickMins = 0; // a repeat is not a span from now either
       syncTimeUi();
     })
@@ -4382,7 +4444,7 @@ function wire() {
     const info = await folderCommand("pick_folder").catch(e => { say(String(e), "bad"); return null; });
     if (!info) return;
     editorFolder = info.path;
-    $("#al-folderpath").textContent = info.name || info.path;
+    showEditorFolder(info.name);
     const note = $("#al-sourcenote");
     note.className = "editor-note" + (info.count ? "" : " bad");
     note.textContent = info.count
@@ -4391,10 +4453,12 @@ function wire() {
   });
 
   $("#al-autostop").addEventListener("change", syncAutoSnooze);
+  $("#al-snooze").addEventListener("change", syncAutoSnooze);
+  $("#al-autosnooze").addEventListener("change", syncAutoSnooze);
 
   $("#al-volume").addEventListener("input", (e) => {
     e.target.style.setProperty("--fill", e.target.value + "%");
-    $("#al-volval").textContent = e.target.value;
+    $("#al-volval").textContent = e.target.value + "%";
   });
 
   $("#alarm-editor").addEventListener("submit", async (e) => {

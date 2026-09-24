@@ -195,122 +195,146 @@
       <p class="android-only editor-note" id="android-alarm-hint">Checking Android alarm permissions…</p>
 
       <form class="editor hidden" id="alarm-editor" autocomplete="off">
-        <div class="editor-title">Alarm</div>
+        <div class="editor-title" id="al-editor-title">New alarm</div>
+        <div class="alarm-editor-body">
+          <section class="alarm-editor-section" aria-labelledby="al-time-heading">
+            <h3 id="al-time-heading">Time &amp; repeat</h3>
+            <div class="timerow">
+              <div class="timeset">
+                <button type="button" class="stepper" data-step="hour" data-dir="1" aria-label="Increase hour">▲</button>
+                <input class="timefield" id="al-hour" aria-label="Alarm hour" inputmode="numeric" maxlength="2" value="07">
+                <button type="button" class="stepper" data-step="hour" data-dir="-1" aria-label="Decrease hour">▼</button>
+              </div>
+              <span class="timecolon">:</span>
+              <div class="timeset">
+                <button type="button" class="stepper" data-step="minute" data-dir="1" aria-label="Increase minute">▲</button>
+                <input class="timefield" id="al-minute" aria-label="Alarm minute" inputmode="numeric" maxlength="2" value="00">
+                <button type="button" class="stepper" data-step="minute" data-dir="-1" aria-label="Decrease minute">▼</button>
+              </div>
+              <div class="meridiem hidden" id="al-meridiem" role="group" aria-label="Morning or afternoon">
+                <button type="button" class="chip" data-ampm="am" aria-pressed="false">AM</button>
+                <button type="button" class="chip" data-ampm="pm" aria-pressed="false">PM</button>
+              </div>
+              <label class="lbl grow">Label<input class="field" id="al-label" maxlength="40" placeholder="Wake up"></label>
+            </div>
 
-        <div class="timerow">
-          <div class="timeset">
-            <button type="button" class="stepper" data-step="hour" data-dir="1" aria-label="Increase hour">▲</button>
-            <input class="timefield" id="al-hour" aria-label="Alarm hour" inputmode="numeric" maxlength="2" value="07">
-            <button type="button" class="stepper" data-step="hour" data-dir="-1" aria-label="Decrease hour">▼</button>
-          </div>
-          <span class="timecolon">:</span>
-          <div class="timeset">
-            <button type="button" class="stepper" data-step="minute" data-dir="1" aria-label="Increase minute">▲</button>
-            <input class="timefield" id="al-minute" aria-label="Alarm minute" inputmode="numeric" maxlength="2" value="00">
-            <button type="button" class="stepper" data-step="minute" data-dir="-1" aria-label="Decrease minute">▼</button>
-          </div>
-          <div class="meridiem hidden" id="al-meridiem" role="group" aria-label="Morning or afternoon">
-            <button type="button" class="chip" data-ampm="am" aria-pressed="false">AM</button>
-            <button type="button" class="chip" data-ampm="pm" aria-pressed="false">PM</button>
-          </div>
-          <label class="lbl grow">Label<input class="field" id="al-label" maxlength="40" placeholder="Wake up"></label>
-        </div>
+            <div class="quickrow">
+              <span class="hud-mini">Ring in</span>
+              <div class="chips" id="al-quick">
+                <button type="button" class="chip" data-mins="15">15m</button>
+                <button type="button" class="chip" data-mins="30">30m</button>
+                <button type="button" class="chip" data-mins="45">45m</button>
+                <button type="button" class="chip" data-mins="60">60m</button>
+                <button type="button" class="chip" data-mins="90">90m</button>
+                <button type="button" class="chip" data-mins="120">120m</button>
+                <button type="button" class="chip" data-mins="480">8h</button>
+                <button type="button" class="chip" data-mins="540">9h</button>
+                <button type="button" class="chip" data-mins="600">10h</button>
+              </div>
+            </div>
 
-        <div class="quickrow">
-          <span class="hud-mini">Ring in</span>
-          <div class="chips" id="al-quick">
-            <button type="button" class="chip" data-mins="15">15m</button>
-            <button type="button" class="chip" data-mins="30">30m</button>
-            <button type="button" class="chip" data-mins="45">45m</button>
-            <button type="button" class="chip" data-mins="60">60m</button>
-            <button type="button" class="chip" data-mins="90">90m</button>
-            <button type="button" class="chip" data-mins="120">120m</button>
-            <button type="button" class="chip" data-mins="480">8h</button>
-            <button type="button" class="chip" data-mins="540">9h</button>
-            <button type="button" class="chip" data-mins="600">10h</button>
-          </div>
-        </div>
+            <div class="alarm-repeat">
+              <div class="alarm-repeat-heading"><span class="hud-mini">Repeat</span><span class="dayhint" id="al-dayhint"></span></div>
+              <div class="chips" id="al-repeat-presets" role="group" aria-label="Repeat preset">
+                <button type="button" class="chip" data-repeat="once" aria-pressed="true">Once</button>
+                <button type="button" class="chip" data-repeat="weekdays" aria-pressed="false">Weekdays</button>
+                <button type="button" class="chip" data-repeat="weekends" aria-pressed="false">Weekends</button>
+                <button type="button" class="chip" data-repeat="daily" aria-pressed="false">Daily</button>
+              </div>
+              <div class="days" id="al-days" role="group" aria-label="Repeat on days">
+                <button type="button" data-day="0" aria-label="Monday" aria-pressed="false">Mon</button>
+                <button type="button" data-day="1" aria-label="Tuesday" aria-pressed="false">Tue</button>
+                <button type="button" data-day="2" aria-label="Wednesday" aria-pressed="false">Wed</button>
+                <button type="button" data-day="3" aria-label="Thursday" aria-pressed="false">Thu</button>
+                <button type="button" data-day="4" aria-label="Friday" aria-pressed="false">Fri</button>
+                <button type="button" data-day="5" aria-label="Saturday" aria-pressed="false">Sat</button>
+                <button type="button" data-day="6" aria-label="Sunday" aria-pressed="false">Sun</button>
+              </div>
+            </div>
+          </section>
 
-        <div class="days" id="al-days">
-          <button type="button" data-day="0">M</button>
-          <button type="button" data-day="1">T</button>
-          <button type="button" data-day="2">W</button>
-          <button type="button" data-day="3">T</button>
-          <button type="button" data-day="4">F</button>
-          <button type="button" data-day="5">S</button>
-          <button type="button" data-day="6">S</button>
-          <span class="dayhint" id="al-dayhint"></span>
-        </div>
+          <section class="alarm-editor-section" aria-labelledby="al-sound-heading">
+            <h3 id="al-sound-heading">Sound</h3>
+            <div class="sourcerow">
+              <div class="chips" id="al-kind">
+                <button type="button" class="chip on" data-kind="station">Station</button>
+                <button type="button" class="chip" data-kind="folder">Folder</button>
+              </div>
+              <select class="field" id="al-station" aria-label="Alarm station"></select>
+              <div class="folderpick hidden" id="al-folderpick">
+                <span class="folderpath" id="al-folderpath">No folder chosen</span>
+                <button type="button" class="gel" id="al-folderbtn">Choose…</button>
+              </div>
+              <p class="editor-note" id="al-sourcenote"></p>
+              <p class="editor-note android-only">Alarms use your current media output, including Bluetooth, and your phone’s media volume. Keep media volume audible and allow media sound in Do Not Disturb. If Bluetooth disconnects, the alarm continues on the phone.</p>
+            </div>
 
-        <div class="sourcerow">
-          <div class="chips" id="al-kind">
-            <button type="button" class="chip on" data-kind="station">Station</button>
-            <button type="button" class="chip" data-kind="folder">Folder</button>
-          </div>
-          <select class="field" id="al-station"></select>
-          <div class="folderpick hidden" id="al-folderpick">
-            <span class="folderpath" id="al-folderpath">No folder chosen</span>
-            <button type="button" class="gel" id="al-folderbtn">Choose…</button>
-          </div>
-          <p class="editor-note" id="al-sourcenote"></p>
-          <p class="editor-note android-only">Alarms use your current media output, including Bluetooth, and your phone’s media volume. Keep media volume audible and allow media sound in Do Not Disturb. If Bluetooth disconnects, the alarm continues on the phone.</p>
-        </div>
+            <div class="knobs">
+              <label class="lbl">Volume <span class="knobval" id="al-volval">80%</span>
+                <input type="range" class="slider" id="al-volume" min="10" max="100" value="80">
+              </label>
+              <label class="lbl">Fade-in
+                <select class="field" id="al-fade">
+                  <option value="0">none</option>
+                  <option value="10">10 s</option>
+                  <option value="20" selected>20 s</option>
+                  <option value="45">45 s</option>
+                  <option value="90">90 s</option>
+                </select>
+              </label>
+            </div>
+          </section>
 
-        <div class="knobs">
-          <label class="lbl">Volume <span class="knobval" id="al-volval">80</span>
-            <input type="range" class="slider" id="al-volume" min="10" max="100" value="80">
-          </label>
-          <label class="lbl">Fade-in
-            <select class="field" id="al-fade">
-              <option value="0">none</option>
-              <option value="10">10 s</option>
-              <option value="20" selected>20 s</option>
-              <option value="45">45 s</option>
-              <option value="90">90 s</option>
-            </select>
-          </label>
-          <label class="lbl">Snooze
-            <select class="field" id="al-snooze">
-              <option value="5">5 min</option>
-              <option value="10" selected>10 min</option>
-              <option value="15">15 min</option>
-              <option value="20">20 min</option>
-            </select>
-          </label>
-          <label class="lbl">Give up after
-            <select class="field" id="al-autostop">
-              <option value="1">1 min</option>
-              <option value="2">2 min</option>
-              <option value="5">5 min</option>
-              <option value="10">10 min</option>
-              <option value="15">15 min</option>
-              <option value="20">20 min</option>
-              <option value="30" selected>30 min</option>
-              <option value="45">45 min</option>
-              <option value="60">1 hour</option>
-              <option value="90">90 min</option>
-              <option value="120">2 hours</option>
-              <option value="0">never</option>
-            </select>
-          </label>
-          <label class="lbl">Auto-snooze
-            <select class="field" id="al-autosnooze">
-              <option value="0" selected>off</option>
-              <option value="1">once</option>
-              <option value="2">twice</option>
-              <option value="3">3 times</option>
-              <option value="5">5 times</option>
-              <option value="10">10 times</option>
-            </select>
-          </label>
+          <details id="al-options">
+            <summary>Snooze &amp; auto-stop <span id="al-options-summary">10 min snooze · 30 min duration</span></summary>
+            <div class="alarm-options-body">
+              <p class="editor-note">When the ring duration ends, the alarm stops. With auto-snooze, it waits for the snooze interval and rings again.</p>
+              <div class="knobs">
+                <label class="lbl">Snooze
+                  <select class="field" id="al-snooze">
+                    <option value="5">5 min</option>
+                    <option value="10" selected>10 min</option>
+                    <option value="15">15 min</option>
+                    <option value="20">20 min</option>
+                  </select>
+                </label>
+                <label class="lbl">Ring duration
+                  <select class="field" id="al-autostop">
+                    <option value="1">1 min</option>
+                    <option value="2">2 min</option>
+                    <option value="5">5 min</option>
+                    <option value="10">10 min</option>
+                    <option value="15">15 min</option>
+                    <option value="20">20 min</option>
+                    <option value="30" selected>30 min</option>
+                    <option value="45">45 min</option>
+                    <option value="60">1 hour</option>
+                    <option value="90">90 min</option>
+                    <option value="120">2 hours</option>
+                    <option value="0">never</option>
+                  </select>
+                </label>
+                <label class="lbl">Auto-snooze
+                  <select class="field" id="al-autosnooze">
+                    <option value="0" selected>off</option>
+                    <option value="1">once</option>
+                    <option value="2">twice</option>
+                    <option value="3">3 times</option>
+                    <option value="5">5 times</option>
+                    <option value="10">10 times</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+          </details>
         </div>
 
         <div class="editor-actions">
-          <button type="button" class="gel" id="al-test">Test</button>
+          <button type="button" class="gel" id="al-test">Test sound</button>
           <span class="flex"></span>
           <button type="button" class="gel danger hidden" id="al-delete">Delete</button>
           <button type="button" class="gel" id="al-cancel">Cancel</button>
-          <button type="submit" class="gel primary">Save</button>
+          <button type="submit" class="gel primary">Save alarm</button>
         </div>
       </form>
     </div>
