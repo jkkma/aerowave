@@ -60,11 +60,10 @@ These edits were present before the migration. They have not been ported onto
 ## Migration coverage
 
 The published migration converts the current project instruction file to
-`AGENTS.md`, both reviewer agents to `.codex/agents/`, both workflows to
-`.agents/skills/`, and the hook wiring to `.codex/hooks.json` with native tool
-payload handling. See [checks and hook trust](checks.md) for activation and
-standalone verification. There was no project MCP server or model/API dependency
-to translate.
+`AGENTS.md`, both reviewer agents to `.codex/agents/`, and both workflows to
+`.agents/skills/`. Repository checks run manually from `tools/checks/`, with commands listed in
+[AGENTS.md](../AGENTS.md). There was no project MCP server or model/API
+dependency to translate.
 
 The persistent window-testing note is incorporated into `windows-testing.md`;
 the older session's unfinished-work context is recorded above. Neither document

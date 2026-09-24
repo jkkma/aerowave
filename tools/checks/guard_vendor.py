@@ -7,11 +7,10 @@ upgrade: replace the file wholesale instead.
 """
 
 import argparse
-import json
 import pathlib
 import sys
 
-from hook_input import edited_paths, read_event
+from paths import resolve_paths
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 VENDOR = ROOT / "src" / "vendor"
@@ -23,15 +22,10 @@ def protected_paths(paths):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hook", action="store_true", help="Read a Codex event from stdin")
-    parser.add_argument("paths", nargs="*", help="Paths to check before editing")
+    parser.add_argument("paths", nargs="+", help="Paths to check before editing")
     args = parser.parse_args(argv)
-    if not args.hook and not args.paths:
-        parser.error("provide paths to check, or --hook")
     try:
-        paths = edited_paths(read_event()) if args.hook else {
-            pathlib.Path(raw).resolve() for raw in args.paths
-        }
+        paths = resolve_paths(args.paths)
     except (ValueError, OSError) as error:
         print(f"Cannot check vendor paths: {error}", file=sys.stderr)
         return 2
@@ -42,13 +36,6 @@ def main(argv=None):
             + ", ".join(str(path.relative_to(ROOT)) for path in targets)
             + ". Replace the complete upstream build and update its licence for an upgrade."
         )
-        if args.hook:
-            print(json.dumps({"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }}))
-            return 0
         print(reason, file=sys.stderr)
         return 2
     return 0

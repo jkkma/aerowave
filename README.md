@@ -500,9 +500,9 @@ core test run does not establish native playback on either platform.
 
 ## How it is put together
 
-For development with Codex, start with [AGENTS.md](AGENTS.md). Project skills,
-reviewer agents and automated checks are included; see
-[checks and hook trust](docs/checks.md) for activation and standalone commands.
+For development with Codex, start with [AGENTS.md](AGENTS.md). Project skills
+and reviewer agents are included. Manual repository checks live in
+`tools/checks/`; AGENTS.md lists the commands.
 The [Linux testing guide](docs/linux-testing.md) covers native builds and playback
 checks. The [Windows testing guide](docs/windows-testing.md) preserves native input
 and accessibility lessons, and the [development handoff](docs/development-handoff.md)
