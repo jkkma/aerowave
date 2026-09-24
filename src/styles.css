@@ -606,6 +606,9 @@ body.playing .gel.big { box-shadow: 0 0 22px rgba(120, 236, 255, .45), 0 5px 16p
 #pane-settings.on { grid-template-rows: repeat(4, max-content); align-content: start; }
 #pane-settings .settings { overflow: visible; }
 #pane-browse.on { grid-template-rows: auto auto 1fr auto; }
+#pane-alarms.on { grid-template-rows: auto minmax(0, 1fr) auto; }
+#pane-alarms.on.editing { grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+#pane-alarms.editing > :not(#alarm-editor) { display: none !important; }
 /* The directory filters, two to a row and evenly split. */
 .browsefilters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-width: 0; }
 .browsefilters .field { min-width: 0; }
@@ -713,27 +716,102 @@ body.playing .gel.big { box-shadow: 0 0 22px rgba(120, 236, 255, .45), 0 5px 16p
 .row .icon.done:hover { background: linear-gradient(180deg, rgba(255, 255, 255, .18), rgba(0, 0, 0, .2)); }
 .row .tag.warn { color: #ffd9c6; background: rgba(120, 46, 20, .55); border-color: rgba(255, 150, 110, .45); }
 
-/* alarm rows */
-.alarms .when {
+/* The empty view occupies the list's available height without drawing a
+   large, vacant inset box behind it. */
+.alarms:has(.alarm-empty) {
+  display: grid;
+  align-content: center;
+  background: none;
+  box-shadow: none;
+}
+.alarm-empty {
+  display: grid;
+  justify-items: center;
+  gap: 11px;
+  margin: auto;
+  padding: 30px 20px;
+  max-width: 360px;
+  text-align: center;
+  color: #d3edf5;
+}
+.alarm-empty-clock {
+  position: relative;
+  width: 68px;
+  height: 68px;
+  margin-bottom: 5px;
+  border: 3px solid rgba(193, 248, 255, .72);
+  border-radius: 50%;
+  background: radial-gradient(circle at 34% 24%, rgba(226, 255, 255, .27), rgba(29, 141, 169, .22) 47%, rgba(3, 29, 43, .35));
+  box-shadow: 0 0 0 7px rgba(143, 226, 244, .08), 0 9px 22px rgba(0, 23, 35, .34), inset 0 1px 0 rgba(255, 255, 255, .6);
+}
+.alarm-empty-clock::before,
+.alarm-empty-clock::after {
+  content: "";
+  position: absolute;
+  left: calc(50% - 1px);
+  bottom: 50%;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--amber-hi);
+  transform-origin: bottom;
+}
+.alarm-empty-clock::before { height: 20px; transform: rotate(38deg); }
+.alarm-empty-clock::after { height: 16px; transform: rotate(-68deg); }
+.alarm-empty h3 { margin: 0; font-size: 19px; font-weight: 600; color: var(--foam); }
+.alarm-empty p { margin: 0 0 7px; font-size: 13px; line-height: 1.5; }
+
+.alarms { display: grid; align-content: start; gap: 8px; padding: 5px; }
+.alarm-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid rgba(177, 231, 245, .23);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(180, 240, 250, .15), rgba(25, 105, 131, .1));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .2), 0 3px 12px rgba(0, 19, 31, .15);
+}
+.alarm-card.off { background: rgba(7, 43, 59, .3); border-color: rgba(170, 220, 234, .13); }
+.alarm-card-main {
+  display: grid;
+  grid-template-columns: minmax(75px, auto) minmax(0, 1fr);
+  column-gap: 12px;
+  row-gap: 2px;
+  flex: 1;
+  min-width: 0;
+  padding: 3px 5px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--foam);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.alarm-card-main:hover { background: rgba(197, 244, 255, .08); }
+.alarm-card-main:focus-visible,
+.alarm-card-toggle .sw:focus-visible,
+#al-days button:focus-visible,
+#al-options summary:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+.alarm-card .when {
+  grid-row: 1 / 4;
+  align-self: start;
   font-family: var(--hud);
   font-weight: 600;
-  font-size: 24px;
-  letter-spacing: -.02em;
+  font-size: clamp(20px, 2.1vw, 25px);
+  letter-spacing: -.03em;
   font-variant-numeric: tabular-nums;
   color: var(--foam);
-  width: 84px;
-  flex: none;
-  text-shadow: none;
+  white-space: nowrap;
 }
-.alarms .row.off .when, .alarms .row.off .name { opacity: .42; }
-.alarms .days-mini {
-  display: block;
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: .05em;
-  color: rgba(255, 176, 46, .85);
-}
-.alarms .days-mini i { font-style: normal; opacity: .28; }
+.alarm-card-name { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alarm-card-schedule, .alarm-card-source { font-size: 11px; line-height: 1.4; color: #c0e0eb; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alarm-card-schedule { color: var(--amber-hi); }
+.alarm-card.off .alarm-card-main { opacity: .55; }
+.alarm-card-toggle { display: grid; justify-items: center; gap: 5px; flex: none; }
+.alarm-card-status { font-size: 10px; line-height: 1; color: #c3e8ed; }
+.alarm-card.off .alarm-card-status { color: #afc8d1; }
 
 .sw {
   flex: none;
@@ -946,15 +1024,77 @@ select.field option { background: #062434; color: var(--foam); }
 
 .nextalarm {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
   padding: 8px 12px;
   border-radius: 8px;
-  background: linear-gradient(180deg, rgba(255, 176, 46, .16), rgba(255, 176, 46, .05));
-  border: 1px solid rgba(255, 176, 46, .32);
+  background: linear-gradient(180deg, rgba(178, 224, 236, .11), rgba(115, 174, 195, .05));
+  border: 1px solid rgba(174, 224, 239, .18);
   font-family: var(--hud);
   font-weight: 500;
   font-size: 12px;
   letter-spacing: normal;
-  color: var(--amber-hi);
+  color: #c9e6ef;
+}
+.nextalarm:empty { display: none; }
+.nextalarm.scheduled { background: linear-gradient(180deg, rgba(255, 176, 46, .16), rgba(255, 176, 46, .05)); border-color: rgba(255, 176, 46, .32); color: var(--amber-hi); }
+
+/* The editor takes the full pane. Only its middle region scrolls, so the
+   actions remain available even when the optional settings are expanded. */
+#alarm-editor {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 0;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+#alarm-editor .editor-title { padding: 13px 17px; border-bottom: 1px solid rgba(180, 233, 245, .17); font-size: 15px; }
+.alarm-editor-body { display: grid; align-content: start; gap: 11px; min-height: 0; padding: 12px 13px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(120, 220, 245, .5) transparent; }
+.alarm-editor-section, #al-options {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid rgba(170, 226, 244, .17);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(181, 239, 249, .09), rgba(3, 29, 43, .21));
+}
+.alarm-editor-section h3 { margin: 0; font-size: 12px; font-weight: 600; color: var(--aqua-hi); }
+#alarm-editor .timerow { flex-wrap: wrap; align-items: center; }
+#alarm-editor .timerow .grow { flex: 1 1 145px; min-width: 145px; }
+#alarm-editor .quickrow { align-items: flex-start; }
+#alarm-editor #al-quick { flex: 1 1 280px; }
+.alarm-repeat { display: grid; gap: 8px; }
+.alarm-repeat-heading { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.alarm-repeat .dayhint { margin: 0; }
+#al-repeat-presets { flex-wrap: wrap; }
+#al-repeat-presets .chip { flex: 1 1 auto; }
+#al-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 5px; }
+#al-days button { width: auto; min-width: 0; height: 33px; }
+#alarm-editor .sourcerow { gap: 9px; }
+#alarm-editor .sourcerow .editor-note { line-height: 1.45; }
+body:not(.android) #alarm-editor .sourcerow { grid-template-columns: auto minmax(0, 1fr); align-items: center; }
+body:not(.android) #alarm-editor .sourcerow .editor-note { grid-column: 1 / -1; }
+#alarm-editor .knobs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+#al-options { display: block; padding: 0; }
+#al-options summary { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; padding: 12px 13px; cursor: pointer; color: var(--aqua-hi); font-size: 12px; font-weight: 600; list-style: none; }
+#al-options summary::-webkit-details-marker { display: none; }
+#al-options summary::before { content: "▸"; display: inline-block; color: var(--aqua-hi); transition: transform .15s ease; }
+#al-options[open] summary::before { transform: rotate(90deg); }
+#al-options-summary { color: #c2e2f2; font-size: 11px; font-weight: 400; }
+.alarm-options-body { display: grid; gap: 12px; padding: 0 13px 13px; }
+.alarm-options-body .editor-note { line-height: 1.45; }
+#alarm-editor > .editor-actions { padding: 11px 13px; border-top: 1px solid rgba(180, 233, 245, .2); background: linear-gradient(180deg, rgba(30, 104, 124, .35), rgba(4, 33, 47, .8)); }
+
+@media (max-height: 850px) and (min-width: 905px) {
+  body:not(.android) #alarm-editor .editor-title { padding: 9px 13px; }
+  body:not(.android) .alarm-editor-body { gap: 8px; padding: 8px; }
+  body:not(.android) .alarm-editor-section { gap: 7px; padding: 9px; }
+  body:not(.android) .alarm-repeat { gap: 6px; }
+  body:not(.android) #alarm-editor .sourcerow { gap: 6px; }
+  body:not(.android) #al-options summary { padding: 9px 11px; }
+  body:not(.android) #alarm-editor > .editor-actions { padding: 8px 11px; }
 }
 
 /* --------------------------------------------------------- statusbar --- */
@@ -1149,6 +1289,7 @@ body.android {
 .android .editor-actions { row-gap: 7px; }
 .android #pane-settings.on { grid-template-rows: repeat(5, max-content); }
 .android #pane-alarms.on { grid-template-rows: repeat(4, max-content); align-content: start; }
+.android #pane-alarms.on.editing { grid-template-rows: minmax(0, 1fr); align-content: stretch; overflow: hidden; }
 .android #pane-alarms .list { overflow: visible; }
 .android .android-alarm-settings { padding: 8px 4px; }
 .android .android-alarm-settings p { margin: 10px 0; line-height: 1.5; }
@@ -1157,6 +1298,12 @@ body.android {
 .android .stepper { width: 52px; height: 48px; font-size: 14px; }
 .android .days { flex-wrap: wrap; }
 .android .days button, .android .chip { min-width: 48px; min-height: 48px; }
+.android #al-days { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.android #al-repeat-presets .chip { flex: 1 1 calc(50% - 5px); }
+.android #alarm-editor .editor-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.android #alarm-editor .editor-actions .flex { display: none; }
+.android #alarm-editor .editor-actions .gel { width: 100%; }
+.android #alarm-editor .editor-actions button[type="submit"] { grid-column: 1 / -1; }
 .android .folderpath { white-space: normal; overflow-wrap: anywhere; }
 .android .editor-actions { flex-wrap: wrap; }
 .android .gel, .android .field, .android .lbl { overflow-wrap: anywhere; }
@@ -1169,6 +1316,12 @@ body.android {
 .android .statusbar {
   min-height: calc(32px + env(safe-area-inset-bottom));
   padding: 0 calc(14px + env(safe-area-inset-right)) env(safe-area-inset-bottom) calc(14px + env(safe-area-inset-left));
+}
+
+@media (max-width: 600px) {
+  .android main:has(#pane-alarms.on.editing) { grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+  .android main:has(#pane-alarms.on.editing) .stage { display: none; }
+  .android main:has(#pane-alarms.on.editing) .console { height: 100%; min-height: 0; }
 }
 
 @media (orientation: landscape) and (max-height: 600px) and (min-width: 600px) {
