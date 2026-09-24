@@ -262,6 +262,7 @@ function stopPlayback(quiet, { skipNative = false } = {}) {
     $("#np-meta").textContent = "";
   }
   refreshBrowseIndicators();
+  refreshStationIndicators();
 }
 
 function androidActiveStatus(status) {
@@ -1128,6 +1129,7 @@ async function play(source, opts = {}) {
   stopPlayback(true, { skipNative: IS_ANDROID });
   const generation = playGeneration;
   player.source = source;
+  refreshStationIndicators();
   player.lastProgress = IS_ANDROID ? 0 : Date.now();
   player.retries = 0;
   player.streamTitle = false;
@@ -3246,53 +3248,115 @@ async function refreshNextAlarm() {
 
 // ----------------------------------------------------------- rendering ---
 
+let stationFavoritesOnly = false;
+
+function resetStationFilters() {
+  $("#station-filter").value = "";
+  stationFavoritesOnly = false;
+  renderStations();
+  $("#station-filter").focus();
+}
+
+function refreshStationIndicators() {
+  Array.from($("#station-list").children).forEach((row) => {
+    const selected = !!row.dataset.id && !!player.source && player.source.stationId === row.dataset.id;
+    row.classList.toggle("on", selected);
+    const button = row.querySelector(".station-play");
+    if (selected) button?.setAttribute("aria-current", "true");
+    else button?.removeAttribute("aria-current");
+  });
+}
+
 function renderStations() {
   const q = $("#station-filter").value.trim().toLowerCase();
   const list = $("#station-list");
+  const scrollTop = list.scrollTop;
+  const focused = document.activeElement;
+  const focusedRow = focused?.closest(".station-row");
+  const focusedId = focusedRow?.dataset.id;
+  const focusedAction = focused?.classList.contains("star") ? ".star"
+    : focused?.classList.contains("station-edit") ? ".station-edit" : ".station-play";
   visibleStations = state.stations.filter(
-    (s) => !q || s.name.toLowerCase().includes(q) || (s.tag || "").toLowerCase().includes(q)
+    (s) => (!stationFavoritesOnly || s.favorite) &&
+      (!q || s.name.toLowerCase().includes(q) || (s.tag || "").toLowerCase().includes(q))
   );
+  if ($("#station-sort").value === "name") {
+    visibleStations.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+  }
+  const filtered = !!q || stationFavoritesOnly;
+  $("#station-all-count").textContent = state.stations.length;
+  $("#station-favorites-count").textContent = state.stations.filter((station) => station.favorite).length;
+  for (const [selector, active] of [["#station-all", !stationFavoritesOnly], ["#station-favorites", stationFavoritesOnly]]) {
+    $(selector).classList.toggle("on", active);
+    $(selector).setAttribute("aria-pressed", String(active));
+  }
+  $("#station-count").textContent = filtered
+    ? `${visibleStations.length} of ${state.stations.length} stations`
+    : `${state.stations.length} saved station${state.stations.length === 1 ? "" : "s"}`;
+  $("#station-reset").hidden = !filtered;
   list.innerHTML = "";
 
   if (!visibleStations.length) {
     const li = document.createElement("li");
-    li.className = "empty";
-    li.textContent = state.stations.length ? "Nothing matches that filter." : "Save stations from Browse, or add a stream URL.";
+    li.className = "empty station-empty";
+    const title = document.createElement("b");
+    title.textContent = !state.stations.length ? "Make yourself at home"
+      : q ? "No matching stations" : "Your favourites go here";
+    const hint = document.createElement("p");
+    hint.textContent = !state.stations.length ? "Discover a station you love, or add a stream link."
+      : q ? "Try another name or tag, or clear your filters."
+      : "Use the star beside a station to keep it close.";
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "gel station-empty-action";
+    action.textContent = !state.stations.length ? "Discover stations" : q ? "Clear filters" : "Show all stations";
+    action.addEventListener("click", () => {
+      if (state.stations.length) resetStationFilters();
+      else { $("#tab-browse").click(); $("#browse-query").focus(); }
+    });
+    li.append(title, hint, action);
     list.append(li);
+    if (focusedId) $(stationFavoritesOnly ? "#station-favorites" : "#station-filter").focus();
     return;
   }
 
-  visibleStations.forEach((station, i) => {
+  visibleStations.forEach((station) => {
     const li = document.createElement("li");
-    li.className = "row";
-    if (player.source && player.source.stationId === station.id) li.classList.add("on");
+    li.className = "row station-row";
     li.dataset.id = station.id;
 
-    const idx = document.createElement("span");
-    idx.className = "idx";
-    idx.textContent = pad2(i + 1);
+    const playButton = document.createElement("button");
+    playButton.type = "button";
+    playButton.className = "station-play";
+    playButton.setAttribute("aria-label", `Listen to ${station.name}`);
+    const mark = document.createElement("span");
+    mark.className = "station-mark";
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = "▶";
 
     const name = document.createElement("span");
     name.className = "name";
     const b = document.createElement("b");
     b.textContent = station.name;
+    b.title = station.name;
     const small = document.createElement("small");
-    small.textContent = station.url;
+    small.textContent = station.tag || "Internet radio";
+    small.title = small.textContent;
     name.append(b, small);
-
-    li.append(idx, name);
-
-    if (station.tag) {
-      const tag = document.createElement("span");
-      tag.className = "tag";
-      tag.textContent = station.tag;
-      li.append(tag);
-    }
+    playButton.append(mark, name);
+    playButton.addEventListener("click", (e) => {
+      e.stopPropagation();
+      playStation(station);
+    });
+    li.append(playButton);
 
     const star = document.createElement("button");
+    star.type = "button";
     star.className = "icon star" + (station.favorite ? " on" : "");
     star.textContent = station.favorite ? "★" : "☆";
-    star.title = "Favourite";
+    star.title = station.favorite ? "Remove from favourites" : "Add to favourites";
+    star.setAttribute("aria-label", `${star.title}: ${station.name}`);
+    star.setAttribute("aria-pressed", String(!!station.favorite));
     star.addEventListener("click", (e) => {
       e.stopPropagation();
       station.favorite = !station.favorite;
@@ -3301,31 +3365,26 @@ function renderStations() {
     });
 
     const edit = document.createElement("button");
-    edit.className = "icon";
+    edit.type = "button";
+    edit.className = "icon station-edit";
     edit.textContent = "✎";
-    edit.title = "Edit";
+    edit.title = "Edit station";
+    edit.setAttribute("aria-label", `Edit ${station.name}`);
     edit.addEventListener("click", (e) => {
       e.stopPropagation();
       openStationEditor(station);
     });
 
     li.append(star, edit);
-    // Reachable without a mouse: the row is the play control.
-    li.tabIndex = 0;
-    li.setAttribute("role", "button");
-    li.setAttribute("aria-label", `Play ${station.name}`);
-    if (player.source && player.source.stationId === station.id) {
-      li.setAttribute("aria-current", "true");
-    }
     li.addEventListener("click", () => playStation(station));
-    li.addEventListener("keydown", (e) => {
-      if (e.target === li && (e.key === "Enter" || e.code === "Space")) {
-        e.preventDefault();
-        playStation(station);
-      }
-    });
     list.append(li);
   });
+  refreshStationIndicators();
+  if (focusedId) {
+    const row = Array.from(list.children).find((entry) => entry.dataset.id === focusedId);
+    (row?.querySelector(focusedAction) || $(stationFavoritesOnly ? "#station-favorites" : "#station-filter")).focus();
+  }
+  list.scrollTop = scrollTop;
 }
 
 function daysLabel(days) {
@@ -3666,10 +3725,13 @@ async function handleWindowAction({ requestId }) {
 // -------------------------------------------------------- station editor ---
 
 let editingStation = null;
+let stationEditorReturnFocus = null;
 
 function openStationEditor(station) {
   cancelStationTest();
+  stationEditorReturnFocus = { element: document.activeElement, stationId: station?.id };
   editingStation = station || null;
+  $("#station-editor-title").textContent = station ? "Edit station" : "Add station";
   $("#st-name").value = station ? station.name : "";
   $("#st-url").value = station ? station.url : "";
   $("#st-tag").value = station ? station.tag || "" : "";
@@ -3677,13 +3739,23 @@ function openStationEditor(station) {
   $("#st-note").className = "editor-note";
   $("#st-delete").classList.toggle("hidden", !station);
   $("#station-editor").classList.remove("hidden");
+  $("#pane-radio").classList.add("editing");
   $("#st-name").focus();
 }
 
 function closeStationEditor() {
+  const wasOpen = !$("#station-editor").classList.contains("hidden");
   cancelStationTest();
   editingStation = null;
   $("#station-editor").classList.add("hidden");
+  $("#pane-radio").classList.remove("editing");
+  if (wasOpen && $("#pane-radio").classList.contains("on")) {
+    const row = Array.from($("#station-list").children).find((entry) => entry.dataset.id === stationEditorReturnFocus?.stationId);
+    const target = row?.querySelector(".station-edit") ||
+      (stationEditorReturnFocus?.element?.isConnected ? stationEditorReturnFocus.element : $("#btn-add-station"));
+    target.focus();
+  }
+  stationEditorReturnFocus = null;
 }
 
 // ---------------------------------------------------------- alarm editor ---
@@ -4341,6 +4413,11 @@ function wire() {
 
   // stations
   $("#station-filter").addEventListener("input", renderStations);
+  $("#station-sort").addEventListener("change", renderStations);
+  $("#station-all").addEventListener("click", () => { stationFavoritesOnly = false; renderStations(); });
+  $("#station-favorites").addEventListener("click", () => { stationFavoritesOnly = true; renderStations(); });
+  $("#station-reset").addEventListener("click", resetStationFilters);
+  $("#btn-discover-stations").addEventListener("click", () => { $("#tab-browse").click(); $("#browse-query").focus(); });
   $("#btn-add-station").addEventListener("click", () => openStationEditor(null));
   $("#st-cancel").addEventListener("click", closeStationEditor);
 

@@ -115,32 +115,64 @@
 
     <!-- ---------------------------- radio ---------------------------- -->
     <div class="pane on" id="pane-radio" role="tabpanel" aria-labelledby="tab-radio">
-      <div class="paneheader">
-        <input type="search" id="station-filter" class="field" placeholder="Filter stations">
-        <button class="gel wide" id="btn-add-station">+ Add station</button>
-      </div>
-      <ul class="list" id="station-list"></ul>
-
-      <form class="editor hidden" id="station-editor" autocomplete="off">
-        <div class="editor-title">Station</div>
-        <label class="lbl">Name<input class="field" id="st-name" maxlength="60" required></label>
-        <label class="lbl">Stream URL<input class="field" id="st-url" placeholder="https://…  (.pls and .m3u are followed)" required></label>
-        <label class="lbl">Tag<input class="field" id="st-tag" maxlength="24" placeholder="ambient"></label>
-        <div class="editor-actions">
-          <button type="button" class="gel" id="st-test">Test</button>
-          <span class="flex"></span>
-          <button type="button" class="gel danger hidden" id="st-delete">Delete</button>
-          <button type="button" class="gel" id="st-cancel">Cancel</button>
-          <button type="submit" class="gel primary">Save</button>
+      <div class="station-controls">
+        <div class="station-heading">
+          <div>
+            <h2>Your stations</h2>
+            <p>Your favourites, always within reach.</p>
+          </div>
+          <button type="button" class="gel" id="btn-add-station">+ Add station</button>
         </div>
-        <p class="editor-note" id="st-note"></p>
+        <label class="station-search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+          <input type="search" id="station-filter" class="field" placeholder="Search by name or tag" aria-label="Search saved stations">
+        </label>
+        <div class="station-toolbar">
+          <div class="station-views" role="group" aria-label="Show stations">
+            <button type="button" id="station-all" class="station-view on" aria-pressed="true">All <span id="station-all-count">0</span></button>
+            <button type="button" id="station-favorites" class="station-view" aria-pressed="false"><span aria-hidden="true">★</span> Favourites <span id="station-favorites-count">0</span></button>
+          </div>
+          <select id="station-sort" class="field" aria-label="Sort saved stations">
+            <option value="saved">Saved order</option>
+            <option value="name">Name A–Z</option>
+          </select>
+        </div>
+        <div class="station-results">
+          <span id="station-count" role="status" aria-live="polite"></span>
+          <button type="button" class="station-link" id="station-reset" hidden>Clear filters</button>
+          <button type="button" class="station-link" id="btn-discover-stations">Discover stations <span aria-hidden="true">↗</span></button>
+        </div>
+      </div>
+      <ul class="list" id="station-list" aria-label="Saved stations"></ul>
+
+      <form class="editor hidden" id="station-editor" autocomplete="off" aria-labelledby="station-editor-title">
+        <div class="editor-title" id="station-editor-title">Add station</div>
+        <div class="station-editor-body">
+          <p class="editor-note">Keep a station here by adding its stream link, or find one in Browse.</p>
+          <label class="lbl">Name<input class="field" id="st-name" maxlength="60" placeholder="Station name" required></label>
+          <label class="lbl">Stream URL<input class="field" id="st-url" placeholder="https://…" aria-describedby="st-url-hint" required></label>
+          <p class="editor-note" id="st-url-hint">Use a direct audio stream or a .pls / .m3u playlist link.</p>
+          <label class="lbl">Tag (optional)<input class="field" id="st-tag" maxlength="24" placeholder="Jazz, ambient, news…"></label>
+        </div>
+        <div class="station-editor-footer">
+          <p class="editor-note" id="st-note" role="status" aria-live="polite"></p>
+          <div class="editor-actions">
+            <button type="button" class="gel" id="st-test">Test</button>
+            <span class="flex"></span>
+            <button type="button" class="gel danger hidden" id="st-delete">Delete</button>
+            <button type="button" class="gel" id="st-cancel">Cancel</button>
+            <button type="submit" class="gel primary">Save</button>
+          </div>
+        </div>
       </form>
 
-      <div class="folderbox">
-        <div class="hud-mini">Your music</div>
-        <p class="folderpath" id="folder-path">No folder chosen</p>
+      <div class="folderbox station-music">
+        <div class="station-music-info">
+          <div class="hud-mini">Your music</div>
+          <p class="folderpath" id="folder-path">No folder chosen</p>
+        </div>
         <div class="editor-actions">
-          <button class="gel" id="btn-pick-folder">Choose folder…</button>
+          <button class="gel" id="btn-pick-folder">Choose folder</button>
           <button class="gel" id="btn-play-folder">Shuffle</button>
         </div>
       </div>

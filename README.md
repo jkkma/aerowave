@@ -12,6 +12,11 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 
 - Twelve stations seeded in (FIP and its sister channels, Radio Paradise, WFMU,
   1.FM); add, edit, tag, favourite and filter your own.
+- The Stations tab keeps your saved collection searchable by name or tag, with
+  an All / Favourites switch and optional A–Z sorting. Sorting changes the view,
+  leaving the saved order intact. Each row has separate listen, favourite and
+  edit controls; Discover stations opens Browse. The station editor keeps its
+  actions and stream-test feedback visible while the fields scroll.
 - **Ordinary stations play through a local relay, not straight off the web.** A
   media element cannot choose its own request headers, cannot see an ICY
   response, and cannot follow a playlist. Rust binds a listener on `127.0.0.1`,
