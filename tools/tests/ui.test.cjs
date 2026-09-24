@@ -60,11 +60,28 @@ test("clearing a country invalidates its pending dynamic and fixed facet respons
   assert.equal(h.el("#browse-codec").options[2].textContent, "FLAC");
 });
 
-test("station row keys leave Favourite and Edit buttons available", async () => {
+test("station actions are separate native buttons and only Play starts playback", async () => {
   const h = createHarness();
   h.evaluate('state.stations = [{id:"one",name:"Station",url:"https://example.test/radio",favorite:false}]; renderStations()');
   const row = h.el("#station-list").children[0];
-  const [star, edit] = row.children.slice(-2);
+  const play = row.querySelector(".station-play");
+  const star = row.querySelector(".star");
+  const edit = row.querySelector(".station-edit");
+  assert.equal(row.tagName, "LI");
+  assert.equal(row.getAttribute("role"), null);
+  assert.equal(row.tabIndex, undefined);
+  assert.equal(play.tagName, "BUTTON");
+  assert.equal(star.tagName, "BUTTON");
+  assert.equal(edit.tagName, "BUTTON");
+  assert.match(play.getAttribute("aria-label"), /Station/);
+  assert.match(star.getAttribute("aria-label"), /Station/);
+  assert.equal(star.getAttribute("aria-pressed"), "false");
+  assert.match(edit.getAttribute("aria-label"), /Station/);
+
+  const rowKey = await row.dispatch("keydown", {key:"Enter", code:"Enter"});
+  assert.equal(rowKey.defaultPrevented, false);
+  assert.equal(h.evaluate("player.source"), null);
+
   for (const button of [star, edit]) {
     for (const key of ["Enter", "Space"]) {
       const event = await button.dispatch("keydown", {key:key === "Space" ? " " : key, code:key});
@@ -75,7 +92,8 @@ test("station row keys leave Favourite and Edit buttons available", async () => 
   await star.dispatch("click");
   assert.equal(h.evaluate("state.stations[0].favorite"), true);
   assert.equal(h.calls.filter(c => c.command === "save_stations").length, 1);
-  await row.dispatch("keydown", {key:"Enter", code:"Enter"});
+
+  await h.el("#station-list").children[0].querySelector(".station-play").dispatch("click");
   assert.equal(h.evaluate("player.source.stationId"), "one");
 });
 

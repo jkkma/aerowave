@@ -835,6 +835,103 @@ body.playing .gel.big { box-shadow: 0 0 22px rgba(120, 236, 255, .45), 0 5px 16p
 .row .icon.done:hover { background: linear-gradient(180deg, rgba(255, 255, 255, .18), rgba(0, 0, 0, .2)); }
 .row .tag.warn { color: #ffd9c6; background: rgba(120, 46, 20, .55); border-color: rgba(255, 150, 110, .45); }
 
+/* ----------------------------------------------------- saved stations --- */
+
+#pane-radio.on {
+  grid-template-rows: max-content minmax(110px, 1fr) max-content;
+  container-type: inline-size;
+}
+.station-controls { display: grid; gap: 10px; min-width: 0; }
+.station-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.station-heading h2 { margin: 0; font-size: 20px; font-weight: 650; color: var(--foam); }
+.station-heading p { margin: 3px 0 0; color: #c2e2f2; font-size: 12px; }
+.station-heading > .gel { flex: none; }
+.station-search { position: relative; display: block; min-width: 0; }
+.station-search svg { position: absolute; left: 12px; top: calc(50% - 8px); width: 16px; height: 16px; fill: none; stroke: #a9d9e8; stroke-width: 1.8; pointer-events: none; }
+.station-search .field { padding-left: 37px; min-height: 38px; }
+.station-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.station-views { display: flex; gap: 3px; padding: 3px; border-radius: 10px; background: rgba(3, 28, 40, .36); }
+.station-view {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #c7e3ed;
+  font: 600 12px var(--hud);
+  cursor: pointer;
+}
+.station-view:hover { background: rgba(210, 246, 255, .09); }
+.station-view.on { color: var(--foam); border-color: rgba(178, 239, 248, .28); background: linear-gradient(180deg, rgba(119, 218, 235, .24), rgba(62, 156, 180, .2)); box-shadow: inset 0 1px 0 rgba(224, 251, 255, .1); }
+.station-view span:not([aria-hidden]) { font-size: 10px; padding: 1px 5px; border-radius: 5px; background: rgba(183, 235, 247, .1); }
+#station-favorites > [aria-hidden] { color: var(--amber-hi); }
+#station-sort { width: auto; max-width: 136px; font-size: 11px; min-height: 34px; }
+.station-results { display: flex; align-items: center; flex-wrap: wrap; column-gap: 12px; row-gap: 4px; min-height: 22px; font-size: 11px; color: #c2e2f2; }
+#btn-discover-stations { margin-left: auto; }
+.station-link { padding: 3px 0; border: 0; background: none; color: var(--aqua-hi); font: 600 11px var(--hud); cursor: pointer; }
+.station-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.station-link[hidden] { display: none; }
+.station-view:focus-visible, .station-link:focus-visible, .station-play:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+#station-list { padding: 5px; }
+#station-list .station-row { gap: 5px; padding: 4px 7px 4px 4px; }
+.station-play { display: flex; align-items: center; gap: 11px; min-width: 0; flex: 1; padding: 7px 4px; border: 0; border-radius: 7px; background: none; color: var(--foam); text-align: left; font: inherit; cursor: pointer; }
+.station-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  padding-left: 2px;
+  border: 1px solid rgba(181, 235, 246, .28);
+  border-radius: 11px;
+  background: linear-gradient(145deg, rgba(169, 240, 245, .21), rgba(42, 114, 144, .19));
+  color: #b9edf5;
+  font-size: 12px;
+  box-shadow: inset 0 1px 0 rgba(225, 255, 255, .12);
+}
+.station-row.on .station-mark { color: #153d49; background: linear-gradient(145deg, #d2f9ed, #7cdae1); border-color: rgba(235, 255, 255, .6); }
+.station-play .name b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.station-play .name small { margin-top: 3px; }
+#station-list .icon { width: 34px; height: 34px; font-size: 19px; }
+#station-list .station-edit { font-size: 17px; }
+#station-list:has(.station-empty) { display: grid; place-items: center; }
+.station-empty { max-width: 330px; }
+.station-empty b { display: block; color: var(--foam); font-size: 17px; font-weight: 600; }
+.station-empty p { margin: 8px 0 12px; line-height: 1.5; }
+.station-music.folderbox { display: flex; align-items: center; gap: 12px; padding: 12px 2px 0; border-top: 1px solid rgba(170, 224, 244, .17); }
+.station-music-info { min-width: 0; flex: 1; }
+.station-music .folderpath { margin-top: 4px; padding: 0; background: none; box-shadow: none; font: 11px var(--body); }
+.station-music .editor-actions { flex: none; gap: 6px; }
+.station-music .gel { padding: 7px 10px; font-size: 11px; }
+#pane-radio.on.editing { grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+#pane-radio.editing > :not(#station-editor) { display: none !important; }
+#station-editor { grid-template-rows: auto minmax(0, 1fr) auto; gap: 0; min-height: 0; padding: 0; overflow: hidden; }
+#station-editor .editor-title { padding: 15px; border-bottom: 1px solid rgba(180, 233, 245, .17); font-size: 17px; }
+.station-editor-body { display: grid; grid-auto-rows: max-content; align-content: start; gap: 14px; padding: 16px; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+.station-editor-body .lbl { gap: 6px; }
+#st-url-hint { margin-top: -8px; font-size: 11px; }
+.station-editor-footer { display: grid; gap: 10px; padding: 12px; border-top: 1px solid rgba(180, 233, 245, .17); }
+#st-note { max-height: 6em; overflow-y: auto; }
+#st-note:empty { display: none; }
+
+@container (max-width: 390px) {
+  .station-heading h2 { font-size: 18px; }
+  .station-heading p { font-size: 11px; }
+  .station-view { padding-inline: 7px; gap: 4px; }
+  #station-sort { max-width: 118px; padding-left: 7px; }
+  .station-music.folderbox { flex-wrap: wrap; gap: 7px; }
+  .station-music-info { flex-basis: 100%; }
+}
+@container (max-width: 310px) {
+  .station-toolbar { flex-wrap: wrap; }
+  .station-heading { gap: 6px; align-items: flex-start; }
+  .station-heading p { max-width: 140px; }
+}
+
 /* The empty view occupies the list's available height without drawing a
    large, vacant inset box behind it. */
 .alarms:has(.alarm-empty) {
@@ -1408,6 +1505,11 @@ body.android {
 .android #browse-list .browse-listen, .android #browse-list .browse-save { min-height: 44px; }
 .android .row { min-height: 52px; padding: 7px 8px; gap: 7px; }
 .android .row .icon { width: 42px; height: 42px; }
+.android .station-view { min-height: 44px; }
+.android .station-link { min-height: 36px; }
+.android #station-sort { min-height: 44px; }
+.android #station-list .icon { width: 44px; height: 44px; }
+.android .station-music .folderpath { white-space: nowrap; }
 .android .editor { padding: 11px; }
 .android .editor-actions { row-gap: 7px; }
 .android #pane-settings.on { grid-template-rows: repeat(5, max-content); }
@@ -1442,9 +1544,9 @@ body.android {
 }
 
 @media (max-width: 600px) {
-  .android main:has(#pane-alarms.on.editing) { grid-template-rows: minmax(0, 1fr); overflow: hidden; }
-  .android main:has(#pane-alarms.on.editing) .stage { display: none; }
-  .android main:has(#pane-alarms.on.editing) .console { height: 100%; min-height: 0; }
+  .android main:has(:is(#pane-alarms, #pane-radio).on.editing) { grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+  .android main:has(:is(#pane-alarms, #pane-radio).on.editing) .stage { display: none; }
+  .android main:has(:is(#pane-alarms, #pane-radio).on.editing) .console { height: 100%; min-height: 0; }
 }
 
 @media (orientation: landscape) and (max-height: 600px) and (min-width: 600px) {
@@ -1476,6 +1578,12 @@ body.android {
   .android .sleepbox { grid-column: 1 / -1; grid-row: 4; }
   .android .console { min-height: 0; height: auto; }
   .android .row { min-height: 46px; }
+  .android .station-controls { grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+  .android .station-heading { display: contents; }
+  .android .station-heading > div, .android .station-results { display: none; }
+  .android .station-heading > .gel { grid-column: 2; grid-row: 1; }
+  .android .station-search { grid-column: 1; grid-row: 1; }
+  .android .station-toolbar { grid-column: 1 / -1; }
 }
 
 /* A landscape keyboard can leave less than one control's height between the
