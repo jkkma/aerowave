@@ -55,7 +55,12 @@ After the build, the helper runs `apksigner verify --verbose --print-certs`,
 requires the APK certificate to match the persistent local key, and calculates
 the APK SHA-256. It also requires the APK to contain Aerowave's native library
 for exactly the ABI selected by `-Target`, with no stale ABI carried over from
-another build. It copies the APK into a new, timestamped directory below
+another build. It uses the SDK command-line tools' `apkanalyzer` to verify that
+the packaged DEX still contains the public, non-static `getPluginManager()` JNI
+entry point. The tracked ProGuard rule preserves it even in fresh checkouts
+without Tauri's generated rules; removing it causes a crash before the UI loads.
+This artifact check does not replace launching the signed build on a device.
+The helper copies the APK into a new, timestamped directory below
 `dist/android-release/` and writes `manifest.json` beside it with the package
 identity, version, target and Android ABI, source commit, hashes and certificate
 fingerprint. Existing release artifacts are never overwritten or removed.

@@ -1,4 +1,10 @@
 # Add project specific ProGuard rules here.
+# Rust looks up this method through JNI during plugin initialization. Keep it
+# in tracked rules: fresh Android checkouts may lack generated proguard-tauri.pro.
+-keep class com.aerowave.radio.TauriActivity {
+    public app.tauri.plugin.PluginManager getPluginManager();
+}
+
 # You can control the set of applied configuration files using the
 # proguardFiles setting in build.gradle.
 #
