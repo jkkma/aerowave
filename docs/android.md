@@ -59,6 +59,16 @@ computer on a network that permits communication between clients.
 - Settings live in the Android application's private config directory. Desktop
   portable-folder detection does not run on Android.
 
+For a signed release playback check, start a station after reopening a stopped
+process and let it play for at least a minute. Confirm decoded audio, a media
+session reporting playback, and `PlaybackService` reporting `isForeground=true` in
+`adb shell dumpsys activity services com.aerowave.radio`. Exercise notification
+pause, resume and stop too. Audio alone can play briefly while a broken session
+still reports idle; without the foreground notification Android then terminates
+the application. Metadata filtering must preserve all player state callbacks.
+Media3's legacy session can report an unknown position and zero speed for a live
+station even while it plays; use renderer activity to verify decoding in that case.
+
 ## Sleep timer
 
 Start a station, then choose 15, 30, 45, 60, 90 or 120 minutes under Sleep timer.

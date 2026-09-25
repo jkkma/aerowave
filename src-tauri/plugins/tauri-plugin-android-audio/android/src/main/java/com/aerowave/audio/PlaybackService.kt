@@ -12,7 +12,6 @@ import android.util.Log
 import android.os.UserManager
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
-import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
@@ -28,7 +27,6 @@ import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import java.util.concurrent.Executors
-import java.util.IdentityHashMap
 
 class PlaybackService : MediaSessionService(), Player.Listener {
   private val handler = Handler(Looper.getMainLooper())
@@ -112,47 +110,13 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       }
 
     val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-    @Suppress("DEPRECATION")
-    val sessionPlayer = object : ForwardingPlayer(player) {
-      private val transformedListeners = IdentityHashMap<Player.Listener, Player.Listener>()
-
-      override fun addListener(listener: Player.Listener) {
-        val transformed = synchronized(transformedListeners) {
-          transformedListeners.getOrPut(listener) {
-            object : Player.Listener by listener {
-              override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
-                listener.onMediaMetadataChanged(
-                  this@PlaybackService.sessionMetadata(mediaMetadata),
-                )
-              }
-            }
-          }
-        }
-        super.addListener(transformed)
-      }
-
-      override fun removeListener(listener: Player.Listener) {
-        val transformed = synchronized(transformedListeners) {
-          transformedListeners.remove(listener)
-        }
-        super.removeListener(transformed ?: listener)
-      }
-
-      override fun play() {
-        this@PlaybackService.resumePlayback()
-      }
-
-      override fun pause() {
-        this@PlaybackService.pausePlayback()
-      }
-
-      override fun stop() {
-        this@PlaybackService.stopPlayback()
-      }
-
-      override fun getMediaMetadata(): MediaMetadata =
-        this@PlaybackService.sessionMetadata(super.getMediaMetadata())
-    }
+    val sessionPlayer = PlaybackSessionPlayer(
+      player,
+      transformMetadata = ::sessionMetadata,
+      onPlay = ::resumePlayback,
+      onPause = ::pausePlayback,
+      onStop = { stopPlayback() },
+    )
     val sessionBuilder = MediaSession.Builder(this, sessionPlayer)
     if (launchIntent != null) {
       sessionBuilder.setSessionActivity(
