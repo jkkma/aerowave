@@ -29,6 +29,101 @@ function pendingPower(h, revision = 10, action = "shutdown") {
   snapshot(h, revision, { minutes: 15, action, endsAtMs: Date.now(), executeAtMs: Date.now() + 30000 });
 }
 
+function sleepTickId(h) {
+  const ticks = [...h.timers].filter(([, timer]) => timer.interval && timer.ms === 1000);
+  assert.equal(ticks.length, 1, "one sleep timer tick is installed before boot");
+  return ticks[0][0];
+}
+
+function watchSleepWrites(h) {
+  const writes = { classes: 0, pressed: 0, disabled: 0, hint: 0, left: 0 };
+  for (const chip of h.queries.get("#sleep-chips .chip")) {
+    const toggle = chip.classList.toggle;
+    chip.classList.toggle = (...args) => {
+      if (args[0] === "on") writes.classes++;
+      return toggle(...args);
+    };
+    const setAttribute = chip.setAttribute;
+    chip.setAttribute = (key, value) => {
+      if (key === "aria-pressed") writes.pressed++;
+      return setAttribute.call(chip, key, value);
+    };
+    let disabled = chip.disabled;
+    Object.defineProperty(chip, "disabled", {
+      get: () => disabled,
+      set: (value) => { writes.disabled++; disabled = value; },
+    });
+  }
+  for (const [selector, key] of [["#sleep-hint", "hint"], ["#sleep-left", "left"]]) {
+    const element = h.el(selector);
+    let content = element.textContent;
+    Object.defineProperty(element, "textContent", {
+      get: () => content,
+      set: (value) => { writes[key]++; content = value; },
+    });
+  }
+  return writes;
+}
+
+test("idle sleep ticks leave the controls and countdown untouched", async () => {
+  const h = powerHarness();
+  const tick = sleepTickId(h);
+  h.evaluate("renderSleepTimer()");
+  const writes = watchSleepWrites(h);
+  for (let i = 0; i < 5; i++) await h.fireTimer(tick);
+  assert.deepEqual(writes, { classes: 0, pressed: 0, disabled: 0, hint: 0, left: 0 });
+  assert.equal(h.el("#sleep-hint").textContent, "Choose what happens, then set the minutes.");
+});
+
+test("an active sleep countdown advances without rewriting unchanged controls", async () => {
+  let elapsed = 1000;
+  const h = powerHarness({ performance: { now: () => elapsed } });
+  const tick = sleepTickId(h);
+  h.context.activeSleep = {
+    revision: 1, sampledAtMs: 1000,
+    timer: { minutes: 15, action: "stop", endsAtMs: Date.now() + 65000,
+      remainingMs: 65000, executeAtMs: null },
+    outcome: null, error: null,
+  };
+  h.evaluate("applySleepSnapshot(activeSleep)");
+  assert.equal(h.el("#sleep-left").textContent, "1m 05s left");
+  const writes = watchSleepWrites(h);
+  elapsed = 2000;
+  await h.fireTimer(tick);
+  assert.equal(h.el("#sleep-left").textContent, "1m 04s left");
+  elapsed = 3000;
+  await h.fireTimer(tick);
+  assert.equal(h.el("#sleep-left").textContent, "1m 03s left");
+  assert.deepEqual(writes, { classes: 0, pressed: 0, disabled: 0, hint: 0, left: 2 });
+});
+
+test("ringing disables the minute choices and dismissal enables them again", async () => {
+  const h = powerHarness();
+  const chips = h.queries.get("#sleep-chips .chip");
+  h.evaluate("renderSleepTimer()");
+  h.evaluate('onAlarmFire({alarmId:"wake",trigger:"test",kind:"none",snoozeMins:10,hour:7,minute:0})');
+  await flush();
+  assert.deepEqual(chips.map(chip => chip.disabled), [false, true, true]);
+  await h.evaluate("dismissRing()");
+  assert.deepEqual(chips.map(chip => chip.disabled), [false, false, false]);
+  assert.equal(h.evaluate("ringing"), null);
+});
+
+test("cancelling a sleep timer clears its countdown and returns to idle ticks", async () => {
+  const h = powerHarness({ invoke: command => command === "cancel_sleep_timer"
+    ? { revision: 2, timer: null, outcome: "cancelled", error: null } : undefined });
+  const tick = sleepTickId(h);
+  snapshot(h, 1, { minutes: 15, action: "stop", endsAtMs: Date.now() + 65000, executeAtMs: null });
+  assert.notEqual(h.el("#sleep-left").textContent, "");
+  await h.evaluate("setSleep(0)");
+  assert.equal(h.el("#sleep-left").textContent, "");
+  assert.deepEqual(h.queries.get("#sleep-chips .chip").map(chip => chip.getAttribute("aria-pressed")),
+    ["true", "false", "false"]);
+  const writes = watchSleepWrites(h);
+  await h.fireTimer(tick);
+  assert.deepEqual(writes, { classes: 0, pressed: 0, disabled: 0, hint: 0, left: 0 });
+});
+
 test("changing the saved sleep action leaves an active timer's captured action until restart", async () => {
   const h = powerHarness();
   h.evaluate("wire()");

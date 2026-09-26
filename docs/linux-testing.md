@@ -87,6 +87,51 @@ Record the distribution, WebKitGTK version, session type, tested formats and
 observed results when reporting native verification. Do not infer working audio,
 alarms or media keys from a successful build alone.
 
+## Blank window at startup
+
+Verify the installed application with the normal user profile as well as an
+isolated test profile. On 2026-09-26, the packaged app passed isolated tests but
+opened a blank window with the normal cache: WebKit's content process used a
+full CPU core before loading the document. A fresh `XDG_CACHE_HOME`, keeping
+the original configuration and data directories, allowed startup.
+
+A startup file trace narrowed this case to fontconfig. User-cache symlinks named
+`*-le64.cache-9` pointed to incompatible `*-le64.cache-12` files. Moving those
+links into a retained backup restored startup without changing settings or
+stations. Do not alias different font-cache format versions. Isolate the failing
+cache before repairing it, preserve a backup, and verify the installed desktop
+launcher again with the normal environment and no inspector override.
+
+## Orb performance
+
+Check frame pacing in the native window at the desktop's actual display scale.
+A browser preview or average FPS can hide a short pause every second. Compare
+frame intervals with the sleep timer off and running, then hide and restore the
+window. Check reduced motion and changing station artwork as well.
+
+The sleep controls only change their DOM state when their displayed values
+change, and an inactive timer has no periodic rendering work. Repeatedly writing
+unchanged button attributes and hint text caused a once-per-second orb pause in
+WebKitGTK on Zorin at 250% scale. Keep this check when editing the player UI.
+The two large glass panels use outlines on Linux: even their inset shadow
+surfaces were expensive to repaint when an active countdown changed. The glass
+gradients, button shadows and orb rendering remain intact.
+
+The orb runs at the webview's frame cadence while visible. Its spin and click
+impulse use elapsed time, so a late frame does not slow the rotation. Hidden
+windows and reduced motion stop its render loop; changed artwork still redraws
+the stationary orb, and showing the window resets the animation's time baseline.
+
+On 2026-09-26, Zorin 18.1 / X11 / WebKitGTK 2.52.6 was checked at 992×648 CSS
+pixels and 250% display scale. In 15-second native samples, idle orb draw gaps
+over 33.4 ms fell from 16 to zero, and WebKit content-process CPU fell from 19.7%
+to 13.3% of one core. A fresh rebuilt app also had zero such gaps while a local
+WAV played with an active sleep countdown (maximum interval 30 ms). Playback
+reached readyState 4 with advancing media time; the test was muted. Hiding the
+window and emulating reduced motion each stopped orb draws, artwork changes
+redrew once under reduced motion, and restoring visibility/motion resumed drawing.
+These are measurements on that desktop, not frame-rate guarantees for other GPUs.
+
 ## Verified on Zorin OS 18.1
 
 The 2026-09-10 Linux port was checked on x86_64, X11 and WebKitGTK 2.52.6:
