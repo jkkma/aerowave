@@ -100,6 +100,15 @@ Left selected and wrapped the main tabs through real keyboard input. Android
 document transport compiled and its alarm restore logic passed JVM tests, but
 the system document pickers still need an Android device check.
 
+The 0.13.2 portable package passed an isolated WebView2 smoke check with a
+blocked settings staging path: rejected station additions and favourites, and
+alarm disabling and deletion, left both displayed and native saved state intact.
+Station save and alarm disable retries succeeded after the blocker was moved
+aside. Redirected relative M3U, mislabeled PLS and ASX fixtures decoded through
+the production relay using the Aerowave User-Agent; FIP reached readyState 3
+with an advancing playhead. These were instrumented native-app checks, not
+physical keyboard, speaker-audibility or unattended-wake qualification.
+
 ## Closing and quitting
 
 With disposable settings, change volume, Wake PC for alarms, or the selected

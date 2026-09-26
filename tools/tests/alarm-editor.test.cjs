@@ -90,9 +90,14 @@ test("collapsed snooze options retain custom values and summarize their actual b
 });
 
 test("alarm enable and edit are independent button controls, and labels stay plain text", async () => {
-  const { h } = editorHarness();
-  h.evaluate(`state.alarms = [{id:"saved",hour:7,minute:30,days:[0,2],enabled:true,
-    label:"<img src=x>",source:{kind:"station",stationId:"radio"}}]; renderAlarms()`);
+  let native = [{id:"saved",hour:7,minute:30,days:[0,2],enabled:true,
+    label:"<img src=x>",source:{kind:"station",stationId:"radio"}}];
+  const { h } = editorHarness({ invoke: (command, args) => {
+    if (command === "save_alarms") native = args.alarms;
+    if (command === "get_state") return { alarms: native };
+  } });
+  h.context.initial = native;
+  h.evaluate("state.alarms = initial; renderAlarms()");
   const row = h.el("#alarm-list").children[0];
   const [edit, toggle] = row.children;
   const sw = toggle.children[1];
@@ -105,4 +110,112 @@ test("alarm enable and edit are independent button controls, and labels stay pla
   assert.equal(h.calls.filter(call => call.command === "save_alarms").length, 1);
   await h.el("#alarm-list").children[0].children[0].dispatch("click");
   assert.equal(h.evaluate("editingAlarm.id"), "saved");
+});
+
+for (const enabled of [true, false]) {
+  test(`a failed alarm ${enabled ? "disable" : "enable"} leaves the confirmed schedule intact`, async () => {
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+    const wake = { id: "wake", label: "Wake", hour: 7, minute: 0, days: [0, 1, 2, 3, 4],
+      enabled, source: { kind: "station", stationId: "radio" } };
+    const other = { ...wake, id: "other", label: "Other", hour: 20 };
+    let native = clone([wake, other]);
+    let saves = 0;
+    const { h } = editorHarness({ invoke: (command, args) => {
+      if (command === "save_alarms" && ++saves === 1) return Promise.reject(new Error("disk full"));
+      if (command === "save_alarms") native = clone(args.alarms);
+      if (command === "get_state") return { alarms: clone(native) };
+    } });
+    h.context.initial = clone(native);
+    h.evaluate("state.alarms = initial; renderAlarms()");
+
+    const row = h.el("#alarm-list").children.find((item) => item.dataset.id === "wake");
+    await row.children[1].children[1].dispatch("click");
+    assert.equal(h.evaluate("state.alarms.find(a => a.id === 'wake').enabled"), enabled);
+    assert.equal(native[0].enabled, enabled);
+    assert.equal(h.el("#alarm-list").children.find((item) => item.dataset.id === "wake")
+      .children[1].children[1].getAttribute("aria-pressed"), String(enabled));
+
+    await h.evaluate("saveAlarms(state.alarms.map(a => a.id === 'other' ? {...a, label: 'Changed'} : a))");
+    assert.equal(native.find((alarm) => alarm.id === "wake").enabled, enabled);
+    assert.equal(native.find((alarm) => alarm.id === "other").label, "Changed");
+  });
+}
+
+test("a failed alarm deletion leaves the row and later saves preserve it", async () => {
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const wake = { id: "wake", label: "Wake", hour: 7, minute: 0, days: [0], enabled: true,
+    source: { kind: "station", stationId: "radio" } };
+  const other = { ...wake, id: "other", label: "Other", hour: 20 };
+  let native = clone([wake, other]);
+  let saves = 0;
+  const { h } = editorHarness({ invoke: (command, args) => {
+    if (command === "save_alarms" && ++saves === 1) return Promise.reject(new Error("disk full"));
+    if (command === "save_alarms") native = clone(args.alarms);
+    if (command === "get_state") return { alarms: clone(native) };
+  } });
+  h.context.initial = clone(native);
+  h.evaluate("state.alarms = initial; renderAlarms(); openAlarmEditor(state.alarms[0])");
+
+  await h.el("#al-delete").dispatch("click");
+  assert.deepEqual(Array.from(h.evaluate("state.alarms.map(a => a.id)")), ["wake", "other"]);
+  assert.equal(h.evaluate("editingAlarm.id"), "wake");
+  assert.equal(h.evaluate("alarmEditorSaving"), false);
+  assert.equal(h.el("#alarm-editor").getAttribute("aria-busy"), null);
+
+  await h.evaluate("saveAlarms(state.alarms.map(a => a.id === 'other' ? {...a, label: 'Changed'} : a))");
+  assert.deepEqual(native.map((alarm) => alarm.id), ["wake", "other"]);
+  assert.equal(native[1].label, "Changed");
+});
+
+test("a successful deletion with failed readback cannot be revived by a stale alarm list", async () => {
+  const wake = { id: "wake", label: "Wake", hour: 7, minute: 0, days: [0], enabled: true,
+    source: { kind: "station", stationId: "radio" } };
+  let native = [wake];
+  let readbackFails = true;
+  const { h } = editorHarness({ invoke: (command, args) => {
+    if (command === "save_alarms") native = args.alarms;
+    if (command === "get_state") return readbackFails
+      ? Promise.reject(new Error("readback unavailable")) : { alarms: native };
+  } });
+  h.context.initial = [wake];
+  h.evaluate("state.alarms = initial; renderAlarms(); openAlarmEditor(state.alarms[0])");
+
+  await h.el("#al-delete").dispatch("click");
+  assert.deepEqual(native, []);
+  assert.equal(h.evaluate("state.alarms.length"), 1);
+  assert.equal(h.evaluate("alarmReadbackPending"), true);
+  assert.match(h.el("#al-sourcenote").textContent, /may have saved/);
+
+  assert.equal(await h.evaluate("saveAlarms()"), false);
+  assert.equal(h.calls.filter((call) => call.command === "save_alarms").length, 1);
+  assert.deepEqual(native, []);
+
+  readbackFails = false;
+  assert.equal(await h.evaluate("saveAlarms()"), false);
+  assert.equal(h.evaluate("state.alarms.length"), 0);
+  assert.equal(h.evaluate("alarmReadbackPending"), false);
+  assert.equal(h.calls.filter((call) => call.command === "save_alarms").length, 1);
+  assert.equal(await h.evaluate("saveAlarms()"), true);
+  assert.deepEqual(native, []);
+});
+
+test("alarm controls ignore another action while their save is pending", async () => {
+  const pending = deferred();
+  const wake = { id: "wake", label: "Wake", hour: 7, minute: 0, days: [0], enabled: true,
+    source: { kind: "station", stationId: "radio" } };
+  let native = [wake];
+  const { h } = editorHarness({ invoke: (command, args) => {
+    if (command === "save_alarms") return pending.promise.then(() => { native = args.alarms; });
+    if (command === "get_state") return { alarms: native };
+  } });
+  h.context.initial = [wake];
+  h.evaluate("state.alarms = initial; renderAlarms()");
+  const switchButton = h.el("#alarm-list").children[0].children[1].children[1];
+  const saving = switchButton.dispatch("click");
+  assert.equal(h.el("#alarm-list").children[0].children[1].children[1].disabled, true);
+  await switchButton.dispatch("click");
+  assert.equal(h.calls.filter((call) => call.command === "save_alarms").length, 1);
+  pending.resolve();
+  await saving;
+  assert.equal(h.evaluate("state.alarms[0].enabled"), false);
 });

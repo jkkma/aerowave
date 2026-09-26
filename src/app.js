@@ -36,6 +36,7 @@ if (IS_ANDROID) {
 }
 
 let state = { stations: [], alarms: [], settings: {} };
+let configLoadError = null;
 let visibleStations = [];      // current filtered order, for prev/next
 const BACKUP = "\u0000backup";  // marks a track that came from the backup folder
 const shuffleFolder = () => state.settings.shuffleFolder || null;
@@ -151,6 +152,7 @@ const player = {
   fadeTimer: null,
   metaTimer: null,
   retries: 0,
+  retryProgressSeconds: 0, // decoded audio since this reconnect began
   retryTimer: null,
   backupAttempts: 0,  // backup tracks that have failed for one ringing alarm
   lastProgress: 0,    // when audio last actually arrived, for the ring watchdog
@@ -240,6 +242,7 @@ function stopPlayback(quiet, { skipNative = false } = {}) {
   audio.removeAttribute("src");
   audio.load();
   player.retries = 0;
+  player.retryProgressSeconds = 0;
   player.paused = false;
   player.pendingPosition = null;
   player.resolved = null;
@@ -299,6 +302,7 @@ function restoreAndroidSource(nativeState) {
   player.target = Number.isFinite(nativeState.volume) ? nativeState.volume : (state.settings.volume ?? 0.8);
   player.paused = nativeState.status === "paused";
   player.retries = 0;
+  player.retryProgressSeconds = 0;
   player.lastProgress = 0;
   showNowPlaying(source.title, source.subtitle, "");
   if (typeof nativeState.trackTitle === "string") setTrackTitle(nativeState.trackTitle);
@@ -501,13 +505,16 @@ async function refreshAndroidAlarms({ initialize = false } = {}) {
     const snapshot = await androidCommand("get_alarm_state");
     if (request !== androidAlarmRequest || androidAlarmPending) return;
     if (initialize && snapshot && !snapshot.initialized && !snapshot.error) {
-      androidAlarmSnapshot = snapshot;
-      await syncAndroidAlarms(true);
+      if (configLoadError) applyAndroidAlarmState(snapshot);
+      else {
+        androidAlarmSnapshot = snapshot;
+        await syncAndroidAlarms(true);
+      }
     } else {
       applyAndroidAlarmState(snapshot);
       // Repair a source/settings save whose native update failed previously,
       // without overwriting native one-shot or snooze decisions.
-      if (initialize && snapshot?.initialized) await syncAndroidAlarms(false);
+      if (initialize && snapshot?.initialized && !configLoadError) await syncAndroidAlarms(false);
     }
     refreshNextAlarm();
   } catch (error) {
@@ -1145,6 +1152,7 @@ async function play(source, opts = {}) {
   refreshStationIndicators();
   player.lastProgress = IS_ANDROID ? 0 : Date.now();
   player.retries = 0;
+  player.retryProgressSeconds = 0;
   player.streamTitle = false;
   const volume = opts.volume !== undefined ? opts.volume : state.settings.volume ?? 0.8;
   if (sleepFadeVolume != null) audio.volume = Math.min(sleepFadeVolume, volume);
@@ -1582,6 +1590,7 @@ function failure(detail, opts = {}) {
   }
 
   player.retries += 1;
+  player.retryProgressSeconds = 0;
   if (opts.fatal || player.retries > 4) {
     if (IS_ANDROID && !state.settings.backupFolder) {
       stopPlayback(true);
@@ -1696,7 +1705,6 @@ function setAudioSource(url) {
 audio.addEventListener("playing", () => {
   switchingSource = false;
   if (!player.source) return;
-  player.retries = 0;
   setStatus(player.source.kind === "folder" ? "Playing your music" : "Live radio", "on");
 });
 // Media events also arrive during seeks, stalls and device recovery. Only a
@@ -1706,7 +1714,18 @@ audio.addEventListener("timeupdate", () => {
   if (!player.source) return;
   const now = audio.currentTime;
   if (!audio.paused && !audio.seeking && audio.readyState >= 3 && now > lastMediaTime) {
-    player.lastProgress = Date.now();
+    const progressedAt = Date.now();
+    player.lastProgress = progressedAt;
+    // A connection can briefly enter `playing` and then drop. Give a
+    // reconnect its full budget until it has delivered sustained audio.
+    if (player.source.kind === "station" && player.retries > 0) {
+      // A large seek or HLS timeline jump is not sustained playback.
+      player.retryProgressSeconds += Math.min(now - lastMediaTime, 1);
+      if (player.retryProgressSeconds >= 15) {
+        player.retries = 0;
+        player.retryProgressSeconds = 0;
+      }
+    }
     rememberPlayedStation();
   }
   // Keep the baseline through seeks and loop wraps so the next real movement
@@ -3481,6 +3500,7 @@ let stationReordering = false;
 let stationMovePending = false;
 let historyRecordedSource = null;
 const recentStationSaves = new Set();
+const stationFavoriteSaves = new Set();
 
 function recentStations() {
   return Array.isArray(state.settings.recentStations) ? state.settings.recentStations : [];
@@ -3681,11 +3701,18 @@ function renderStations() {
     star.title = station.favorite ? "Remove from favourites" : "Add to favourites";
     star.setAttribute("aria-label", `${star.title}: ${station.name}`);
     star.setAttribute("aria-pressed", String(!!station.favorite));
-    star.addEventListener("click", (e) => {
+    star.disabled = stationFavoriteSaves.has(station.id);
+    star.addEventListener("click", async (e) => {
       e.stopPropagation();
-      station.favorite = !station.favorite;
-      saveStations();
-      renderStations();
+      if (stationFavoriteSaves.has(station.id)) return;
+      stationFavoriteSaves.add(station.id);
+      star.disabled = true;
+      try {
+        await saveStations({ patch: { id: station.id, changes: { favorite: !station.favorite } } });
+      } finally {
+        stationFavoriteSaves.delete(station.id);
+        renderStations();
+      }
     });
 
     const edit = document.createElement("button");
@@ -3762,6 +3789,9 @@ let alarmOccurrencesError = false;
 let alarmSkipPending = null;
 let alarmSavePending = 0;
 let alarmStateRequest = 0;
+// After a successful write, an unavailable readback must not let a stale list
+// revive a deleted or disabled alarm in the next save.
+let alarmReadbackPending = false;
 
 async function refreshDesktopAlarms() {
   const request = ++alarmStateRequest;
@@ -3769,6 +3799,7 @@ async function refreshDesktopAlarms() {
   if (request !== alarmStateRequest) return;
   if (!Array.isArray(snapshot?.alarms)) throw new Error("Alarm state is unavailable");
   state.alarms = snapshot.alarms;
+  alarmReadbackPending = false;
   renderAlarms();
 }
 
@@ -3906,14 +3937,17 @@ function renderAlarms() {
     const sw = document.createElement("button");
     sw.type = "button";
     sw.className = "sw";
-    sw.disabled = !!alarmSkipPending;
+    sw.disabled = !!alarmSkipPending || !!alarmSavePending;
     sw.setAttribute("aria-pressed", String(!!alarm.enabled));
     sw.setAttribute("aria-label", `${alarm.label || "Alarm"} at ${fmtAlarmTime(alarm.hour, alarm.minute)}`);
-    sw.addEventListener("click", (e) => {
+    sw.addEventListener("click", async (e) => {
       e.stopPropagation();
-      alarm.enabled = !alarm.enabled;
-      saveAlarms();
+      if (alarmSkipPending || alarmSavePending) return;
+      const alarms = state.alarms.map((item) =>
+        item.id === alarm.id ? { ...item, enabled: !item.enabled } : item);
+      const saving = saveAlarms(alarms);
       renderAlarms();
+      await saving;
     });
 
     toggle.append(status, sw);
@@ -4037,16 +4071,27 @@ function renderSettings() {
 // ------------------------------------------------------------ persisting ---
 
 let stationSaveTail = Promise.resolve();
+let stationSaveFailures = 0;
 
 /**
  * Station writes run in order and take their snapshot only at the head of the
  * queue. A failed Browse addition therefore cannot leak into a later edit,
  * while a successful one is committed to live state before that edit runs.
  */
-function saveStations({ extraStation = null, move = null, onSuccess = null, onFailure = null } = {}) {
+function saveStations({ extraStation = null, move = null, patch = null, removeId = null, onSuccess = null, onFailure = null } = {}) {
   if (setupRestorePending) return Promise.resolve(false);
   const run = async () => {
     const stations = state.stations.map((station) => ({ ...station }));
+    if (patch) {
+      const station = stations.find(item => item.id === patch.id);
+      if (station) Object.assign(station, patch.changes);
+      else if (patch.create) stations.push({ id: patch.id, ...patch.changes });
+      else { say("This station was removed. Cancel this edit and add it again.", "bad"); return false; }
+    }
+    if (removeId !== null) {
+      const index = stations.findIndex(station => station.id === removeId);
+      if (index >= 0) stations.splice(index, 1);
+    }
     if (move) {
       const index = stations.findIndex(station => station.id === move.id);
       const target = index + move.direction;
@@ -4060,6 +4105,7 @@ function saveStations({ extraStation = null, move = null, onSuccess = null, onFa
     try {
       await invoke("save_stations", { stations });
     } catch (error) {
+      stationSaveFailures++;
       try {
         if (onFailure) onFailure();
       } catch (callbackError) {
@@ -4070,6 +4116,14 @@ function saveStations({ extraStation = null, move = null, onSuccess = null, onFa
     }
 
     try {
+      // Commit just the accepted operation. Artwork may have changed while
+      // this write was pending and has its own queued save.
+      if (patch) {
+        const station = state.stations.find(item => item.id === patch.id);
+        if (station) Object.assign(station, patch.changes);
+        else if (patch.create) state.stations.push({ id: patch.id, ...patch.changes });
+      }
+      if (removeId !== null) state.stations = state.stations.filter(station => station.id !== removeId);
       if (move) {
         const order = new Map(stations.map((station, index) => [station.id, index]));
         state.stations.sort((a, b) => (order.get(a.id) ?? stations.length) - (order.get(b.id) ?? stations.length));
@@ -4098,6 +4152,19 @@ function saveStations({ extraStation = null, move = null, onSuccess = null, onFa
   return result;
 }
 async function saveAlarms(alarms = state.alarms) {
+  if (alarmSavePending || alarmSkipPending) {
+    say("Wait for the current alarm change to finish.", "bad");
+    return false;
+  }
+  if (!IS_ANDROID && alarmReadbackPending) {
+    try { await refreshDesktopAlarms(); }
+    catch (error) {
+      say("Could not confirm the saved alarms: " + String(error) + ". Try again to refresh before changing another alarm.", "bad", true);
+      return false;
+    }
+    say("Alarm list refreshed. Review it, then try your change again.", "bad", true);
+    return false;
+  }
   alarmSavePending++;
   try {
     if (IS_ANDROID) await syncAndroidAlarms(true, alarms);
@@ -4105,8 +4172,16 @@ async function saveAlarms(alarms = state.alarms) {
       await invoke("save_alarms", { alarms });
       // A one-shot can fire while the save reply travels back. Read the
       // scheduler's current state instead of restoring the submitted list.
+      alarmReadbackPending = true;
       try { await refreshDesktopAlarms(); }
-      catch (error) { say("Alarm saved, but the list could not be refreshed: " + String(error), "bad", true); }
+      catch (error) {
+        say("Alarm change saved, but its current state could not be confirmed: " + String(error) + ". Refresh the alarm list before changing another alarm.", "bad", true);
+        return false;
+      }
+      if (alarmReadbackPending) {
+        say("Alarm change saved, but its current state could not be confirmed. Refresh the alarm list before changing another alarm.", "bad", true);
+        return false;
+      }
     }
     refreshNextAlarm();
     if (!IS_ANDROID) refreshPowerStatus();
@@ -4332,6 +4407,7 @@ function requestWindowAction(action) {
 
 async function handleWindowAction({ requestId }) {
   if (requestId == null || activeWindowActions.has(requestId)) return;
+  const stationFailures = stationSaveFailures;
   if (!activeWindowActions.size) {
     windowActionPreviousInert = !!document.body.inert;
     document.body.inert = true;
@@ -4346,6 +4422,19 @@ async function handleWindowAction({ requestId }) {
     if (!acknowledged) return;
     if (backupBusy) {
       say("Finish the backup or restore before closing Aerowave.", "bad");
+      return;
+    }
+    if (alarmSavePending || alarmEditorSaving || alarmSkipPending) {
+      say("Wait for your alarm change to finish before closing Aerowave.", "bad");
+      return;
+    }
+    let stationTail;
+    do {
+      stationTail = stationSaveTail;
+      await stationTail;
+    } while (stationTail !== stationSaveTail);
+    if (stationFailures !== stationSaveFailures) {
+      say("Your station change could not be saved. Retry it before closing Aerowave.", "bad");
       return;
     }
     saved = await flushSettings();
@@ -4370,9 +4459,11 @@ let editingStation = null;
 let stationEditorReturnFocus = null;
 
 function openStationEditor(station) {
+  if (stationEditorSaving) return;
   cancelStationTest();
   stationEditorReturnFocus = { element: document.activeElement, stationId: station?.id };
   editingStation = station || null;
+  stationDraftId = station?.id || newId();
   $("#station-editor-title").textContent = station ? "Edit station" : "Add station";
   $("#st-name").value = station ? station.name : "";
   $("#st-url").value = station ? station.url : "";
@@ -4386,6 +4477,7 @@ function openStationEditor(station) {
 }
 
 function closeStationEditor() {
+  if (stationEditorSaving) return;
   const wasOpen = !$("#station-editor").classList.contains("hidden");
   cancelStationTest();
   editingStation = null;
@@ -4398,6 +4490,34 @@ function closeStationEditor() {
     target.focus();
   }
   stationEditorReturnFocus = null;
+}
+
+let stationEditorSaving = false;
+let stationDraftId = null;
+
+async function saveStationEditorChange(change, message) {
+  if (stationEditorSaving) return;
+  stationEditorSaving = true;
+  const editor = $("#station-editor");
+  editor.inert = true;
+  editor.setAttribute("aria-busy", "true");
+  let saved;
+  try { saved = await saveStations(change); }
+  finally {
+    stationEditorSaving = false;
+    editor.inert = false;
+    editor.removeAttribute("aria-busy");
+  }
+  if (!saved) {
+    $("#st-note").textContent = "Could not save. Your draft is still here; try again.";
+    $("#st-note").className = "editor-note bad";
+    return;
+  }
+  renderStations();
+  renderAlarms();
+  refreshBrowseIndicators();
+  closeStationEditor();
+  say(message, "good");
 }
 
 // ---------------------------------------------------------- alarm editor ---
@@ -5147,8 +5267,9 @@ function wire() {
   $("#btn-add-station").addEventListener("click", () => openStationEditor(null));
   $("#st-cancel").addEventListener("click", closeStationEditor);
 
-  $("#station-editor").addEventListener("submit", (e) => {
+  $("#station-editor").addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (stationEditorSaving) return;
     const name = $("#st-name").value.trim();
     const url = $("#st-url").value.trim();
     if (!name || !url) return;
@@ -5158,38 +5279,15 @@ function wire() {
       note.className = "editor-note bad";
       return;
     }
-    if (editingStation) {
-      if (editingStation.url !== url) {
-        editingStation.logo = "";
-        editingStation.hls = false;
-      }
-      Object.assign(editingStation, { name, url, tag: $("#st-tag").value.trim() });
-    } else {
-      state.stations.push({
-        id: newId(),
-        name,
-        url,
-        tag: $("#st-tag").value.trim(),
-        favorite: false,
-      });
-    }
-    saveStations();
-    renderStations();
-    renderAlarms();
-    refreshBrowseIndicators();
-    closeStationEditor();
-    say("station saved", "good");
+    const changes = { name, url, tag: $("#st-tag").value.trim() };
+    if (!editingStation) changes.favorite = false;
+    else if (editingStation.url !== url) Object.assign(changes, { logo: "", hls: false });
+    await saveStationEditorChange({ patch: { id: stationDraftId, changes, create: !editingStation } }, "station saved");
   });
 
-  $("#st-delete").addEventListener("click", () => {
+  $("#st-delete").addEventListener("click", async () => {
     if (!editingStation) return;
-    state.stations = state.stations.filter((s) => s.id !== editingStation.id);
-    saveStations();
-    renderStations();
-    renderAlarms();
-    refreshBrowseIndicators();
-    closeStationEditor();
-    say("station deleted");
+    await saveStationEditorChange({ removeId: editingStation.id }, "station deleted");
   });
 
   $("#st-url").addEventListener("input", () => {
@@ -5407,7 +5505,9 @@ function wire() {
     }
     if (!saved) {
       $("#al-sourcenote").className = "editor-note bad";
-      $("#al-sourcenote").textContent = "Could not save. Your draft is still here; try again.";
+      $("#al-sourcenote").textContent = alarmReadbackPending
+        ? "The change may have saved. Refresh the alarm list, then review it before trying again."
+        : "Could not save. Your draft is still here; try again.";
       $("#al-save").focus({ preventScroll: true });
       return;
     }
@@ -5418,9 +5518,25 @@ function wire() {
   });
 
   $("#al-delete").addEventListener("click", async () => {
-    if (!editingAlarm) return;
-    state.alarms = state.alarms.filter((a) => a.id !== editingAlarm.id);
-    if (!(await saveAlarms())) return;
+    if (!editingAlarm || alarmEditorSaving || alarmSavePending || alarmSkipPending) return;
+    const alarms = state.alarms.filter((a) => a.id !== editingAlarm.id);
+    alarmEditorSaving = true;
+    $("#alarm-editor").inert = true;
+    $("#alarm-editor").setAttribute("aria-busy", "true");
+    let saved;
+    try { saved = await saveAlarms(alarms); }
+    finally {
+      alarmEditorSaving = false;
+      $("#alarm-editor").inert = false;
+      $("#alarm-editor").removeAttribute("aria-busy");
+    }
+    if (!saved) {
+      if (alarmReadbackPending) {
+        $("#al-sourcenote").className = "editor-note bad";
+        $("#al-sourcenote").textContent = "The deletion may have saved. Refresh the alarm list before trying again.";
+      }
+      return;
+    }
     renderAlarms();
     closeAlarmEditor();
     say("alarm deleted");
@@ -5515,26 +5631,37 @@ async function showBuildLabel() {
 
 /** Portable copies keep their settings beside the exe; say which this is. */
 async function showConfigLocation() {
-  if (IS_ANDROID) return;
+  // A failed settings load starts from defaults. Android's separate native
+  // alarm store must keep its saved source metadata until setup is recovered.
+  if (IS_ANDROID) configLoadError = "Android settings storage could not be checked";
   try {
     const where = await invoke("config_location");
+    configLoadError = where.loadError || null;
     const line = $("#config-where");
     line.textContent = "";
     const label = document.createElement("b");
-    label.textContent = where.portable ? "Portable copy. " : "Installed copy. ";
+    label.textContent = IS_ANDROID ? "Android copy. " : where.portable ? "Portable copy. " : "Installed copy. ";
     line.append(label, "Settings: " + where.path);
 
     // A reset that passes for a first run is how every alarm quietly vanishes.
     if (where.loadError) {
       const problem = document.createElement("p");
       problem.className = "wherefrom warn";
-      problem.textContent = where.loadError;
+      problem.textContent = where.loadError + (IS_ANDROID
+        ? " Existing Android alarm sources were kept. Restore a backup or repair settings before changing setup."
+        : "");
       line.after(problem);
       $("#config-details").open = true;
-      say("Settings could not be loaded. See Settings for details.", "bad", true);
+      say(IS_ANDROID
+        ? "Settings could not be loaded. Android alarm sources were kept; restore a backup or repair settings before changing setup."
+        : "Settings could not be loaded. See Settings for details.", "bad", true);
     }
   } catch {
-    /* nothing worth saying if the backend will not tell us */
+    if (IS_ANDROID) {
+      $("#config-details").open = true;
+      $("#config-where").textContent = configLoadError;
+      say("Could not check Android settings. Existing alarm sources were kept; reopen the app or restore a backup before changing setup.", "bad", true);
+    }
   }
 }
 
@@ -5556,6 +5683,7 @@ async function boot() {
     setInterval(refreshPowerStatus, 20000);
   }
 
+  await showConfigLocation();
   await loadState();
 
   await listen("icy-title", (event) => onStreamTitle(event.payload));
@@ -5565,7 +5693,7 @@ async function boot() {
     await refreshAndroidPlayback({ allowRestore: true });
     startAndroidStateSync();
     showBuildLabel();
-    say(player.source ? "Background playback restored" : "Ready to listen", "good");
+    if (!configLoadError) say(player.source ? "Background playback restored" : "Ready to listen", "good");
     return;
   }
 
@@ -5596,8 +5724,7 @@ async function boot() {
   }
 
   showBuildLabel();
-  showConfigLocation();
-  say("Ready to listen", "good");
+  if (!configLoadError) say("Ready to listen", "good");
 
   await listen("sleep-timer-updated", (event) => applySleepSnapshot(event.payload));
   try {

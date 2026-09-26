@@ -16,22 +16,113 @@ pub fn looks_like_playlist(url: &str, content_type: &str) -> bool {
         || content_type.contains("pls+xml")
         || content_type.contains("mpegurl")
         || content_type.contains("ms-asf")
+        || content_type.contains("x-ms-asx")
 }
 
-/// Pull the first stream URL out of a .pls or .m3u body.
-pub fn first_url_in_playlist(body: &str) -> Option<String> {
-    for line in body.lines() {
-        let line = line.trim();
+fn playlist_assignment<'a>(line: &'a str, prefix: &str, numbered: bool) -> Option<&'a str> {
+    let (key, value) = line.split_once('=')?;
+    let key = key.trim().to_ascii_lowercase();
+    let suffix = key.strip_prefix(prefix)?;
+    if (numbered && suffix.is_empty()) || !suffix.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(value.trim())
+}
+
+/// Pull the first stream URL out of a .pls, .m3u or .asx body. A playlist can
+/// name a stream relative to its final address after HTTP redirects.
+pub fn first_url_in_playlist(body: &str, base_url: &str, content_type: &str) -> Option<String> {
+    let base = url::Url::parse(base_url).ok()?;
+    let lower = base.path().to_ascii_lowercase();
+    let mime = content_type.to_ascii_lowercase();
+    let resolve = |candidate: &str| {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            return None;
+        }
+        base.join(candidate)
+            .ok()
+            .filter(|url| matches!(url.scheme(), "http" | "https"))
+            .map(|url| url.to_string())
+    };
+
+    let first = body.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    let first_line = first.lines().next().unwrap_or("").trim();
+    if first.starts_with('<') {
+        // A REF belongs to an ASX document, not to any XML body that happens
+        // to contain an address. Unknown markup is never an M3U entry.
+        let mut reader = Reader::from_str(body);
+        let mut saw_asx_root = false;
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(ref element) | Event::Empty(ref element)) if !saw_asx_root => {
+                    if !element.name().as_ref().eq_ignore_ascii_case(b"asx") {
+                        return None;
+                    }
+                    saw_asx_root = true;
+                }
+                Ok(Event::Start(ref element) | Event::Empty(ref element))
+                    if element.name().as_ref().eq_ignore_ascii_case(b"ref") =>
+                {
+                    for attribute in element.attributes().flatten() {
+                        if attribute.key.as_ref().eq_ignore_ascii_case(b"href") {
+                            if let Ok(value) =
+                                attribute.decode_and_unescape_value(reader.decoder())
+                            {
+                                if let Some(url) = resolve(&value) {
+                                    return Some(url);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Event::Eof) | Err(_) => break,
+                _ => {}
+            }
+        }
+        return None;
+    }
+
+    let lines = body.lines().map(str::trim);
+    let asx_body = first_line.eq_ignore_ascii_case("[reference]")
+        || lines
+            .clone()
+            .any(|line| playlist_assignment(line, "ref", false).is_some());
+    let pls_body = first_line.eq_ignore_ascii_case("[playlist]")
+        || lines
+            .clone()
+            .any(|line| playlist_assignment(line, "file", true).is_some());
+    if first_line.starts_with('[') && !asx_body && !pls_body {
+        return None;
+    }
+    let m3u_body = first_line.eq_ignore_ascii_case("#EXTM3U");
+    let asx_hint = lower.ends_with(".asx") || mime.contains("ms-asf") || mime.contains("x-ms-asx");
+    let pls_hint = lower.ends_with(".pls") || mime.contains("scpls") || mime.contains("pls+xml");
+    let asx = !m3u_body && (asx_body || (!pls_body && asx_hint));
+    let pls = !m3u_body && !asx && (pls_body || pls_hint);
+
+    for line in lines {
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
-        // .pls entries look like `File1=http://...`
-        let candidate = match line.split_once('=') {
-            Some((key, value)) if key.to_ascii_lowercase().starts_with("file") => value.trim(),
-            _ => line,
+        let candidate = if pls {
+            match playlist_assignment(line, "file", true) {
+                Some(value) => value,
+                None => continue,
+            }
+        } else if asx {
+            match playlist_assignment(line, "ref", false) {
+                Some(value) => value,
+                None => continue,
+            }
+        } else {
+            if line.starts_with('<') || line.starts_with('[') {
+                continue;
+            }
+            line
         };
-        if candidate.starts_with("http://") || candidate.starts_with("https://") {
-            return Some(candidate.to_string());
+        if let Some(url) = resolve(candidate) {
+            return Some(url);
         }
     }
     None
@@ -754,7 +845,7 @@ mod tests {
     fn finds_the_url_in_a_pls_file() {
         let pls = "[playlist]\nnumberofentries=1\nFile1=http://ice.example/stream\nTitle1=X\n";
         assert_eq!(
-            first_url_in_playlist(pls),
+            first_url_in_playlist(pls, "https://radio.example/stations.pls", "audio/x-scpls"),
             Some("http://ice.example/stream".to_string())
         );
     }
@@ -763,14 +854,91 @@ mod tests {
     fn finds_the_url_in_an_m3u_file() {
         let m3u = "#EXTM3U\n#EXTINF:-1,Radio\nhttps://ice.example/hi.mp3\n";
         assert_eq!(
-            first_url_in_playlist(m3u),
+            first_url_in_playlist(m3u, "https://radio.example/stations.m3u", "audio/x-mpegurl"),
             Some("https://ice.example/hi.mp3".to_string())
         );
     }
 
     #[test]
+    fn playlist_entries_resolve_against_the_final_playlist_address() {
+        assert_eq!(
+            first_url_in_playlist(
+                "#EXTM3U\n/live.mp3\n",
+                "https://cdn.example/lists/stations.m3u",
+                "audio/x-mpegurl"
+            ),
+            Some("https://cdn.example/live.mp3".to_string())
+        );
+        assert_eq!(
+            first_url_in_playlist(
+                "[playlist]\nFile1=../live.mp3\n",
+                "https://cdn.example/lists/stations.pls",
+                "audio/x-scpls"
+            ),
+            Some("https://cdn.example/live.mp3".to_string())
+        );
+    }
+
+    #[test]
+    fn asx_ref_extracts_an_mp3_stream_and_decodes_xml_entities() {
+        let asx = r#"<ASX version="3"><ENTRY><REF HREF="https://ice.example/live.mp3?a=1&amp;b=2" /></ENTRY></ASX>"#;
+        assert_eq!(
+            first_url_in_playlist(asx, "https://radio.example/stations.asx", "video/x-ms-asf"),
+            Some("https://ice.example/live.mp3?a=1&b=2".to_string())
+        );
+        assert_eq!(
+            first_url_in_playlist(
+                "[Reference]\nRef1=/live.mp3\n",
+                "https://radio.example/stations.asx",
+                "video/x-ms-asf"
+            ),
+            Some("https://radio.example/live.mp3".to_string())
+        );
+    }
+
+    #[test]
+    fn extensionless_asx_mime_and_mislabeled_pls_keep_their_body_format() {
+        let asx = "<?xml version=\"1.0\"?><ASX><ENTRY><REF HREF=\"/live.mp3\" /></ENTRY></ASX>";
+        assert!(looks_like_playlist("https://radio.example/listen", "video/x-ms-asx"));
+        assert_eq!(
+            first_url_in_playlist(asx, "https://radio.example/listen", "video/x-ms-asx"),
+            Some("https://radio.example/live.mp3".to_string())
+        );
+
+        let pls = "[playlist]\nFile1=https://ice.example/live.mp3\n";
+        assert_eq!(
+            first_url_in_playlist(pls, "https://radio.example/list.m3u", "audio/x-mpegurl"),
+            Some("https://ice.example/live.mp3".to_string())
+        );
+    }
+
+    #[test]
+    fn playlist_skips_unsupported_schemes_and_unrelated_markup() {
+        let m3u = "#EXTM3U\nfile:///private.mp3\nftp://ice.example/live.mp3\nhttps://ice.example/live.mp3\n";
+        assert_eq!(
+            first_url_in_playlist(m3u, "https://radio.example/list.m3u", "audio/x-mpegurl"),
+            Some("https://ice.example/live.mp3".to_string())
+        );
+        assert_eq!(
+            first_url_in_playlist("<other>https://ice.example/live.mp3</other>", "https://radio.example/list.m3u", "audio/x-mpegurl"),
+            None
+        );
+        assert_eq!(
+            first_url_in_playlist("[unrelated]\nfoo=bar\n", "https://radio.example/list.m3u", "audio/x-mpegurl"),
+            None
+        );
+        assert_eq!(
+            first_url_in_playlist("#EXTM3U\n<other>https://ice.example/live.mp3</other>\n[not a stream]\n", "https://radio.example/list.m3u", "audio/x-mpegurl"),
+            None
+        );
+    }
+
+    #[test]
     fn a_playlist_with_no_urls_yields_nothing() {
-        assert_eq!(first_url_in_playlist("[playlist]\nnumberofentries=0\n"), None);
+        assert_eq!(
+            first_url_in_playlist("[playlist]\nnumberofentries=0\n", "https://radio.example/empty.pls", "audio/x-scpls"),
+            None
+        );
     }
 
     #[test]
