@@ -209,7 +209,6 @@ test("Clear all supersedes pending search and facet replies with one unfiltered 
     browseCountry = "FR"; browseCountryLabel = "France";
     browseTag = "jazz"; browseTagLabel = "Jazz"; browseCodec = "MP3"; browseBitrate = "128"`);
   h.el("#browse-query").value = "stale query";
-  h.el("#browse-quality").open = true;
   h.evaluate("wire()");
   const oldSearch = h.evaluate("browseSearch(false)");
   await flush();
@@ -220,8 +219,6 @@ test("Clear all supersedes pending search and facet replies with one unfiltered 
     name: "", tag: "", countryCode: "", codec: "", bitrate: "", limit: 40, offset: 0,
   });
   assert.equal(h.el("#browse-query").value, "");
-  assert.equal(h.el("#browse-quality").open, true);
-  assert.equal(h.el("#browse-quality-summary").textContent, "Any");
 
   stalePage.resolve({ offered: 40, hasMore: true, stations: [directoryStation("Stale", "https://stale.test/live")] });
   staleFacets.resolve({

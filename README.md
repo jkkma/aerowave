@@ -209,9 +209,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   station counts beside each entry. Press Listen or a row to try a station, and
   Save to add it to your stations. Nothing is saved until you press Save, and nothing is
   fetched until you open the tab.
-- Country and genre stay beside the search; the Audio quality section opens
-  format and bitrate choices when needed. Applied filters can be removed one at
-  a time, and Clear all starts over. The results count says how many stations
+- Country, genre, format and bitrate are directly available beside the search.
+  Format and bitrate use separate, side-by-side dropdowns. Applied filters can
+  be removed one at a time, and Clear all starts over. The results count says how many stations
   are loaded, not how many exist in the directory. A failed search offers Try
   again without applying unfinished edits in the search field.
 - Adding a station shows a pending state until its settings file is written.

@@ -54,6 +54,8 @@ computer on a network that permits communication between clients.
 - Native audio focus, headphone disconnection and media controls belong to the
   media service. The page reads native state on return. A readable manifest or
   buffered metadata alone is not a successful playback test.
+- A recovered station earns a fresh reconnect budget after 15 seconds of
+  advancing playback. Brief connections and a stalled playhead cannot renew it.
 - HTTP is enabled for loopback playback and public broadcasters that do not
   offer HTTPS. The webview's existing content security policy remains in place.
 - Settings live in the Android application's private config directory. Desktop
@@ -105,6 +107,10 @@ sound in Do Not Disturb. Disconnecting Bluetooth lets the alarm continue on the
 phone instead of pausing it. The alarm notification and exact scheduling retain
 their alarm behavior, and the service holds transient audio focus until the
 ring ends.
+
+Temporary audio-focus loss pauses the alarm source watchdog. Regaining focus
+gives the decoder a fresh startup or stall interval, so time spent interrupted
+does not cause a healthy station to switch to backup audio.
 
 Settings provides shortcuts for Alarms & reminders, notifications, lock-screen
 alarms and battery restrictions. A denied permission is shown in the app. Keep

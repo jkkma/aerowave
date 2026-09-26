@@ -1,3 +1,7 @@
 include ':app'
 
 apply from: 'tauri.settings.gradle'
+
+// Cached Tauri metadata can retain an absolute path from another checkout.
+// Always compile the native audio plugin that belongs to this application.
+project(':tauri-plugin-android-audio').projectDir = file('../../plugins/tauri-plugin-android-audio/android')

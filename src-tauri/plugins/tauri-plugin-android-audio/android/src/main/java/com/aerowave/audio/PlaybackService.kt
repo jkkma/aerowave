@@ -37,6 +37,17 @@ class PlaybackService : MediaSessionService(), Player.Listener {
   private val pendingMetadataUpdates = mutableSetOf<Runnable>()
   private var reconnectAttempts = 0
   private var pendingReconnect: Runnable? = null
+  private val reconnectProgress = SustainedMediaProgress(SystemClock::elapsedRealtime)
+  private val reconnectProgressTick = object : Runnable {
+    override fun run() {
+      if (reconnectAttempts == 0 || currentRequest?.sourceFolder != null || !wantsPlayback) return
+      if (reconnectProgress.sample(player.isPlaying, player.currentPosition)) {
+        reconnectAttempts = 0
+        return
+      }
+      if (player.isPlaying) handler.postDelayed(this, RECONNECT_PROGRESS_TICK_MS)
+    }
+  }
   private var wantsPlayback = false
   private var desiredVolume = 1f
   private val folderExecutor = Executors.newSingleThreadExecutor()
@@ -168,6 +179,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       return
     }
     cancelReconnect()
+    cancelReconnectProgress()
     cancelMetadataUpdates()
     folderResolutionToken++
     resolvingFolder = false
@@ -216,6 +228,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     alarmInterruption = alarmInterruption?.copy(resumeOnAutomaticEnd = false)
     if (expireSleepTimerIfNeeded()) return
     cancelReconnect()
+    cancelReconnectProgress()
     folderResolutionToken++
     resolvingFolder = false
     releaseRecoveryWakeLock()
@@ -251,6 +264,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       cancelSleepTimerTick()
     }
     cancelReconnect()
+    cancelReconnectProgress()
     cancelMetadataUpdates()
     folderResolutionToken++
     resolvingFolder = false
@@ -384,6 +398,13 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     if (isPlaying) {
       folderPickFailures = 0
       releaseRecoveryWakeLock()
+      if (reconnectAttempts > 0 && currentRequest?.sourceFolder == null) {
+        handler.removeCallbacks(reconnectProgressTick)
+        reconnectProgress.sample(true, player.currentPosition)
+        handler.postDelayed(reconnectProgressTick, RECONNECT_PROGRESS_TICK_MS)
+      }
+    } else {
+      cancelReconnectProgress()
     }
     updateStateFromPlayer()
   }
@@ -588,6 +609,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     val request = currentRequest ?: return
     if (!wantsPlayback) return
     cancelReconnect()
+    cancelReconnectProgress()
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
       if (request.sourceFolder != null) {
         advanceFolder(request.sourceFolder, request.url, reason, true)
@@ -637,6 +659,11 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     pendingReconnect = null
   }
 
+  private fun cancelReconnectProgress() {
+    handler.removeCallbacks(reconnectProgressTick)
+    reconnectProgress.reset()
+  }
+
   private fun advanceFolder(
     folder: String,
     exclude: String?,
@@ -644,6 +671,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     sourceFailed: Boolean,
   ) {
     val previous = currentRequest ?: return
+    cancelReconnectProgress()
     if (sourceFailed && ++folderPickFailures > MAX_FOLDER_FAILURES) {
       resolvingFolder = false
       AudioStateStore.update(this) {
@@ -749,6 +777,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       cancelSleepTimerTick()
     }
     cancelReconnect()
+    cancelReconnectProgress()
     cancelMetadataUpdates()
     folderResolutionToken++
     resolvingFolder = false
@@ -783,6 +812,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       return
     }
     cancelReconnect()
+    cancelReconnectProgress()
     folderResolutionToken++
     resolvingFolder = false
     reconnectAttempts = 0
@@ -856,6 +886,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       publishSleepTimer()
     }
     cancelReconnect()
+    cancelReconnectProgress()
     cancelMetadataUpdates()
     val state = AudioStateStore.snapshot(this)
     if (state.status == STATUS_PLAYING || state.status == STATUS_BUFFERING) {
@@ -896,6 +927,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     private const val TIMER_GUARD_TICK_MS = 1_000L
     private const val FADE_TICK_MS = 250L
     private const val METADATA_POLL_MS = 1_000L
+    private const val RECONNECT_PROGRESS_TICK_MS = 1_000L
     private const val METADATA_TIMING_SLOP_MS = 100L
     private const val MAX_METADATA_CHARS = 512
     private const val RECOVERY_WAKE_TIMEOUT_MS = 45_000L
