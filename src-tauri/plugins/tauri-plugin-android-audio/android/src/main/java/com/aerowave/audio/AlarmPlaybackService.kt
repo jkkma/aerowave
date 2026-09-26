@@ -47,10 +47,7 @@ class AlarmPlaybackService : Service(), Player.Listener {
   private var sourceKind = "tone"
   private var sourceIsHls = false
   private var sourceFailure: String? = null
-  private var sourceStartedElapsedMs = 0L
-  private var lastProgressElapsedMs = 0L
-  private var lastPositionMs = 0L
-  private var decodedProgress = false
+  private val sourceProgress = AlarmPlaybackProgress(SystemClock::elapsedRealtime)
   private var focusPaused = false
   private var focusGranted = false
   private var focusError: String? = null
@@ -84,26 +81,14 @@ class AlarmPlaybackService : Service(), Player.Listener {
   private val progressWatchdog = object : Runnable {
     override fun run() {
       if (ring == null) return
-      if (focusPaused) {
-        handler.postDelayed(this, WATCHDOG_TICK_MS)
-        return
-      }
-      val now = SystemClock.elapsedRealtime()
-      val position = player.currentPosition.coerceAtLeast(0)
-      if (player.isPlaying && (position > lastPositionMs + 50 || position + 250 < lastPositionMs)) {
-        decodedProgress = true
-        lastProgressElapsedMs = now
-      }
-      lastPositionMs = position
-      val startLimit = if (sourceKind == "station") STATION_START_TIMEOUT_MS else LOCAL_START_TIMEOUT_MS
-      if (!decodedProgress && now - sourceStartedElapsedMs >= startLimit) {
-        handleSourceFailure("The alarm source connected but did not produce audio")
-        return
-      }
-      if (decodedProgress && player.playWhenReady &&
-        now - lastProgressElapsedMs >= STALL_TIMEOUT_MS
-      ) {
-        handleSourceFailure("The alarm source stopped producing audio")
+      val failure = sourceProgress.failureReason(
+        player.currentPosition,
+        player.isPlaying,
+        player.playWhenReady,
+        sourceKind == "station",
+      )
+      if (failure != null) {
+        handleSourceFailure(failure)
         return
       }
       handler.postDelayed(this, WATCHDOG_TICK_MS)
@@ -309,10 +294,7 @@ class AlarmPlaybackService : Service(), Player.Listener {
     sourceIsHls = isHls
     sourceFailure = note
     player.repeatMode = if (kind == "folder" || kind == "tone") Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
-    sourceStartedElapsedMs = SystemClock.elapsedRealtime()
-    lastProgressElapsedMs = sourceStartedElapsedMs
-    lastPositionMs = 0
-    decodedProgress = false
+    sourceProgress.start(focusPaused)
     handler.removeCallbacks(progressWatchdog)
     handler.post(progressWatchdog)
     val item = MediaItem.Builder()
@@ -507,6 +489,7 @@ class AlarmPlaybackService : Service(), Player.Listener {
           focusGranted = true
           focusError = null
           focusMultiplier = 1f
+          sourceProgress.resumeFromFocus(player.currentPosition)
           if (ring != null && currentUri != null && !player.isPlaying) player.play()
           ring?.let {
             updateRingingSource(
@@ -524,6 +507,7 @@ class AlarmPlaybackService : Service(), Player.Listener {
         AudioManager.AUDIOFOCUS_LOSS,
         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
           focusPaused = true
+          sourceProgress.pauseForFocus()
           if (change == AudioManager.AUDIOFOCUS_LOSS) focusGranted = false
           player.pause()
         }
@@ -613,9 +597,6 @@ class AlarmPlaybackService : Service(), Player.Listener {
     internal const val NOTIFICATION_ID = 71_001
     private const val FADE_TICK_MS = 250L
     private const val WATCHDOG_TICK_MS = 1_000L
-    private const val STATION_START_TIMEOUT_MS = 12_000L
-    private const val LOCAL_START_TIMEOUT_MS = 8_000L
-    private const val STALL_TIMEOUT_MS = 12_000L
     private const val MAX_RING_WAKE_MS = 2 * 60 * 60 * 1000L
 
     @Volatile private var instance: AlarmPlaybackService? = null

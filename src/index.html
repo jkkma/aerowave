@@ -73,8 +73,6 @@
       </div>
     </div>
 
-    <p class="android-preview-note" role="note">Radio and your music keep playing with the screen locked. Set a sleep timer here, or schedule a wake-up in Alarms.</p>
-
     <div class="sleepbox">
       <div class="sleeprow">
         <span class="hud-mini" id="sleep-caption">Sleep timer</span>
@@ -207,35 +205,32 @@
             </select>
           </label>
         </div>
-        <details class="browse-quality" id="browse-quality">
-          <summary>Audio quality <span id="browse-quality-summary">Any</span></summary>
-          <div class="browse-quality-fields">
-            <label class="lbl" for="browse-codec">Format
-              <select class="field" id="browse-codec">
-                <option value="">Any format</option>
-                <option value="MP3">MP3</option>
-                <option value="AAC">AAC</option>
-                <option value="AAC+">AAC+</option>
-                <option value="OGG">OGG</option>
-                <option value="FLAC">FLAC</option>
-              </select>
-            </label>
-            <label class="lbl" for="browse-bitrate">Bitrate
-              <select class="field" id="browse-bitrate">
-                <option value="">Any bitrate</option>
-                <option value="low">Under 48 kbps</option>
-                <option value="48">48 kbps</option>
-                <option value="64">64 kbps</option>
-                <option value="96">96 kbps</option>
-                <option value="128">128 kbps</option>
-                <option value="192">192 kbps</option>
-                <option value="256">256 kbps</option>
-                <option value="320">320 kbps</option>
-                <option value="high">Over 320 kbps</option>
-              </select>
-            </label>
-          </div>
-        </details>
+        <div class="browse-quality-fields">
+          <label class="lbl" for="browse-codec">Format
+            <select class="field" id="browse-codec">
+              <option value="">Any format</option>
+              <option value="MP3">MP3</option>
+              <option value="AAC">AAC</option>
+              <option value="AAC+">AAC+</option>
+              <option value="OGG">OGG</option>
+              <option value="FLAC">FLAC</option>
+            </select>
+          </label>
+          <label class="lbl" for="browse-bitrate">Bitrate
+            <select class="field" id="browse-bitrate">
+              <option value="">Any bitrate</option>
+              <option value="low">Under 48 kbps</option>
+              <option value="48">48 kbps</option>
+              <option value="64">64 kbps</option>
+              <option value="96">96 kbps</option>
+              <option value="128">128 kbps</option>
+              <option value="192">192 kbps</option>
+              <option value="256">256 kbps</option>
+              <option value="320">320 kbps</option>
+              <option value="high">Over 320 kbps</option>
+            </select>
+          </label>
+        </div>
         <div id="browse-active-filters" class="browse-active-filters" role="group" hidden aria-label="Active filters"></div>
       </div>
       <div class="browse-toolbar">

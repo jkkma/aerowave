@@ -44,6 +44,10 @@ single-use Gradle process through temporary process environment variables, and
 restores any previous values in a `finally` block. Release minification and the
 Rust release profile remain enabled.
 
+The Gradle settings resolve the native audio plugin relative to this checkout.
+Cached Tauri metadata can contain an absolute path from a different checkout;
+that path must not select the plugin source used for tests or release builds.
+
 Gradle derives the Android version code from the stable semantic version using
 `major * 1,000,000 + minor * 1,000 + patch`. For example, version `0.11.5` is
 code `11005`. Minor and patch values are limited to 999, and the build fails if

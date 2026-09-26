@@ -35,8 +35,7 @@
 
 * { box-sizing: border-box; }
 
-.android-only,
-.android-preview-note { display: none; }
+.android-only { display: none; }
 
 html {
   background: var(--abyss);
@@ -626,30 +625,6 @@ body.playing .gel.big { box-shadow: 0 0 22px rgba(120, 236, 255, .45), 0 5px 16p
 .browse-search-line .field { min-width: 0; }
 .browsefilters, .browse-quality-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; min-width: 0; }
 .browsefilters .lbl, .browse-quality-fields .lbl { min-width: 0; }
-.browse-quality {
-  min-width: 0;
-  border: 1px solid rgba(150, 214, 236, .2);
-  border-radius: 8px;
-  background: rgba(1, 22, 33, .27);
-}
-.browse-quality summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 32px;
-  padding: 5px 9px;
-  list-style: none;
-  color: #d6f1f8;
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.browse-quality summary::-webkit-details-marker { display: none; }
-.browse-quality summary::before { content: "▸"; color: var(--aqua); font-size: 14px; line-height: 1; }
-.browse-quality[open] summary::before { transform: rotate(90deg); }
-.browse-quality summary:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
-#browse-quality-summary { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--aqua-hi); font-weight: 500; }
-.browse-quality-fields { padding: 0 9px 9px; }
 .browse-active-filters { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
 .browse-active-filters[hidden], .browse-reset[hidden] { display: none; }
 .browse-filter-chip {
@@ -1595,66 +1570,95 @@ body.android {
 }
 
 .android .titlebar [data-tauri-drag-region] { -webkit-app-region: no-drag; }
-.android .brand { gap: 7px; min-width: 0; }
-.android .brand .sub { white-space: nowrap; }
-.android .titleclock { gap: 5px; font-size: 12px; }
+.android .brand { flex: 1 1 auto; gap: 7px; min-width: 0; overflow: hidden; }
+.android .brand .sub { display: none; }
+.android .wordmark { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.android .titleclock { flex: none; gap: 5px; font-size: 12px; }
 .android .tb-date { display: none; }
 
 .android main {
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: max-content minmax(440px, 68dvh);
-  gap: 10px;
-  padding: 10px calc(10px + env(safe-area-inset-right)) 10px calc(10px + env(safe-area-inset-left));
+  grid-template-rows: max-content minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px calc(10px + env(safe-area-inset-right)) 8px calc(10px + env(safe-area-inset-left));
   overflow-x: hidden;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  overflow-y: hidden;
 }
 
 .android .panel { padding: 12px; border-radius: 14px; }
-.android .stage { grid-template-rows: auto auto auto auto; gap: 9px; padding-top: 10px; overflow: visible; }
-.android .orbwrap { min-height: 112px; }
-.android .orb { width: 108px; height: 108px; }
-.android .station { margin-top: 5px; font-size: 22px; }
-.android .track { font-size: 13px; }
-.android .transport { flex-wrap: wrap; gap: 8px; }
-.android .gel { min-height: 44px; padding: 9px 14px; }
-.android .gel.big { width: 64px; height: 64px; min-height: 64px; }
-.android #btn-prev,
-.android #btn-next { width: 48px; height: 48px; }
-.android .volwrap { flex: 1 0 100%; justify-content: center; margin: 0; }
-.android .slider { width: min(210px, calc(100vw - 132px)); height: 32px; }
-.android #sleep-chips .chip { min-width: 44px; min-height: 44px; }
-.android .sleep-hint { font-size: 12px; }
-.android .android-preview-note {
-  display: block;
-  width: 100%;
-  margin: 0;
-  padding: 9px 11px;
-  border: 1px solid rgba(150, 220, 240, .22);
-  border-radius: 10px;
-  background: rgba(2, 24, 36, .42);
-  color: #d3edf4;
-  font-size: 12px;
-  line-height: 1.45;
-  text-align: left;
+.android .stage {
+  grid-template-columns: 64px minmax(0, 1fr);
+  grid-template-rows: max-content 44px auto;
+  gap: 6px 8px;
+  align-items: start;
+  padding-top: 8px;
+  max-height: 216px;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
+.android .orbwrap { grid-column: 1; grid-row: 1; min-height: 60px; }
+.android .orb { width: 60px; height: 60px; }
+.android .nowplaying { grid-column: 2; grid-row: 1; min-width: 0; text-align: left; }
+.android .station { margin: 2px 0; font-size: clamp(17px, 5vw, 21px); max-height: 2.3em; overflow: hidden; }
+.android .track { font-size: 12px; max-height: 1.4em; -webkit-line-clamp: 1; }
+.android .meta:empty { display: none; }
+.android .transport {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: 44px 44px 44px minmax(0, 1fr);
+  justify-content: stretch;
+  gap: 6px;
+}
+.android .gel { min-height: 44px; padding: 9px 14px; }
+.android .gel.big { width: 44px; height: 44px; min-height: 44px; }
+.android #btn-prev,
+.android #btn-next { width: 44px; height: 44px; }
+.android .volwrap { min-width: 0; width: 100%; gap: 4px; margin: 0; }
+.android .volic { flex: none; width: 15px; }
+.android .volval { flex: none; width: 18px; }
+.android .slider { flex: 1; min-width: 0; width: 100%; height: 44px; }
+.android .sleepbox { grid-column: 1 / -1; grid-row: 3; gap: 2px; }
+.android .sleepbox .sleeprow:first-child { display: grid; gap: 3px; min-width: 0; }
+.android #sleep-chips {
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+.android #sleep-chips .chip { flex: none; }
+.android #sleep-chips .chip { min-width: 44px; min-height: 44px; }
+.android .sleep-action-row:has(#sleep-left:empty) { display: none; }
+.android .sleep-hint { font-size: 11px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.android .console { min-height: 440px; height: 68dvh; }
-.android .tabs { gap: 3px; flex-wrap: wrap; }
-.android .tab { min-height: 48px; padding: 9px 6px; flex: 1 1 auto; }
-.android .pane { overscroll-behavior: contain; }
+.android .console { grid-template-columns: minmax(0, 1fr); min-height: 0; height: 100%; }
+/* WebView text zoom does not enlarge a button's intrinsic width. Two columns
+   leave room for the enlarged labels without relying on flex wrapping. */
+.android .tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px; }
+.android .tab { min-width: 0; width: 100%; min-height: 48px; padding: 9px 4px; }
+.android .pane { grid-template-columns: minmax(0, 1fr); overscroll-behavior: contain; }
 .android .paneheader { align-items: stretch; flex-wrap: wrap; }
 .android .paneheader .field { flex: 1 1 160px; }
 .android .browse-controls { gap: 7px; padding: 8px; }
+.android .browse-intro p { display: none; }
 .android .browsefilters, .android .browse-quality-fields { gap: 7px; }
-.android .browse-quality summary { min-height: 44px; }
 .android .browse-filter-chip { min-height: 44px; padding-inline: 12px; }
 .android #browse-list .browse-listen, .android #browse-list .browse-save { min-height: 44px; }
 .android .row { min-height: 52px; padding: 7px 8px; gap: 7px; }
 .android .row .icon { width: 42px; height: 42px; }
 .android .station-view { min-height: 44px; }
+.android .station-controls { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.android .station-heading { flex-wrap: wrap; }
+.android .station-heading > .gel { max-width: 100%; white-space: normal; }
+.android .station-results:has(#station-reset[hidden]):has(#station-reorder[hidden]) { display: none; }
+.android .station-heading p { display: none; }
+.android .station-toolbar { flex-wrap: nowrap; gap: 6px; }
+.android .station-views { flex: 1 1 0; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+.android .station-view { flex: none; }
 .android .station-link { min-height: 36px; }
-.android #station-sort { min-height: 44px; }
+.android #station-sort { flex: 0 0 108px; width: 108px; min-height: 44px; }
 .android #station-list .icon { width: 44px; height: 44px; }
 .android .station-music .folderpath { white-space: nowrap; }
 .android .editor { padding: 11px; }
@@ -1702,9 +1706,18 @@ body.android {
 }
 
 @media (max-width: 600px) {
+  /* Directory and alarm tasks need their first result within the phone view.
+     Playback and sleep controls remain together on the Stations tab. */
+  .android main:has(:is(#pane-browse, #pane-alarms).on) { grid-template-rows: minmax(0, 1fr); }
+  .android main:has(:is(#pane-browse, #pane-alarms).on) .stage { display: none; }
   .android main:has(:is(#pane-alarms, #pane-radio).on.editing) { grid-template-rows: minmax(0, 1fr); overflow: hidden; }
   .android main:has(:is(#pane-alarms, #pane-radio).on.editing) .stage { display: none; }
   .android main:has(:is(#pane-alarms, #pane-radio).on.editing) .console { height: 100%; min-height: 0; }
+}
+
+@media (max-width: 600px) and (max-height: 550px) {
+  .android main:has(#pane-radio.on) { grid-template-rows: minmax(0, 1fr); }
+  .android main:has(#pane-radio.on) .stage { display: none; }
 }
 
 @media (orientation: landscape) and (max-height: 600px) and (min-width: 600px) {
@@ -1717,23 +1730,21 @@ body.android {
     overflow: hidden;
   }
   .android .stage {
+    max-height: none;
     min-height: 0;
     grid-template-columns: 88px minmax(0, 1fr);
-    grid-template-rows: minmax(70px, 1fr) auto auto auto;
+    grid-template-rows: max-content 52px auto;
     gap: 5px 9px;
     overflow-y: auto;
   }
-  .android .orbwrap { grid-column: 1; grid-row: 1 / 4; min-height: 88px; }
+  .android .orbwrap { grid-column: 1; grid-row: 1; min-height: 88px; }
   .android .orb { width: 82px; height: 82px; }
   .android .nowplaying { grid-column: 2; grid-row: 1; align-self: center; }
   .android .station { font-size: 18px; }
   .android .track { font-size: 12px; }
-  .android .transport { grid-column: 2; grid-row: 2; }
+  .android .transport { grid-column: 1 / -1; grid-row: 2; grid-template-columns: 52px 44px 44px minmax(0, 1fr); }
   .android .gel.big { width: 52px; height: 52px; min-height: 52px; }
-  .android .volwrap { flex-basis: 100%; }
-  .android .slider { width: clamp(92px, 18vw, 150px); }
-  .android .android-preview-note { grid-column: 2; grid-row: 3; padding: 6px 8px; font-size: 10.5px; }
-  .android .sleepbox { grid-column: 1 / -1; grid-row: 4; }
+  .android .sleepbox { grid-column: 1 / -1; grid-row: 3; }
   .android .console { min-height: 0; height: auto; }
   .android .row { min-height: 46px; }
   .android .station-controls { grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }

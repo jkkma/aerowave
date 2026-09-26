@@ -2217,8 +2217,6 @@ function renderBrowseFilters() {
     });
     container.append(chip);
   }
-  $("#browse-quality-summary").textContent = [browseCodec, browseBitrateLabel(browseBitrate)]
-    .filter(Boolean).join(" · ") || "Any";
   updateBrowseResetVisibility();
 }
 
