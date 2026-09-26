@@ -255,7 +255,7 @@ async fn resolve(
                 content_type,
             });
         }
-        match first_url_in_playlist(&body) {
+        match first_url_in_playlist(&body, &final_url, &content_type) {
             Some(next) => current = next,
             None => {
                 return Err(ResolveError::new(

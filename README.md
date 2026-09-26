@@ -10,13 +10,16 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 
 **Radio**
 
-- Twelve stations seeded in (FIP and its sister channels, Radio Paradise, WFMU,
-  1.FM); add, edit, tag, favourite and filter your own.
+- Add stations by stream link or discover them in Browse, then edit, tag,
+  favourite and filter your collection.
 - The Stations tab keeps your saved collection searchable by name or tag, with
   an All / Favourites switch and optional A–Z sorting. Sorting changes the view,
   leaving the saved order intact. Each row has separate listen, favourite and
   edit controls; Discover stations opens Browse. The station editor keeps its
   actions and stream-test feedback visible while the fields scroll.
+- Manual station additions, edits, favourites and deletions become visible only
+  after saving succeeds. A failed editor save keeps the draft for retry, and
+  quitting waits for pending station writes.
 - **Recent** keeps the last 20 stations that actually started playing, newest
   first, including stations tried in Browse. Unsaved discoveries can be saved
   from that list. History survives restarting the app and travels with backups.
@@ -66,9 +69,10 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   an extensionless endpoint or a playlist pointing to HLS reaches hls.js. That
   request also supplies the initial station headers, avoiding another immediate
   metadata request. A known HLS directory entry can start its decoder directly.
-- `.pls` and `.m3u` links are followed to the real stream URL — in the relay
+- `.pls`, `.m3u` and `.asx` links are followed to the real stream URL — in the relay
   now, so a playlist that does not admit to being one in its file name is
-  followed just the same.
+  followed just the same. Relative entries resolve against the playlist's final
+  address after redirects; ASX references can point to ordinary MP3 streams.
 - **HLS plays**, which is about 6% of the radio-browser directory — some 3,700
   stations, France Inter and RTL among them. WebView2 will not play an `.m3u8`
   itself: it reads the playlist, reports metadata, and then sits at
@@ -144,7 +148,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   servers still speaking it are `http://` to a one.
 - A dropped stream reconnects four times with a lengthening backoff; from the
   second attempt it retries through the playlist-resolved URL, unless a probe
-  has already had its say about that station.
+  has already had its say about that station. Brief connections that drop again
+  consume that budget; sustained decoded playback restores it.
 - The now-playing poll still talks to the broadcaster directly rather than to
   the relay: it wants a title, not audio, and pointing it at the relay would
   only hand it back the app's own stream.
@@ -448,6 +453,10 @@ then Android's alarm sound when necessary. Desktop alarm behavior above is
 unchanged. See the [Android build and testing guide](docs/android.md) for device
 evidence and limitations, and [Android releases](docs/android-release.md) for
 protected signing keys and optimized APKs.
+
+If Android settings cannot be read, Settings shows the storage error and startup
+keeps the native alarm store's existing source information. Recover the settings
+or restore a backup before changing setup.
 
 ### Zorin OS / Ubuntu Linux
 

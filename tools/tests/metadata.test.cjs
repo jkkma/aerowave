@@ -375,7 +375,7 @@ test("a late artwork response cannot overwrite a station edit or a newer source"
 
 test("changing a saved stream clears its derived logo and HLS hint", async () => {
   const h = artHarness();
-  h.evaluate("wire(); editingStation=state.stations[0]; editingStation.hls=true");
+  h.evaluate("wire(); openStationEditor(state.stations[0]); editingStation.hls=true");
   h.el("#st-name").value = "New station";
   h.el("#st-url").value = "https://radio.test/new";
   await h.el("#station-editor").dispatch("submit");

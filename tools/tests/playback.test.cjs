@@ -6,6 +6,48 @@ function folderHarness(pick) {
   return createHarness({ invoke: (command) => command === "random_track" ? pick.promise : undefined });
 }
 
+test("brief reconnects consume the retry budget before backup takes over", async () => {
+  const h = createHarness();
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Flaky' })");
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    await h.audios[0].dispatch("playing");
+    h.evaluate("failure('network dropped')");
+    assert.equal(h.evaluate("player.retries"), attempt);
+    assert.equal(h.evaluate("lastMediaTime"), 0);
+    await h.fireTimer(h.evaluate("player.retryTimer"));
+    await flush();
+  }
+  await h.audios[0].dispatch("playing");
+  h.evaluate("failure('network dropped')");
+  await flush();
+  assert.equal(h.calls.filter(({ command }) => command === "backup_track").length, 1);
+});
+
+test("sustained decoded progress restores the reconnect budget", async () => {
+  const h = createHarness();
+  h.evaluate("globalThis.testNow = 1000; Date.now = () => testNow");
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Recovering' })");
+  h.evaluate("failure('network dropped')");
+  await h.fireTimer(h.evaluate("player.retryTimer"));
+  await flush();
+  await h.audios[0].dispatch("playing");
+  h.audios[0].readyState = 3;
+  h.audios[0].currentTime = 1;
+  await h.audios[0].dispatch("timeupdate");
+  assert.equal(h.evaluate("player.retries"), 1);
+  h.evaluate("testNow = 16001");
+  h.audios[0].currentTime = 2;
+  await h.audios[0].dispatch("timeupdate");
+  assert.equal(h.evaluate("player.retries"), 1);
+  for (let second = 3; second <= 15; second++) {
+    h.audios[0].currentTime = second;
+    await h.audios[0].dispatch("timeupdate");
+  }
+  assert.equal(h.evaluate("player.retries"), 0);
+  h.evaluate("failure('another network drop')");
+  assert.equal(h.evaluate("player.retries"), 1);
+});
+
 for (const routed of [null, "http://127.0.0.1:1234/f/private-token"]) {
   test(`local files use ${routed ? "the scoped media route" : "the platform asset URL"}`, async () => {
     const h = createHarness({ invoke: (command) => command === "local_file_url" ? routed : undefined });

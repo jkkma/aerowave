@@ -76,6 +76,27 @@ test("native canonical alarms survive reload without rearming the saved desktop 
   assert.deepEqual(JSON.parse(JSON.stringify(sync.args.payload.stations)), []);
 });
 
+test("Android keeps native alarm sources when settings failed to load", async () => {
+  const h = createHarness({ navigator, invoke: command => {
+    if (command === "config_location") return {
+      portable: false, path: "/data/user/0/com.aerowave.radio/files/aerowave.json",
+      loadError: "Could not read settings",
+    };
+    if (command === "get_state") return { stations: [], alarms: [], settings: {} };
+    if (command.endsWith("|get_alarm_state")) return snapshot(8, null, {
+      alarms: [{ id: "wake", enabled: true }],
+    });
+  } });
+  const problems = [];
+  h.el("#config-where").after = problem => problems.push(problem);
+  await h.evaluate("boot()");
+  assert.equal(h.el("#config-details").open, true);
+  assert.match(problems[0].textContent, /Android alarm sources were kept/);
+  assert.match(h.el("#status-msg").textContent, /restore a backup or repair settings/);
+  assert.equal(h.evaluate("state.alarms[0].id"), "wake");
+  assert.equal(h.calls.some(call => call.command.endsWith("|sync_alarms")), false);
+});
+
 test("alarm edits serialize and source-only saves do not replace canonical alarms", async () => {
   const delayed = deferred();
   let syncs = 0;
