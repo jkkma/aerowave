@@ -28,6 +28,7 @@
    ===================================================================== */
 
 import * as THREE from "./vendor/three.module.min.js";
+import { advanceOrbMotion, createOrbRenderLoop } from "./orb-render-loop.js";
 
 /**
  * The orb is rendered into a small buffer and scaled up with hard pixel
@@ -60,6 +61,7 @@ const LOGO_EMISSIVE = 0x0e1a20;
 const KICK_SPEED = 6.5;
 const KICK_DECAY = 8;
 const KICK_MS = 500;
+const SPIN_RESPONSE = 1.5;
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 const state = {
@@ -69,7 +71,6 @@ const state = {
   orb: null,
   canvas: null,
   host: null,
-  last: 0,
   // Signed, and started already going the idle way: easing in from the other
   // direction would spend the first second of every launch turning back.
   spin: IDLE_DIR * IDLE_SPIN,
@@ -88,6 +89,7 @@ const state = {
 
 /** The picture that was asked for last, so a slow one landing late is dropped. */
 let logoToken = 0;
+let renderLoop = null;
 
 /**
  * The palette the crystal is drawn from: seven cyan steps, clear to icy blue.
@@ -389,6 +391,7 @@ function wear(texture, emissive) {
   state.rim.value = bare ? 1 : 0.14;
   material.needsUpdate = true;
   if (old && old !== state.crystal) old.dispose();
+  renderLoop?.redraw();
 }
 
 
@@ -439,31 +442,16 @@ export function buildOrb() {
   return group;
 }
 
-function frame(now) {
-  const dt = Math.min(0.05, (now - state.last) / 1000) || 0;
-  state.last = now;
-  if (reducedMotion.matches) {
-    state.kick = 0;
-    state.renderer.render(state.scene, state.camera);
-    return;
-  }
-
+function step(dt) {
   // Ease towards the target speed instead of jumping when playback starts.
   // Signed: a shove to the left leaves it turning left rather than snapping
   // back the other way the moment the shove is spent.
   const speed = document.body.classList.contains("playing") ? PLAYING_SPIN : IDLE_SPIN;
   const target = state.dir * speed;
-  state.spin += (target - state.spin) * Math.min(1, dt * 1.5);
-
-  // A click gives it a shove that bleeds off exponentially.
-  state.kick *= Math.exp(-KICK_DECAY * dt);
-  if (Math.abs(state.kick) < 0.002) state.kick = 0;
+  const turn = advanceOrbMotion(state, target, dt, SPIN_RESPONSE, KICK_DECAY);
 
   // Horizontal only: one axis, no tumble and no nod.
-  const turn = (state.spin + state.kick) * dt;
   for (const mesh of state.orb.userData.spinning) mesh.rotation.y += turn;
-
-  state.renderer.render(state.scene, state.camera);
 }
 
 /** Click it and it spins up - and keeps turning the way you shoved it. */
@@ -526,8 +514,19 @@ function init() {
 
   wireClicks(host);
   host.classList.add("gl");
-  state.last = performance.now();
-  state.renderer.setAnimationLoop(frame);
+  renderLoop = createOrbRenderLoop({
+    renderer: state.renderer,
+    draw: () => state.renderer.render(state.scene, state.camera),
+    step,
+    visible: () => !document.hidden,
+    reducedMotion: () => reducedMotion.matches,
+    now: () => performance.now(),
+    pause: () => { state.kick = 0; },
+  });
+  document.addEventListener("visibilitychange", renderLoop.sync);
+  if (reducedMotion.addEventListener) reducedMotion.addEventListener("change", renderLoop.sync);
+  else reducedMotion.addListener(renderLoop.sync);
+  renderLoop.sync();
   return true;
 }
 

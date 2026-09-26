@@ -248,6 +248,15 @@ main {
   min-width: 0;
 }
 
+/* WebKitGTK repaints these large shadow surfaces when countdown text changes.
+   An outline keeps the glass edge without stalling the orb on every tick. */
+body.linux .stage,
+body.linux .console {
+  box-shadow: none;
+  outline: 1px solid rgba(200, 246, 255, .24);
+  outline-offset: -1px;
+}
+
 .corner { display: none; }
 
 .stage {

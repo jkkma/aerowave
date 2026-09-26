@@ -4857,29 +4857,35 @@ function closePowerCountdown(restoreFocus = true) {
 function renderSleepTimer() {
   const timer = sleepSnapshot.timer;
   const pending = timer?.executeAtMs != null;
+  // Reassigning unchanged button states makes WebKitGTK restyle the player
+  // every second, stalling the orb even with the timer off.
   $$("#sleep-chips .chip").forEach((chip) => {
     const on = +chip.dataset.mins === (timer?.minutes || 0);
-    chip.classList.toggle("on", on);
-    chip.setAttribute("aria-pressed", String(on));
-    chip.disabled = !!ringing && +chip.dataset.mins > 0;
+    const disabled = !!ringing && +chip.dataset.mins > 0;
+    if (chip.classList.contains("on") !== on) chip.classList.toggle("on", on);
+    if (chip.getAttribute("aria-pressed") !== String(on)) chip.setAttribute("aria-pressed", String(on));
+    if (chip.disabled !== disabled) chip.disabled = disabled;
   });
-  $("#sleep-hint").textContent = IS_ANDROID
+  const hint = IS_ANDROID
     ? (timer
       ? "Audio fades out before the timer ends, even with the screen locked. Choose minutes to restart, or Off to cancel."
       : "Play a station, then choose when to stop. Works with the screen locked.")
     : (timer
       ? "This timer: " + sleepActionLabel(timer.action) + ". Choose minutes again to restart with the selected action."
       : "Choose what happens, then set the minutes.");
+  if ($("#sleep-hint").textContent !== hint) $("#sleep-hint").textContent = hint;
   if (!timer) {
-    $("#sleep-left").textContent = "";
+    if ($("#sleep-left").textContent) $("#sleep-left").textContent = "";
     closePowerCountdown();
     return;
   }
   if (pending) {
     const left = Math.max(0, Math.ceil(sleepTimeLeft(timer, true) / 1000));
-    $("#sleep-left").textContent = sleepActionLabel(timer.action) + " · " + left + "s";
-    $("#power-title").textContent = timer.action === "shutdown" ? "This PC will shut down" : "This PC will sleep";
-    $("#power-seconds").textContent = left + "s";
+    const label = sleepActionLabel(timer.action) + " · " + left + "s";
+    const title = timer.action === "shutdown" ? "This PC will shut down" : "This PC will sleep";
+    if ($("#sleep-left").textContent !== label) $("#sleep-left").textContent = label;
+    if ($("#power-title").textContent !== title) $("#power-title").textContent = title;
+    if ($("#power-seconds").textContent !== left + "s") $("#power-seconds").textContent = left + "s";
     $("#power-wake-warning").hidden = timer.action !== "sleep" ||
       (state.settings.wakeForAlarms !== false && powerStatus?.wakeSupported === true && powerStatus.wakeAllowed === true && !powerStatus.error);
     const dialog = $("#power-countdown");
@@ -4896,7 +4902,8 @@ function renderSleepTimer() {
   }
   closePowerCountdown();
   const left = sleepTimeLeft(timer);
-  $("#sleep-left").textContent = left > 0 ? fmtDuration(left / 1000) + " left" : "Finishing…";
+  const label = left > 0 ? fmtDuration(left / 1000) + " left" : "Finishing…";
+  if ($("#sleep-left").textContent !== label) $("#sleep-left").textContent = label;
   // Fade out over whatever is actually left rather than a fixed twenty
   // seconds, so a tick that arrives late - the window was hidden, and
   // WebView2 throttles timers there - still lands on silence at zero.
@@ -5011,7 +5018,9 @@ async function refreshPowerStatus() {
   }
 }
 
-setInterval(renderSleepTimer, 1000);
+setInterval(() => {
+  if (sleepSnapshot.timer) renderSleepTimer();
+}, 1000);
 
 // ---------------------------------------------------------------- wiring ---
 
