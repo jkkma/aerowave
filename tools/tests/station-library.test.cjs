@@ -42,6 +42,14 @@ function jsonClone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function savedIds(h) {
+  return jsonClone(h.evaluate("state.stations.map((item) => item.id)"));
+}
+
+function stationWrites(h) {
+  return h.calls.filter((call) => call.command === "save_stations");
+}
+
 test("loadedmetadata and non-ready timeupdates do not count as listening; advancing ready audio does", async () => {
   const saved = station("saved", "Saved station");
   const h = libraryHarness({ stations: [saved] });
@@ -185,24 +193,44 @@ test("saving an unsaved recent station waits in the station write queue and uses
   assert.equal(rows(h)[0].querySelector(".station-save-recent"), null);
 });
 
-test("a failed reorder write preserves saved order and restores focus to the moved row", async () => {
-  const items = [station("one", "One"), station("two", "Two"), station("three", "Three")];
-  const h = libraryHarness({ stations: items, invoke: (command) => {
-    if (command === "save_stations") throw new Error("disk unavailable");
-  } });
-  await h.el("#station-reorder").dispatch("click");
-  const movedUp = rows(h).find((row) => row.dataset.id === "two").querySelector(".station-up");
-  movedUp.focus();
-  await h.evaluate('moveStation("two",-1)');
+test("a station moves directly before or after a nonadjacent target", async () => {
+  const items = ["one", "two", "three", "four"].map((id) => station(id, id));
+  const h = libraryHarness({ stations: items });
 
-  assert.deepEqual(jsonClone(h.evaluate("state.stations.map((item)=>item.id)")), ["one", "two", "three"]);
-  assert.deepEqual(jsonClone(h.calls.find((call) => call.command === "save_stations").args.stations.map((item)=>item.id)),
-    ["two", "one", "three"]);
-  const row = rows(h).find((item) => item.dataset.id === "two");
-  assert.equal(h.document.activeElement, row.querySelector(".station-up"));
+  await h.evaluate('moveStation("four", "one")');
+  assert.deepEqual(savedIds(h), ["four", "one", "two", "three"]);
+  await h.evaluate('moveStation("four", "three", true)');
+  assert.deepEqual(savedIds(h), ["one", "two", "three", "four"]);
+  assert.deepEqual(stationWrites(h).map((call) => jsonClone(call.args.stations.map((item) => item.id))), [
+    ["four", "one", "two", "three"],
+    ["one", "two", "three", "four"],
+  ]);
+  assert.deepEqual(rowIds(h), savedIds(h));
+  assert.equal(rows(h).some((row) => row.querySelector(".station-up, .station-down")), false);
 });
 
-test("a queued reorder follows the latest library order and returns focus to an available move", async () => {
+test("a failed reorder preserves order, keeps play focus, and a retry does not leak it", async () => {
+  let attempts = 0;
+  const items = [station("one", "One"), station("two", "Two"), station("three", "Three")];
+  const h = libraryHarness({ stations: items, invoke: (command) => {
+    if (command === "save_stations" && ++attempts === 1) throw new Error("disk unavailable");
+  } });
+  rows(h).find((row) => row.dataset.id === "two").querySelector(".station-play").focus();
+
+  await h.evaluate('moveStation("two", "one")');
+  assert.deepEqual(savedIds(h), ["one", "two", "three"]);
+  assert.deepEqual(rowIds(h), ["one", "two", "three"]);
+  assert.equal(h.document.activeElement, rows(h).find((row) => row.dataset.id === "two").querySelector(".station-play"));
+
+  await h.evaluate('moveStation("two", "one")');
+  assert.deepEqual(savedIds(h), ["two", "one", "three"]);
+  assert.deepEqual(stationWrites(h).map((call) => jsonClone(call.args.stations.map((item) => item.id))), [
+    ["two", "one", "three"],
+    ["two", "one", "three"],
+  ]);
+});
+
+test("a queued reorder uses the latest library and preserves a concurrent addition", async () => {
   const firstWrite = deferred();
   let writes = 0;
   const items = [station("one", "One"), station("two", "Two"), station("three", "Three")];
@@ -211,19 +239,199 @@ test("a queued reorder follows the latest library order and returns focus to an 
     if (command === "save_stations" && ++writes === 1) return firstWrite.promise;
   } });
   h.context.staged = staged;
-  await h.el("#station-reorder").dispatch("click");
   const queuedSave = h.evaluate("saveStations({extraStation:staged,onSuccess:()=>state.stations.push(staged)})");
   await flush();
-  const move = h.evaluate('moveStation("two",-1)');
+  rows(h).find((row) => row.dataset.id === "two").querySelector(".station-play").focus();
+  const move = h.evaluate('moveStation("two", "one")');
   await flush();
-  assert.equal(h.calls.filter((call) => call.command === "save_stations").length, 1);
+  assert.equal(stationWrites(h).length, 1);
+  assert.deepEqual(savedIds(h), ["one", "two", "three"]);
 
   firstWrite.resolve(null);
   await Promise.all([queuedSave, move]);
-  const calls = h.calls.filter((call) => call.command === "save_stations");
+  const calls = stationWrites(h);
   assert.equal(calls.length, 2);
   assert.deepEqual(jsonClone(calls[1].args.stations.map((item)=>item.id)), ["two", "one", "three", "staged"]);
-  assert.deepEqual(jsonClone(h.evaluate("state.stations.map((item)=>item.id)")), ["two", "one", "three", "staged"]);
+  assert.deepEqual(savedIds(h), ["two", "one", "three", "staged"]);
   const moved = rows(h).find((row) => row.dataset.id === "two");
-  assert.equal(h.document.activeElement, moved.querySelector(".station-down"));
+  assert.equal(h.document.activeElement, moved.querySelector(".station-play"));
+});
+
+test("self, missing, and already positioned moves do not write", async () => {
+  const h = libraryHarness({ stations: [station("one", "One"), station("two", "Two"), station("three", "Three")] });
+  for (const expression of [
+    'moveStation("one", "one")',
+    'moveStation("absent", "one")',
+    'moveStation("one", "absent")',
+    'moveStation("one", "two")',
+    'moveStation("two", "one", true)',
+  ]) await h.evaluate(expression);
+  assert.deepEqual(savedIds(h), ["one", "two", "three"]);
+  assert.equal(stationWrites(h).length, 0);
+});
+
+test("a pending move rejects a duplicate and changes the live order only after the write succeeds", async () => {
+  const pending = deferred();
+  const h = libraryHarness({ stations: [station("one", "One"), station("two", "Two"), station("three", "Three")],
+    invoke: (command) => command === "save_stations" ? pending.promise : undefined });
+  const move = h.evaluate('moveStation("three", "one")');
+  await flush();
+  assert.deepEqual(savedIds(h), ["one", "two", "three"]);
+  assert.deepEqual(rowIds(h), ["one", "two", "three"]);
+  await h.evaluate('moveStation("two", "one")');
+  assert.equal(stationWrites(h).length, 1);
+  pending.resolve(null);
+  await move;
+  assert.deepEqual(savedIds(h), ["three", "one", "two"]);
+});
+
+test("a queued move is skipped if its target was deleted before the queue reaches it", async () => {
+  const firstWrite = deferred();
+  let writes = 0;
+  const h = libraryHarness({ stations: [station("one", "One"), station("two", "Two"), station("three", "Three")],
+    invoke: (command) => command === "save_stations" && ++writes === 1 ? firstWrite.promise : undefined });
+  const first = h.evaluate("saveStations()");
+  await flush();
+  const removal = h.evaluate('saveStations({removeId:"two"})');
+  const move = h.evaluate('moveStation("three", "two")');
+  firstWrite.resolve(null);
+  await Promise.all([first, removal, move]);
+  assert.deepEqual(savedIds(h), ["one", "three"]);
+  assert.deepEqual(stationWrites(h).map((call) => jsonClone(call.args.stations.map((item) => item.id))), [
+    ["one", "two", "three"],
+    ["one", "three"],
+  ]);
+});
+
+test("filtered saved-order moves preserve the relative order of hidden stations", async () => {
+  const items = [
+    station("one", "One", { tag: "jazz", favorite: true }),
+    station("two", "Two", { tag: "pop" }),
+    station("three", "Three", { tag: "jazz", favorite: true }),
+    station("four", "Four", { tag: "pop" }),
+    station("five", "Five", { tag: "jazz", favorite: true }),
+  ];
+  const h = libraryHarness({ stations: items });
+  h.el("#station-filter").value = "jazz";
+  await h.el("#station-filter").dispatch("input");
+  assert.deepEqual(rowIds(h), ["one", "three", "five"]);
+  await h.evaluate('moveStation("five", "one")');
+  assert.deepEqual(savedIds(h), ["five", "one", "two", "three", "four"]);
+  assert.deepEqual(rowIds(h), ["five", "one", "three"]);
+
+  h.el("#station-filter").value = "";
+  await h.el("#station-filter").dispatch("input");
+  await h.el("#station-favorites").dispatch("click");
+  assert.deepEqual(rowIds(h), ["five", "one", "three"]);
+  await h.evaluate('moveStation("one", "three", true)');
+  assert.deepEqual(savedIds(h), ["five", "two", "three", "one", "four"]);
+  assert.deepEqual(rowIds(h), ["five", "three", "one"]);
+  assert.equal(stationWrites(h).length, 2);
+});
+
+test("Recent, name sort, a single visible row, and setup restore block reordering", async () => {
+  const h = libraryHarness({ stations: [station("one", "One"), station("two", "Two"), station("three", "Three")],
+    recentStations: [station("three", "Three"), station("two", "Two")] });
+  h.el("#station-sort").value = "name";
+  await h.el("#station-sort").dispatch("change");
+  await h.evaluate('moveStation("three", "one")');
+  h.el("#station-sort").value = "saved";
+  await h.el("#station-sort").dispatch("change");
+  await h.el("#station-recent").dispatch("click");
+  await h.evaluate('moveStation("three", "two")');
+  await h.el("#station-all").dispatch("click");
+  h.el("#station-filter").value = "One";
+  await h.el("#station-filter").dispatch("input");
+  await h.evaluate('moveStation("one", "two")');
+  h.el("#station-filter").value = "";
+  await h.el("#station-filter").dispatch("input");
+  h.evaluate("setupRestorePending = true");
+  await h.evaluate('moveStation("three", "one")');
+  assert.deepEqual(savedIds(h), ["one", "two", "three"]);
+  assert.equal(stationWrites(h).length, 0);
+});
+
+test("mouse dragging a play row past the movement threshold drops it before another row", async () => {
+  const h = libraryHarness({ stations: [station("one", "One"), station("two", "Two"), station("three", "Three")] });
+  const list = h.el("#station-list");
+  let captured = null;
+  list.setPointerCapture = (id) => { captured = id; };
+  list.hasPointerCapture = (id) => captured === id;
+  list.releasePointerCapture = () => { captured = null; };
+  list.getBoundingClientRect = () => ({ left: 0, right: 200, top: 0, bottom: 120, height: 120 });
+  rows(h).forEach((row, index) => {
+    row.getBoundingClientRect = () => ({ top: index * 40, bottom: (index + 1) * 40, height: 40 });
+  });
+  const play = rows(h)[2].querySelector(".station-play");
+  const pointer = { pointerType: "mouse", button: 0, buttons: 1, pointerId: 7, clientX: 10 };
+  await play.dispatch("pointerdown", { ...pointer, clientY: 100 });
+  await list.dispatch("pointermove", { ...pointer, clientY: 96 });
+  await list.dispatch("pointerup", { ...pointer, clientY: 96 });
+  assert.equal(stationWrites(h).length, 0);
+
+  await play.dispatch("pointerdown", { ...pointer, clientY: 100 });
+  await list.dispatch("pointermove", { ...pointer, clientY: 10 });
+  assert.equal(captured, 7);
+  assert.equal(stationWrites(h).length, 0);
+  await list.dispatch("pointerup", { ...pointer, clientY: 10 });
+  await flush();
+  assert.equal(captured, null);
+  assert.deepEqual(savedIds(h), ["three", "one", "two"]);
+  assert.equal(stationWrites(h).length, 1);
+  assert.equal(h.evaluate("player.source"), null);
+});
+
+test("Escape cancels a drag and suppresses its delayed mouse click", async () => {
+  const h = libraryHarness({ stations: [station("one", "One"), station("two", "Two")] });
+  const list = h.el("#station-list");
+  let captured = null;
+  list.setPointerCapture = (id) => { captured = id; };
+  list.hasPointerCapture = (id) => captured === id;
+  list.releasePointerCapture = () => { captured = null; };
+  list.getBoundingClientRect = () => ({ left: 0, right: 200, top: 0, bottom: 80, height: 80 });
+  rows(h).forEach((row, index) => {
+    row.getBoundingClientRect = () => ({ top: index * 40, bottom: (index + 1) * 40, height: 40 });
+  });
+  const play = rows(h)[1].querySelector(".station-play");
+  const pointer = { pointerType: "mouse", button: 0, buttons: 1, pointerId: 8, clientX: 10 };
+  await play.dispatch("pointerdown", { ...pointer, clientY: 60 });
+  await list.dispatch("pointermove", { ...pointer, clientY: 10 });
+  assert.equal(captured, 8);
+  const escape = await h.document.dispatch("keydown", { key: "Escape" });
+  assert.equal(escape.defaultPrevented, true);
+  assert.equal(captured, null);
+  // The test DOM does not model capture listeners, so exercise the click guard directly.
+  for (const [id, timer] of h.timers) if (!timer.interval && timer.ms === 0) await h.fireTimer(id);
+  await list.dispatch("pointerup", { ...pointer, clientY: 10 });
+  const clickGuard = list.handlers.get("click")[0];
+  const checkedClick = (detail) => {
+    const result = { prevented: false, stopped: false };
+    clickGuard({ detail, preventDefault() { result.prevented = true; },
+      stopImmediatePropagation() { result.stopped = true; } });
+    return result;
+  };
+  assert.deepEqual(checkedClick(1), { prevented: true, stopped: true });
+  assert.deepEqual(checkedClick(0), { prevented: false, stopped: false });
+  assert.equal(stationWrites(h).length, 0);
+  await play.dispatch("pointerdown", { ...pointer, clientY: 60 });
+  assert.deepEqual(checkedClick(1), { prevented: false, stopped: false });
+});
+
+test("Alt+Arrow moves a focused play row without starting playback", async () => {
+  const h = libraryHarness({ stations: [station("one", "One"), station("two", "Two"), station("three", "Three")] });
+  const play = rows(h).find((row) => row.dataset.id === "three").querySelector(".station-play");
+  play.focus();
+  const up = await play.dispatch("keydown", { key: "ArrowUp", altKey: true });
+  await flush();
+  assert.equal(up.defaultPrevented, true);
+  assert.deepEqual(savedIds(h), ["one", "three", "two"]);
+  assert.equal(h.evaluate("player.source"), null);
+  assert.equal(h.document.activeElement, rows(h).find((row) => row.dataset.id === "three").querySelector(".station-play"));
+
+  const movedPlay = rows(h).find((row) => row.dataset.id === "three").querySelector(".station-play");
+  const down = await movedPlay.dispatch("keydown", { key: "ArrowDown", altKey: true });
+  await flush();
+  assert.equal(down.defaultPrevented, true);
+  assert.deepEqual(savedIds(h), ["one", "two", "three"]);
+  assert.equal(stationWrites(h).length, 2);
 });

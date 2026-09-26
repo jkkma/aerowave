@@ -52,7 +52,7 @@ test("next-alarm labels ask the OS for the timezone at the future timestamp", as
   } });
   refuseBrowserTimezone(h);
   await h.evaluate("refreshNextAlarm()");
-  assert.match(h.el("#next-alarm").textContent, /Wake · 07:30/);
+  assert.match(h.el("#status-next").textContent, /Wake · 07:30/);
   assert.equal(h.calls.find(call => call.command === "local_time").args.atMs, atMs);
 });
 
@@ -68,7 +68,6 @@ test("an old next-alarm timezone lookup cannot bring back a removed alarm", asyn
   await h.evaluate("refreshNextAlarm()");
   local.resolve(now);
   await old;
-  assert.equal(h.el("#next-alarm").textContent, "No alarm set");
   assert.equal(h.el("#status-next").textContent, "");
 });
 
