@@ -139,10 +139,9 @@
         <div class="station-results">
           <span id="station-count" role="status" aria-live="polite"></span>
           <button type="button" class="station-link" id="station-reset" hidden>Clear filters</button>
-          <button type="button" class="station-link" id="station-reorder" aria-pressed="false" hidden>Reorder</button>
           <button type="button" class="station-link" id="btn-discover-stations">Discover stations <span aria-hidden="true">↗</span></button>
         </div>
-        <p class="editor-note" id="station-order-hint" hidden>Move stations with the arrows. Your order saves automatically.</p>
+        <p class="sr-only" id="station-order-hint">Drag stations to change their saved order, or focus a station and press Alt + Up or Down. Your order saves automatically.</p>
       </div>
       <ul class="list" id="station-list" aria-label="Saved stations"></ul>
 
@@ -194,19 +193,19 @@
           </div>
         </div>
         <div class="browsefilters">
-          <label class="lbl" for="browse-country">Country
+          <label class="lbl" for="browse-country"><span class="sr-only">Country</span>
             <select class="field" id="browse-country">
               <option value="">Any country</option>
             </select>
           </label>
-          <label class="lbl" for="browse-tag">Genre
+          <label class="lbl" for="browse-tag"><span class="sr-only">Genre</span>
             <select class="field" id="browse-tag">
               <option value="">Any genre</option>
             </select>
           </label>
         </div>
         <div class="browse-quality-fields">
-          <label class="lbl" for="browse-codec">Format
+          <label class="lbl" for="browse-codec"><span class="sr-only">Format</span>
             <select class="field" id="browse-codec">
               <option value="">Any format</option>
               <option value="MP3">MP3</option>
@@ -216,7 +215,7 @@
               <option value="FLAC">FLAC</option>
             </select>
           </label>
-          <label class="lbl" for="browse-bitrate">Bitrate
+          <label class="lbl" for="browse-bitrate"><span class="sr-only">Bitrate</span>
             <select class="field" id="browse-bitrate">
               <option value="">Any bitrate</option>
               <option value="low">Under 48 kbps</option>
@@ -247,40 +246,6 @@
         <h2>Alarms</h2>
         <button type="button" class="gel wide" id="btn-add-alarm">+ Add alarm</button>
       </div>
-      <section class="alarm-readiness" id="alarm-readiness" data-tone="neutral" aria-labelledby="readiness-title">
-        <div class="readiness-heading">
-          <h3 id="readiness-title">Next alarm</h3>
-          <span class="readiness-status" id="readiness-status">No alarm scheduled</span>
-        </div>
-        <div class="nextalarm" id="next-alarm">No alarm set</div>
-        <p class="readiness-description" id="readiness-description">Set an alarm to see what is ready.</p>
-        <div class="readiness-checks" id="readiness-checks">
-          <div class="readiness-check">
-            <div class="readiness-check-heading">
-              <span class="readiness-check-label">Source</span>
-              <button type="button" class="gel readiness-action" id="readiness-source-check">Check source</button>
-            </div>
-            <span class="readiness-detail" id="readiness-source-detail" data-tone="neutral" role="status" aria-live="polite">Waiting for a check</span>
-          </div>
-          <div class="readiness-check">
-            <div class="readiness-check-heading">
-              <span class="readiness-check-label">Backup</span>
-              <button type="button" class="gel readiness-action" id="readiness-backup-check">Check backup</button>
-            </div>
-            <span class="readiness-detail" id="readiness-backup-detail" data-tone="neutral" role="status" aria-live="polite">Waiting for a check</span>
-          </div>
-          <div class="readiness-check">
-            <div class="readiness-check-heading">
-              <span class="readiness-check-label" id="readiness-wake-label">Wake &amp; permissions</span>
-            </div>
-            <span class="readiness-detail" id="readiness-wake-detail" data-tone="neutral">Checking platform settings…</span>
-          </div>
-        </div>
-        <div class="readiness-footer">
-          <p id="readiness-note">Checks show current conditions, which can change before the alarm.</p>
-          <button type="button" class="gel readiness-action" id="readiness-settings">Review settings</button>
-        </div>
-      </section>
       <ul class="list alarms" id="alarm-list"></ul>
 
       <p class="android-only editor-note" id="android-alarm-hint">Checking Android alarm permissions…</p>

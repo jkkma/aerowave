@@ -23,9 +23,11 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - **Recent** keeps the last 20 stations that actually started playing, newest
   first, including stations tried in Browse. Unsaved discoveries can be saved
   from that list. History survives restarting the app and travels with backups.
-- **Reorder** reveals up/down controls for the saved station order. Moves save
-  before the list changes; a failed write leaves the previous order intact.
-  Search and A–Z sorting remain separate views of the saved collection.
+- Drag a station with the mouse to change its **Saved order**, including within
+  search results or favourites. The list scrolls as you drag near its edges.
+  Keyboard users can focus a station and press Alt + Up/Down. Moves save before
+  the list changes; a failed write leaves the previous order intact. A–Z and
+  Recent keep their own ordering.
 - The main tabs support Left/Right (including wraparound), Home and End, with
   one tab stop for the active tab.
 - **Ordinary stations play through a local relay, not straight off the web.** A
@@ -325,17 +327,12 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 
 **Alarms**
 
-- The next-alarm card brings the scheduled time, source, backup music and
-  platform wake or permission status together. Check source and Check backup
-  run only when requested, without replacing the current listening session.
-  Desktop checks use a muted decoder; a folder check samples one track without
-  consuming shuffle history. Android checks report server or folder availability,
-  not native decoding. Results expire after five minutes and are discarded when
-  their source or occurrence changes. These checks cover current conditions;
-  they do not establish speaker volume, future network access or unattended wake.
+- The bottom bar shows the next alarm's countdown and scheduled local time.
   Use Test in the alarm editor to hear an alarm through the normal playback path.
 - Any number of them, each with its own time, repeat days, source, volume,
   fade-in, snooze length, give-up timeout and auto-snooze.
+- **Delete** on each alarm card removes it directly from the list. A failed
+  save leaves the alarm available for retry.
 - **Skip next** on a repeating alarm skips one scheduled date without turning
   off the routine. The card shows the skipped date and the following ring;
   **Undo skip** restores it before its scheduled time. Skips survive a restart,

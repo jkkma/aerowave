@@ -420,7 +420,6 @@ function startAndroidStateSync() {
 // Android is the authority for delivery, including one-shot disabling while
 // this page is absent. Serialize edits and do not let an older poll undo one.
 let androidAlarmSnapshot = null;
-let androidReadinessError = null;
 let androidAlarmRequest = 0;
 let androidAlarmPending = 0;
 let androidAlarmQueue = Promise.resolve();
@@ -435,7 +434,6 @@ function applyAndroidAlarmState(snapshot) {
   const permissionsChanged = !androidAlarmSnapshot || androidAlarmSnapshot.error !== snapshot.error ||
     JSON.stringify(androidAlarmSnapshot.permissions) !== JSON.stringify(snapshot.permissions);
   androidAlarmSnapshot = snapshot;
-  androidReadinessError = null;
   state.alarms = snapshot.alarms;
   if (alarmsChanged) renderAlarms();
   if (permissionsChanged) renderAndroidAlarmPermissions();
@@ -451,14 +449,12 @@ function applyAndroidAlarmState(snapshot) {
       androidRingFocusBefore = null;
       renderSleepTimer();
     }
-    renderAlarmReadiness();
     return;
   }
   const changed = !ringing?.native || ringing.occurrenceId !== nextRing.occurrenceId;
   if (!ringing?.native) androidRingFocusBefore = document.activeElement;
   ringing = { ...nextRing, native: true };
   interruptBackupPreview();
-  renderAlarmReadiness();
   $("#ring-trigger").textContent = nextRing.trigger === "test" ? "Alarm test"
     : nextRing.trigger === "snooze" ? "Snooze ended" : "Alarm";
   $("#ring-time").textContent = fmtAlarmTime(nextRing.hour, nextRing.minute);
@@ -519,8 +515,6 @@ async function refreshAndroidAlarms({ initialize = false } = {}) {
     refreshNextAlarm();
   } catch (error) {
     if (request !== androidAlarmRequest || androidAlarmPending) return;
-    androidReadinessError = String(error);
-    renderAlarmReadiness();
     if (initialize) say("Could not load Android alarms: " + String(error), "bad", true);
   }
 }
@@ -2970,7 +2964,6 @@ function onAlarmFire(payload) {
   }
   ringing = payload;
   interruptBackupPreview();
-  renderAlarmReadiness();
   // A native dialog occupies the top layer, above the alarm overlay. Close it
   // before focusing the alarm, and undo the old fade before its sound starts.
   closePowerCountdown(false);
@@ -3253,204 +3246,14 @@ async function snoozeRing(why, { resumePrevious = false } = {}) {
 }
 
 let nextAlarmRequest = 0;
-let readinessNext = null;
-let readinessWhen = null;
-let readinessScheduleError = null;
-let readinessCheck = null;
-const readinessChecks = { source: null, backup: null };
-const READINESS_FRESH_MS = 5 * 60 * 1000;
 
-function readinessAlarm() {
-  return state.alarms.find((alarm) => alarm.id === readinessNext?.alarmId);
-}
-
-function readinessTarget(kind) {
-  const alarm = readinessAlarm();
-  if (!alarm) return null;
-  if (kind === "backup") return state.settings.backupFolder
-    ? { kind: "folder", path: state.settings.backupFolder } : null;
-  if (alarm.source?.kind === "station") {
-    const station = stationById(alarm.source.stationId);
-    return station?.url ? { kind: "station", url: station.url } : null;
-  }
-  return alarm.source?.path ? { kind: "folder", path: alarm.source.path } : null;
-}
-
-function readinessKey(kind) {
-  return JSON.stringify([readinessNext?.alarmId, readinessNext?.atMs, readinessTarget(kind)]);
-}
-
-function cancelReadinessCheck() {
-  readinessCheck?.abort();
-  readinessCheck = null;
-}
-
-function readinessWake() {
-  if (IS_ANDROID) {
-    const snapshot = androidAlarmSnapshot;
-    if (androidReadinessError) return { tone: "warn", text: "Could not refresh Android alarm status. Reopen this tab to retry." };
-    if (!snapshot) return { tone: "warn", text: "Permission status unavailable. Review Android alarm settings." };
-    if (snapshot.error) return { tone: "bad", text: "Android alarms need attention: " + snapshot.error };
-    const permissions = snapshot.permissions || {};
-    const allowed = (permission) => permission === "granted" || permission === "notRequired";
-    if (!allowed(permissions.exact)) return { tone: "warn", text: "Allow Alarms & reminders so Android can schedule this alarm." };
-    if (!allowed(permissions.notifications)) return { tone: "warn", text: "Allow notifications for alarm controls." };
-    if (permissions.batteryOptimized) return { tone: "warn", text: "Alarms allowed. Battery optimization is on; review this phone’s battery settings." };
-    if (permissions.fullScreen === "denied") return { tone: "warn", text: "Alarms allowed. Lock-screen display is off; use notification controls." };
-    return { tone: "good", text: "Alarm permissions allowed. Keep the phone’s media volume audible." };
-  }
-  if (IS_LINUX_WEBVIEW) return { tone: "warn", text: "Wake is unavailable. Keep this computer awake and Aerowave running." };
-  if (state.settings.wakeForAlarms === false) return { tone: "warn", text: "Wake is off. Keep this PC awake and Aerowave running." };
-  if (!powerStatus) return { tone: "warn", text: "PC wake status unavailable. Review settings before relying on this alarm." };
-  if (powerStatus.error) return { tone: "bad", text: "Wake request failed: " + powerStatus.error };
-  if (!powerStatus.wakeSupported) return { tone: "warn", text: "Wake is unverified on this PC. Keep it awake for dependable alarms." };
-  if (powerStatus.wakeAllowed === false) return { tone: "warn", text: "Windows wake timers are blocked. Review power settings." };
-  if (powerStatus.wakeAllowed !== true) return { tone: "warn", text: "Automatic wake is unverified. Keep this PC awake for dependable alarms." };
-  if (powerStatus.armedAtMs == null) return { tone: "warn", text: "No wake timer registered yet. Keep Aerowave running." };
-  return { tone: "good", text: "Wake timer requested. Keep Aerowave running; waking depends on this PC." };
-}
-
-function readinessDate(when) {
+function alarmDateLabel(when) {
   if (!when) return "Scheduled time";
   const stamp = Date.UTC(when.year, when.month - 1, when.day);
   const today = clockNow && Date.UTC(clockNow.year, clockNow.month - 1, clockNow.day);
   if (today != null && stamp === today) return "Today";
   if (today != null && stamp - today === 86400000) return "Tomorrow";
   return new Date(stamp).toLocaleDateString(undefined, { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
-}
-
-function renderAlarmReadiness() {
-  const alarm = readinessAlarm();
-  if (readinessCheck && (!alarm || ringing || readinessCheck.key !== readinessKey(readinessCheck.kind))) cancelReadinessCheck();
-  for (const kind of ["source", "backup"]) {
-    if (readinessChecks[kind]?.key !== readinessKey(kind)) readinessChecks[kind] = null;
-  }
-  const available = !!alarm && !readinessScheduleError;
-  $("#readiness-checks").hidden = !available;
-  $("#readiness-settings").hidden = !available;
-  const badge = $("#readiness-status");
-  if (!available) {
-    badge.textContent = readinessScheduleError ? "Could not check" : "No upcoming alarm";
-    $("#alarm-readiness").dataset.tone = readinessScheduleError ? "warn" : "neutral";
-    $("#readiness-description").textContent = readinessScheduleError
-      ? "Could not read the next alarm. Reopen this tab to retry."
-      : readinessNext ? "Loading this alarm’s settings…" : "Enable or add an alarm to review its source, backup and wake settings.";
-    $("#readiness-note").textContent = "";
-    return;
-  }
-  const volume = Math.round((alarm.volume ?? 0.8) * 100);
-  $("#readiness-description").textContent = `${readinessDate(readinessWhen)} · Alarm volume ${volume}%` +
-    (readinessNext.snoozed ? " · Snoozed occurrence" : "");
-  const tones = [];
-  let completed = 0;
-  for (const kind of ["source", "backup"]) {
-    const target = readinessTarget(kind);
-    const saved = readinessChecks[kind];
-    const matching = saved?.key === readinessKey(kind);
-    const age = matching ? performance.now() - saved.checkedAt : Infinity;
-    const fresh = matching && age >= 0 && age < READINESS_FRESH_MS;
-    const active = readinessCheck?.kind === kind;
-    const name = kind === "source" ? sourceLabel(alarm.source) || "No source"
-      : target ? target.path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "Backup folder" : "No backup folder";
-    let tone = "neutral";
-    let detail = "Not checked yet.";
-    if (!target) {
-      tone = kind === "backup" && IS_ANDROID ? "neutral" : "warn";
-      detail = kind === "source" ? "Edit this alarm to choose a source."
-        : IS_ANDROID ? "The phone’s alarm sound is the fallback; it has not been tested." : "Choose backup music in Settings in case the source fails.";
-    } else if (active) {
-      tone = "checking";
-      detail = "Checking…";
-    } else if (fresh) {
-      tone = saved.tone;
-      detail = saved.text;
-      completed++;
-    } else if (matching) {
-      detail = "Last check expired. Check again before relying on it.";
-    }
-    const line = $("#readiness-" + kind + "-detail");
-    const message = name + " · " + detail;
-    if (line.textContent !== message) line.textContent = message;
-    line.dataset.tone = tone;
-    tones.push(tone);
-    const button = $("#readiness-" + kind + "-check");
-    button.disabled = !!readinessCheck || !!ringing;
-    button.textContent = active ? "Checking…" : !target
-      ? kind === "source" ? "Edit alarm" : "Choose backup"
-      : kind === "source" ? "Check source" : "Check backup";
-  }
-  const wake = readinessWake();
-  $("#readiness-wake-label").textContent = IS_ANDROID ? "Permissions" : "PC wake";
-  $("#readiness-wake-detail").textContent = wake.text;
-  $("#readiness-wake-detail").dataset.tone = wake.tone;
-  tones.push(wake.tone);
-  if (volume === 0) tones.push("bad");
-  const warning = tones.some((tone) => tone === "bad" || tone === "warn");
-  badge.textContent = readinessCheck ? "Checking" : warning ? "Needs attention"
-    : completed === 2 ? IS_ANDROID ? "Availability checked" : "Checked now" : "Not checked";
-  $("#alarm-readiness").dataset.tone = warning ? "warn" : completed === 2 ? "good" : "neutral";
-  $("#readiness-note").textContent = volume === 0 ? "Alarm volume is zero. Edit the alarm before using it."
-    : IS_ANDROID ? "Availability checks do not test native playback. Use Test in the alarm editor to hear it on this phone."
-    : readinessNext.snoozed ? "Checks use saved sources; this snooze may reuse its held track. Speaker volume and future wake are not tested."
-    : "Silent checks cover this moment only, not speaker volume or future wake. Use the alarm editor’s Test to hear it.";
-}
-
-async function checkAlarmReadiness(kind) {
-  if (!["source", "backup"].includes(kind) || ringing || readinessScheduleError) return;
-  const alarm = readinessAlarm();
-  if (!alarm) return;
-  const target = readinessTarget(kind);
-  if (!target) {
-    if (kind === "source") openAlarmEditor(alarm);
-    else { $("#tab-settings").click(); $("#btn-pick-backup").focus(); }
-    return;
-  }
-  cancelReadinessCheck();
-  const check = new AbortController();
-  check.kind = kind;
-  check.key = readinessKey(kind);
-  readinessCheck = check;
-  const outdated = () => readinessCheck !== check || readinessKey(kind) !== check.key || !!ringing;
-  const ensureCurrent = () => { if (outdated() || check.signal.aborted) throw new Error("Check cancelled"); };
-  renderAlarmReadiness();
-  let timer;
-  try {
-    const run = async () => {
-      if (target.kind === "station") {
-        const info = await invoke("probe_stream", { url: target.url, wantTitle: false });
-        ensureCurrent();
-        if (info.warning) throw new Error(info.warning);
-        if (IS_ANDROID) return { tone: "neutral", text: "Server answered. Audio on this phone has not been tested." };
-        const decoded = await canDecode(info.url, info.hls ? 15000 : 9000, { hls: !!info.hls, signal: check.signal });
-        ensureCurrent();
-        if (!decoded.ok) throw new Error(decoded.reason || "Audio did not decode.");
-        return { tone: "good", text: "Audio decoded in this check." };
-      }
-      if (IS_ANDROID) {
-        const folder = await folderCommand("folder_info", { path: target.path });
-        ensureCurrent();
-        if (!folder.count) throw new Error("No audio files found. Choose another folder.");
-        return { tone: "neutral", text: `${folder.count} audio file${folder.count === 1 ? "" : "s"} found. Playback has not been tested.` };
-      }
-      const pick = await invoke("preview_track", { path: target.path });
-      ensureCurrent();
-      const decoded = await canDecode(trackUrl(pick.path), 9000, { signal: check.signal, source: { kind: "folder", path: pick.path } });
-      ensureCurrent();
-      if (!decoded.ok) throw new Error(decoded.reason || "The sampled file did not decode.");
-      return { tone: "good", text: "One track decoded. Other files were not checked." };
-    };
-    const result = await Promise.race([run(), new Promise((_, reject) => {
-      timer = setTimeout(() => { reject(new Error("Check timed out. Try again.")); check.abort(); }, 25000);
-    })]);
-    if (!outdated()) readinessChecks[kind] = { ...result, key: check.key, checkedAt: performance.now() };
-  } catch (error) {
-    if (!outdated()) readinessChecks[kind] = { tone: "bad", text: String(error.message || error), key: check.key, checkedAt: performance.now() };
-  } finally {
-    clearTimeout(timer);
-    check.abort();
-    if (readinessCheck === check) readinessCheck = null;
-    renderAlarmReadiness();
-  }
 }
 
 async function refreshNextAlarm() {
@@ -3463,18 +3266,9 @@ async function refreshNextAlarm() {
     if (IS_ANDROID && next) next = { ...next, inSecs: Math.max(0, (next.atMs - Date.now()) / 1000) };
   } catch (error) { scheduleError = String(error); }
   if (request !== nextAlarmRequest) return;
-  readinessNext = next;
-  readinessWhen = null;
-  readinessScheduleError = scheduleError;
-  const box = $("#next-alarm");
   const bar = $("#status-next");
-  box.classList.toggle("idle", !next);
-  box.classList.toggle("scheduled", !!next);
   if (!next) {
-    box.textContent = scheduleError ? "Next alarm unavailable" : !state.alarms.length ? "No alarm set"
-      : state.alarms.some((alarm) => alarm.enabled) ? "No upcoming alarm" : "All alarms are off";
-    bar.textContent = "";
-    renderAlarmReadiness();
+    bar.textContent = scheduleError ? "Next alarm unavailable" : "";
     return;
   }
   let when = null;
@@ -3482,20 +3276,18 @@ async function refreshNextAlarm() {
     when = await invoke("local_time", { atMs: next.atMs });
   } catch { /* the countdown remains useful without a wall-time reading */ }
   if (request !== nextAlarmRequest) return;
-  readinessWhen = when;
   const label = next.label ? next.label + " · " : "";
   const text = `${next.snoozed ? "Snoozed" : "Next"} ${label}${when ? fmtClock(when, false) + " · " : ""}in ${fmtDuration(next.inSecs)}`;
-  box.textContent = text;
   bar.textContent = text;
-  renderAlarmReadiness();
 }
 
 // ----------------------------------------------------------- rendering ---
 
 let stationFavoritesOnly = false;
 let stationRecentOnly = false;
-let stationReordering = false;
 let stationMovePending = false;
+let stationDrag = null;
+let stationDragClickBlocked = false;
 let historyRecordedSource = null;
 const recentStationSaves = new Set();
 const stationFavoriteSaves = new Set();
@@ -3548,25 +3340,17 @@ function resetStationFilters() {
   $("#station-filter").focus();
 }
 
-function toggleStationReordering() {
-  if (stationMovePending) return;
-  stationReordering = !stationReordering;
-  if (stationReordering) {
-    stationFavoritesOnly = false;
-    stationRecentOnly = false;
-    $("#station-filter").value = "";
-    $("#station-sort").value = "saved";
-  }
-  renderStations();
-  $("#station-reorder").focus();
+function canReorderStations() {
+  return !stationRecentOnly && $("#station-sort").value !== "name" &&
+    visibleStations.length > 1 && !stationMovePending && !setupRestorePending;
 }
 
-async function moveStation(id, direction) {
-  if (stationMovePending || !stationReordering) return;
+async function moveStation(id, targetId, after = false) {
+  if (!canReorderStations() || id === targetId) return;
   stationMovePending = true;
   renderStations();
   try {
-    if (await saveStations({ move: { id, direction } })) {
+    if (await saveStations({ move: { id, targetId, after } })) {
       const index = state.stations.findIndex(station => station.id === id);
       say(`${state.stations[index]?.name || "Station"} moved to position ${index + 1}.`, "good");
     }
@@ -3574,10 +3358,112 @@ async function moveStation(id, direction) {
     stationMovePending = false;
     renderStations();
     const row = Array.from($("#station-list").children).find(item => item.dataset.id === id);
-    const preferred = row?.querySelector(direction < 0 ? ".station-up" : ".station-down");
-    const other = row?.querySelector(direction < 0 ? ".station-down" : ".station-up");
-    (preferred && !preferred.disabled ? preferred : other && !other.disabled ? other : row?.querySelector(".station-play"))?.focus();
+    if (!ringing && (document.activeElement === document.body ||
+        document.activeElement?.closest(".station-row")?.dataset.id === id)) {
+      row?.querySelector(".station-play")?.focus({ preventScroll: true });
+    }
   }
+}
+
+function clearStationDrag() {
+  const drag = stationDrag;
+  stationDrag = null;
+  if (!drag) return;
+  clearInterval(drag.timer);
+  const list = $("#station-list");
+  if (list.hasPointerCapture(drag.pointerId)) list.releasePointerCapture(drag.pointerId);
+  list.classList.remove("reordering");
+  for (const row of list.children) {
+    row.classList.remove("station-dragging", "station-drop-before", "station-drop-after");
+  }
+  if (drag.active) {
+    // A completed or cancelled drag must not turn the release into Listen.
+    stationDragClickBlocked = true;
+  }
+}
+
+function updateStationDrop() {
+  const drag = stationDrag;
+  if (!drag?.active) return;
+  const list = $("#station-list");
+  const bounds = list.getBoundingClientRect();
+  drag.targetId = null;
+  for (const row of list.children) row.classList.remove("station-drop-before", "station-drop-after");
+  if (drag.x < bounds.left || drag.x > bounds.right || drag.y < bounds.top || drag.y > bounds.bottom) return;
+  const rows = Array.from(list.children).filter(row => row.dataset.id);
+  const row = rows.find(row => drag.y < row.getBoundingClientRect().bottom) || rows.at(-1);
+  if (!row || row.dataset.id === drag.id) return;
+  const rect = row.getBoundingClientRect();
+  drag.targetId = row.dataset.id;
+  drag.after = drag.y >= rect.top + rect.height / 2;
+  row.classList.add(drag.after ? "station-drop-after" : "station-drop-before");
+}
+
+function wireStationDragging() {
+  const list = $("#station-list");
+  list.addEventListener("pointerdown", event => {
+    stationDragClickBlocked = false;
+    if (event.pointerType !== "mouse" || event.button !== 0 || !canReorderStations()) return;
+    if (event.target.closest(".star, .station-edit, .station-save-recent")) return;
+    const row = event.target.closest(".station-row");
+    if (!row) return;
+    clearStationDrag();
+    stationDrag = { id: row.dataset.id, pointerId: event.pointerId,
+      startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY, active: false };
+  });
+  list.addEventListener("pointermove", event => {
+    const drag = stationDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    if (!(event.buttons & 1) || !canReorderStations()) { clearStationDrag(); return; }
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    if (!drag.active) {
+      if (Math.hypot(drag.x - drag.startX, drag.y - drag.startY) < 6) return;
+      drag.active = true;
+      list.setPointerCapture(event.pointerId);
+      list.classList.add("reordering");
+      Array.from(list.children).find(row => row.dataset.id === drag.id)?.classList.add("station-dragging");
+      drag.timer = setInterval(() => {
+        const bounds = list.getBoundingClientRect();
+        if (drag.x < bounds.left || drag.x > bounds.right || drag.y < bounds.top || drag.y > bounds.bottom) return;
+        const edge = Math.min(40, bounds.height / 4);
+        const speed = drag.y < bounds.top + edge ? -Math.ceil((bounds.top + edge - drag.y) / 4)
+          : drag.y > bounds.bottom - edge ? Math.ceil((drag.y - bounds.bottom + edge) / 4) : 0;
+        if (speed) { list.scrollTop += speed; updateStationDrop(); }
+      }, 16);
+    }
+    event.preventDefault();
+    updateStationDrop();
+  });
+  list.addEventListener("pointerup", event => {
+    const drag = stationDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    updateStationDrop();
+    clearStationDrag();
+    if (drag.active && drag.targetId) {
+      event.preventDefault();
+      moveStation(drag.id, drag.targetId, drag.after);
+    }
+  });
+  list.addEventListener("pointercancel", clearStationDrag);
+  list.addEventListener("lostpointercapture", clearStationDrag);
+  list.addEventListener("dragstart", event => { if (stationDrag) event.preventDefault(); });
+  list.addEventListener("click", event => {
+    if (!stationDragClickBlocked || event.detail === 0) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && stationDrag) {
+      event.preventDefault();
+      clearStationDrag();
+    }
+  });
+  window.addEventListener("blur", clearStationDrag);
+  // A click released outside the list can end before pointer capture starts.
+  document.addEventListener("pointerup", () => { if (!stationDrag?.active) clearStationDrag(); });
 }
 
 function refreshStationIndicators() {
@@ -3592,6 +3478,7 @@ function refreshStationIndicators() {
 }
 
 function renderStations() {
+  clearStationDrag();
   const q = $("#station-filter").value.trim().toLowerCase();
   const list = $("#station-list");
   const scrollTop = list.scrollTop;
@@ -3599,8 +3486,6 @@ function renderStations() {
   const focusedRow = focused?.closest(".station-row");
   const focusedId = focusedRow?.dataset.id;
   const focusedAction = focused?.classList.contains("star") ? ".star"
-    : focused?.classList.contains("station-up") ? ".station-up"
-    : focused?.classList.contains("station-down") ? ".station-down"
     : focused?.classList.contains("station-save-recent") ? ".station-save-recent"
     : focused?.classList.contains("station-edit") ? ".station-edit" : ".station-play";
   const collection = stationRecentOnly ? recentStations().map(station =>
@@ -3614,14 +3499,7 @@ function renderStations() {
   }
   const filtered = !!q || stationFavoritesOnly;
   $("#station-sort").hidden = stationRecentOnly;
-  $("#station-sort").disabled = stationReordering;
-  $("#station-filter").disabled = stationReordering;
-  $("#station-reorder").hidden = !stationReordering && state.stations.length < 2;
-  $("#station-reorder").textContent = stationReordering ? "Done" : "Reorder";
-  $("#station-reorder").setAttribute("aria-pressed", String(stationReordering));
-  $("#station-reorder").disabled = stationMovePending;
-  $("#station-order-hint").hidden = !stationReordering;
-  for (const id of ["#station-all", "#station-favorites", "#station-recent"]) $(id).disabled = stationReordering;
+  list.setAttribute("aria-busy", String(stationMovePending));
   $("#station-list").setAttribute("aria-label", stationRecentOnly ? "Recently played stations" : "Saved stations");
   $("#station-all-count").textContent = state.stations.length;
   $("#station-favorites-count").textContent = state.stations.filter((station) => station.favorite).length;
@@ -3690,6 +3568,21 @@ function renderStations() {
       e.stopPropagation();
       playStation(station);
     });
+    if (canReorderStations()) {
+      li.classList.add("reorderable");
+      playButton.title = "Drag to reorder · Alt + Up/Down";
+      playButton.setAttribute("aria-describedby", "station-order-hint");
+      playButton.setAttribute("aria-keyshortcuts", "Alt+ArrowUp Alt+ArrowDown");
+      playButton.addEventListener("keydown", event => {
+        if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const direction = event.key === "ArrowUp" ? -1 : 1;
+        const index = visibleStations.findIndex(item => item.id === station.id);
+        const target = visibleStations[index + direction];
+        if (target) return moveStation(station.id, target.id, direction > 0);
+      });
+    }
     li.append(playButton);
 
     const star = document.createElement("button");
@@ -3724,20 +3617,7 @@ function renderStations() {
       openStationEditor(station);
     });
 
-    if (stationReordering) {
-      const index = state.stations.findIndex(saved => saved.id === station.id);
-      for (const [direction, label, symbol] of [[-1, "up", "↑"], [1, "down", "↓"]]) {
-        const move = document.createElement("button");
-        move.type = "button";
-        move.className = `gel station-move station-${label}`;
-        move.textContent = symbol;
-        move.title = `Move ${label}`;
-        move.setAttribute("aria-label", `Move ${station.name} ${label}`);
-        move.disabled = stationMovePending || index + direction < 0 || index + direction >= state.stations.length;
-        move.addEventListener("click", event => { event.stopPropagation(); moveStation(station.id, direction); });
-        li.append(move);
-      }
-    } else if (stationRecentOnly && !state.stations.some(saved => saved.id === station.id)) {
+    if (stationRecentOnly && !state.stations.some(saved => saved.id === station.id)) {
       const add = document.createElement("button");
       add.type = "button";
       add.className = "gel station-save-recent";
@@ -3786,6 +3666,7 @@ let alarmOccurrencesRequest = 0;
 let alarmOccurrencesError = false;
 let alarmSkipPending = null;
 let alarmSavePending = 0;
+let alarmDeletePending = null;
 let alarmStateRequest = 0;
 // After a successful write, an unavailable readback must not let a stale list
 // revive a deleted or disabled alarm in the next save.
@@ -3834,11 +3715,11 @@ async function refreshAlarmOccurrences() {
 }
 
 function alarmOccurrenceLabel(when) {
-  return when ? `${readinessDate(when)} at ${fmtClock(when, false)}` : "Scheduled time";
+  return when ? `${alarmDateLabel(when)} at ${fmtClock(when, false)}` : "Scheduled time";
 }
 
 async function changeAlarmSkip(id, skip, expectedAtMs) {
-  if (alarmSkipPending || alarmSavePending || !Number.isFinite(expectedAtMs)) return;
+  if (alarmSkipPending || alarmSavePending || alarmDeletePending || !Number.isFinite(expectedAtMs)) return;
   const restoreFocus = document.activeElement?.classList.contains("alarm-skip");
   alarmSkipPending = id;
   ++alarmOccurrencesRequest;
@@ -3868,13 +3749,13 @@ async function changeAlarmSkip(id, skip, expectedAtMs) {
 }
 
 function renderAlarms() {
-  renderAlarmReadiness();
   const list = $("#alarm-list");
   const scrollTop = list.scrollTop;
   const focused = document.activeElement;
   const focusedId = focused?.closest?.(".alarm-card")?.dataset.id;
   const focusedAction = focused?.classList.contains("alarm-skip") ? ".alarm-skip"
     : focused?.classList.contains("alarm-duplicate") ? ".alarm-duplicate"
+    : focused?.classList.contains("alarm-delete") ? ".alarm-delete"
     : focused?.classList.contains("sw") ? ".sw" : ".alarm-card-main";
   list.innerHTML = "";
   const sorted = [...state.alarms].sort((a, b) => a.hour - b.hour || a.minute - b.minute);
@@ -3907,7 +3788,7 @@ function renderAlarms() {
     edit.type = "button";
     edit.className = "alarm-card-main";
     edit.dataset.alarmId = alarm.id;
-    edit.disabled = !!alarmSkipPending;
+    edit.disabled = !!alarmSkipPending || !!alarmSavePending || !!alarmDeletePending || setupRestorePending;
     edit.setAttribute("aria-label", `Edit ${alarm.label || "alarm"} at ${fmtAlarmTime(alarm.hour, alarm.minute)}, ${daysLabel(alarm.days)}, ${sourceLabel(alarm.source)}, ${alarm.enabled ? "on" : "off"}`);
     edit.addEventListener("click", () => openAlarmEditor(alarm));
 
@@ -3935,12 +3816,12 @@ function renderAlarms() {
     const sw = document.createElement("button");
     sw.type = "button";
     sw.className = "sw";
-    sw.disabled = !!alarmSkipPending || !!alarmSavePending;
+    sw.disabled = !!alarmSkipPending || !!alarmSavePending || !!alarmDeletePending || setupRestorePending;
     sw.setAttribute("aria-pressed", String(!!alarm.enabled));
     sw.setAttribute("aria-label", `${alarm.label || "Alarm"} at ${fmtAlarmTime(alarm.hour, alarm.minute)}`);
     sw.addEventListener("click", async (e) => {
       e.stopPropagation();
-      if (alarmSkipPending || alarmSavePending) return;
+      if (alarmSkipPending || alarmSavePending || alarmDeletePending || setupRestorePending) return;
       const alarms = state.alarms.map((item) =>
         item.id === alarm.id ? { ...item, enabled: !item.enabled } : item);
       const saving = saveAlarms(alarms);
@@ -3958,11 +3839,43 @@ function renderAlarms() {
     duplicate.type = "button";
     duplicate.className = "gel alarm-duplicate";
     duplicate.textContent = "Duplicate";
-    duplicate.disabled = !!alarmSkipPending || !!alarmSavePending;
+    duplicate.disabled = !!alarmSkipPending || !!alarmSavePending || !!alarmDeletePending || setupRestorePending;
     duplicate.setAttribute("aria-label", `Duplicate ${alarm.label || "alarm"} at ${fmtAlarmTime(alarm.hour, alarm.minute)}`);
     duplicate.title = "Create an editable copy";
     duplicate.addEventListener("click", () => openAlarmEditor(alarm, { copy: true }));
-    tools.append(duplicate);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "gel danger alarm-delete";
+    remove.textContent = alarmDeletePending === alarm.id ? "Deleting…" : "Delete";
+    remove.disabled = !!alarmSkipPending || !!alarmSavePending || !!alarmDeletePending || alarmEditorSaving || setupRestorePending;
+    remove.setAttribute("aria-label", `Delete ${alarm.label || "alarm"} at ${fmtAlarmTime(alarm.hour, alarm.minute)}`);
+    remove.addEventListener("click", async () => {
+      if (alarmSkipPending || alarmSavePending || alarmDeletePending || alarmEditorSaving || setupRestorePending ||
+          !state.alarms.some(item => item.id === alarm.id)) return;
+      const index = sorted.findIndex(item => item.id === alarm.id);
+      const restoreFocus = document.activeElement === remove;
+      alarmDeletePending = alarm.id;
+      const saving = saveAlarms(state.alarms.filter(item => item.id !== alarm.id));
+      renderAlarms();
+      let saved;
+      try { saved = await saving; }
+      finally {
+        alarmDeletePending = null;
+        renderAlarms();
+      }
+      const active = document.activeElement;
+      const focusStillHere = active === document.body || active === remove ||
+        (active?.classList.contains("alarm-delete") && active.closest(".alarm-card")?.dataset.id === alarm.id);
+      if (restoreFocus && focusStillHere && !ringing && $("#pane-alarms").classList.contains("on") &&
+          !$("#pane-alarms").classList.contains("editing")) {
+        const focusId = saved ? sorted[index + 1]?.id || sorted[index - 1]?.id : alarm.id;
+        const focusRow = Array.from(list.children).find(item => item.dataset.id === focusId);
+        (focusRow?.querySelector(saved ? ".alarm-card-main" : ".alarm-delete") ||
+          list.querySelector(".alarm-card-main") || $("#btn-add-alarm")).focus({ preventScroll: true });
+      }
+      if (saved) say("alarm deleted", "good");
+    });
+    tools.append(duplicate, remove);
     if (alarm.enabled && alarm.days?.length) {
       const occurrence = alarmOccurrencesKey === alarmScheduleKey() ? alarmOccurrences.get(alarm.id) : null;
       const skipped = occurrence?.skippedAtMs != null;
@@ -3983,7 +3896,8 @@ function renderAlarms() {
       const retry = !occurrence && alarmOccurrencesError;
       action.textContent = alarmSkipPending === alarm.id ? "Saving…" : retry ? "Retry" : skipped ? "Undo skip" : "Skip next";
       const targetAtMs = skipped ? occurrence.skippedAtMs : occurrence?.nextAtMs;
-      action.disabled = !!alarmSkipPending || !!alarmSavePending || (!retry && targetAtMs == null);
+      action.disabled = !!alarmSkipPending || !!alarmSavePending || !!alarmDeletePending || setupRestorePending ||
+        (!retry && targetAtMs == null);
       action.setAttribute("aria-label", `${action.textContent} for ${alarm.label || "alarm"} at ${fmtAlarmTime(alarm.hour, alarm.minute)}`);
       action.title = skipped ? "Restore this scheduled ring" : "Skip one scheduled ring; snoozes keep their own timer";
       action.addEventListener("click", () => retry ? refreshAlarmOccurrences()
@@ -4047,7 +3961,6 @@ async function refreshFolderLabels() {
 }
 
 function renderSettings() {
-  renderAlarmReadiness();
   $$(".settings .row").forEach((row) => {
     const key = row.dataset.setting;
     const sw = row.querySelector(".sw");
@@ -4092,8 +4005,10 @@ function saveStations({ extraStation = null, move = null, patch = null, removeId
     }
     if (move) {
       const index = stations.findIndex(station => station.id === move.id);
-      const target = index + move.direction;
-      if (index < 0 || target < 0 || target >= stations.length || ![-1, 1].includes(move.direction)) return false;
+      const anchor = stations.findIndex(station => station.id === move.targetId);
+      if (index < 0 || anchor < 0 || index === anchor) return false;
+      const target = anchor - (index < anchor ? 1 : 0) + (move.after ? 1 : 0);
+      if (index === target) return false;
       const [station] = stations.splice(index, 1);
       stations.splice(target, 0, station);
     }
@@ -4141,7 +4056,6 @@ function saveStations({ extraStation = null, move = null, patch = null, removeId
         say(String(error), "bad");
       }
     }
-    renderAlarmReadiness();
     return true;
   };
 
@@ -4150,6 +4064,10 @@ function saveStations({ extraStation = null, move = null, patch = null, removeId
   return result;
 }
 async function saveAlarms(alarms = state.alarms) {
+  if (setupRestorePending) {
+    say("Wait for the setup restore to finish.", "bad");
+    return false;
+  }
   if (alarmSavePending || alarmSkipPending) {
     say("Wait for the current alarm change to finish.", "bad");
     return false;
@@ -4304,7 +4222,8 @@ async function settleSetupWrites() {
   if (!(await flushSettings())) throw new Error("Save your current settings successfully before continuing.");
   await stationSaveTail;
   if (IS_ANDROID) await androidAlarmQueue;
-  if (alarmSavePending || alarmEditorSaving || alarmSkipPending) throw new Error("Wait for your alarm change to finish, then try again.");
+  if (alarmSavePending || alarmEditorSaving || alarmSkipPending || alarmDeletePending)
+    throw new Error("Wait for your alarm change to finish, then try again.");
 }
 
 async function exportSetup() {
@@ -4372,7 +4291,6 @@ async function restoreSetup() {
     ++settingsRevision;
     ++alarmStateRequest;
     state = restored;
-    stationReordering = false;
     if (IS_ANDROID) await refreshAndroidAlarms();
     renderStations();
     refreshBrowseIndicators();
@@ -5049,7 +4967,6 @@ async function setSleep(minutes) {
 }
 
 function renderPowerStatus() {
-  renderAlarmReadiness();
   if (!powerStatus) return;
   $("#sleep-action option[value='sleep']").disabled = !powerStatus.sleepSupported;
   $("#sleep-action option[value='shutdown']").disabled = !powerStatus.shutdownSupported;
@@ -5089,7 +5006,6 @@ async function refreshPowerStatus() {
   } catch (error) {
     if (request !== powerStatusRequest) return;
     powerStatus = null;
-    renderAlarmReadiness();
     $("#power-status").textContent = "Could not check PC wake support: " + String(error);
     $("#power-status").classList.add("bad");
   }
@@ -5100,12 +5016,6 @@ setInterval(renderSleepTimer, 1000);
 // ---------------------------------------------------------------- wiring ---
 
 function wire() {
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) {
-      cancelReadinessCheck();
-      renderAlarmReadiness();
-    }
-  });
   if (IS_ANDROID) {
     const refreshNative = () => {
       refreshAndroidPlayback({ allowRestore: true });
@@ -5210,12 +5120,6 @@ function wire() {
     event.preventDefault();
     cancelSetupRestore();
   });
-  $("#readiness-source-check").addEventListener("click", () => checkAlarmReadiness("source"));
-  $("#readiness-backup-check").addEventListener("click", () => checkAlarmReadiness("backup"));
-  $("#readiness-settings").addEventListener("click", () => {
-    $("#tab-settings").click();
-    $("#btn-pick-backup").focus();
-  });
   const tabs = $$(".tab");
   const activateTab = (tab) => {
       $$(".tab").forEach((t) => {
@@ -5230,9 +5134,6 @@ function wire() {
           refreshDesktopAlarms().then(refreshNextAlarm).catch(error => say(String(error), "bad"));
           refreshPowerStatus();
         }
-      } else {
-        cancelReadinessCheck();
-        renderAlarmReadiness();
       }
       if (tab.dataset.pane === "browse") browseFirstLook();
       if (!IS_ANDROID && tab.dataset.pane === "settings") refreshPowerStatus();
@@ -5259,7 +5160,7 @@ function wire() {
   $("#station-all").addEventListener("click", () => { stationFavoritesOnly = false; stationRecentOnly = false; renderStations(); });
   $("#station-favorites").addEventListener("click", () => { stationFavoritesOnly = true; stationRecentOnly = false; renderStations(); });
   $("#station-recent").addEventListener("click", () => { stationFavoritesOnly = false; stationRecentOnly = true; renderStations(); });
-  $("#station-reorder").addEventListener("click", toggleStationReordering);
+  wireStationDragging();
   $("#station-reset").addEventListener("click", resetStationFilters);
   $("#btn-discover-stations").addEventListener("click", () => { $("#tab-browse").click(); $("#browse-query").focus(); });
   $("#btn-add-station").addEventListener("click", () => openStationEditor(null));
@@ -5516,7 +5417,8 @@ function wire() {
   });
 
   $("#al-delete").addEventListener("click", async () => {
-    if (!editingAlarm || alarmEditorSaving || alarmSavePending || alarmSkipPending) return;
+    if (!editingAlarm || alarmEditorSaving || alarmSavePending || alarmSkipPending ||
+        alarmDeletePending || setupRestorePending) return;
     const alarms = state.alarms.filter((a) => a.id !== editingAlarm.id);
     alarmEditorSaving = true;
     $("#alarm-editor").inert = true;
