@@ -124,9 +124,17 @@ require testing on each phone.
 Ringing alarms use a native screen with Dismiss and Snooze controls. It requests
 screen wake, appears over the lock screen, and keeps the display on while visible.
 Dismiss or snooze closes that screen without unlocking the phone. Either volume
-button dismisses while the alarm screen or Aerowave is in front. Shaking firmly
-several times snoozes a scheduled alarm; ordinary movement does not count, and a
-test alarm cannot be snoozed. Motion sensing runs only during a snoozable ring.
+button dismisses while the alarm screen or Aerowave is in front. A firm shake
+snoozes a scheduled alarm; a test alarm cannot be snoozed. Motion sensing runs
+only during a snoozable ring.
+
+Shake detection follows [LineageOS DeskClock's motion-strength filter](https://github.com/LineageOS/android_packages_apps_DeskClock/blob/f8d2258e6a673c1b576f009eec98781a5956ffdb/src/com/android/deskclock/alarms/AlarmService.java#L333-L381):
+it removes gravity from raw accelerometer readings and combines motion across
+all three axes over a short window. It preserves that implementation's window
+and sensitivity. The earlier direction-and-peak counter could miss firm shaking
+when motion never fell below its reset threshold. A sufficiently abrupt jolt
+can also activate the motion-strength detector; handling sensitivity must be
+checked on the phone.
 
 Android's full-screen notification permission does not cover every manufacturer's
 restrictions. On Xiaomi/POCO, open Aerowave's app info, then **Other permissions**,
@@ -143,6 +151,14 @@ User-Agent. If a source cannot play, the chosen backup folder is tried, then
 the phone's default alarm sound. This Android fallback is shown in Settings;
 desktop fallback behavior is unchanged. It does not establish compatibility
 with every station supported by the desktop relay.
+
+On Android 9 and later, the system tone uses Android's
+[Ringtone API](https://developer.android.com/reference/android/media/Ringtone).
+Some phones allow playing a default ringtone through that API while refusing
+direct file access from Media3. The tone requests the same media audio route,
+per-alarm volume and fade, and stops on snooze or dismissal. Android 8 retains
+the Media3 tone path because per-instance ringtone volume and looping require
+Android 9.
 
 Native playback handles the same-format chained Opus broadcast used by
 ChillSynth: a song change starts a new Ogg link, whose headers must not be sent

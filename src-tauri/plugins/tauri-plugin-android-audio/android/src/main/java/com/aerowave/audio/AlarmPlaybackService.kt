@@ -63,11 +63,13 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   private lateinit var audioManager: AudioManager
   private var audioFocusRequest: AudioFocusRequest? = null
   private var focusMultiplier = 1f
+  private var systemTone: SystemAlarmTone? = null
+  internal var systemToneFactory: (Context, Uri) -> SystemAlarmTone? = ::openSystemAlarmTone
+  private var toneWatchdogMisses = 0
   private lateinit var sensors: SensorManager
   private var shakeSensor: Sensor? = null
   private val shakeDetector = AlarmShakeDetector()
   private val gravity = FloatArray(3)
-  private var gravityInitialized = false
 
   private val fadeTick = object : Runnable {
     override fun run() {
@@ -75,8 +77,30 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       val fadeMs = current.alarm.fadeSecs * 1000L
       val multiplier = if (fadeMs <= 0) 1f else
         ((SystemClock.elapsedRealtime() - current.startedElapsedMs).toFloat() / fadeMs).coerceIn(0.02f, 1f)
-      player.volume = (desiredVolume * multiplier * focusMultiplier).coerceIn(0f, 1f)
+      val volume = (desiredVolume * multiplier * focusMultiplier).coerceIn(0f, 1f)
+      player.volume = volume
+      if (!setSystemToneVolume(volume)) {
+        failSystemTone("${sourceFailure ?: "The alarm source is unavailable"}; the system alarm sound could not play")
+        return
+      }
       if (multiplier < 1f) handler.postDelayed(this, FADE_TICK_MS)
+    }
+  }
+  private val toneWatchdog = object : Runnable {
+    override fun run() {
+      val output = systemTone ?: return
+      if (ring == null || sourceKind != "tone" || focusPaused || !focusGranted) return
+      val playing = runCatching { output.isPlaying() }.getOrDefault(false)
+      if (playing) {
+        toneWatchdogMisses = 0
+        handler.postDelayed(this, WATCHDOG_TICK_MS)
+      } else if (toneWatchdogMisses++ == 0) {
+        if (!startSystemTonePlayback()) {
+          failSystemTone("${sourceFailure ?: "The alarm source is unavailable"}; the system alarm sound could not play")
+        }
+      } else {
+        failSystemTone("${sourceFailure ?: "The alarm source is unavailable"}; the system alarm sound stopped playing")
+      }
     }
   }
   private val autoStop = Runnable {
@@ -167,6 +191,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       return
     }
     clearPending(current.occurrenceId)
+    stopSystemTone()
     stopShakeListening()
     ring = current
     sourceResolutionToken++
@@ -200,6 +225,12 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   }
 
   private fun resolvePrimary(current: RingingRecord) {
+    // Fresh claims default to "tone" before their configured source resolves.
+    // A persisted tone URI identifies a fallback already selected for this ring.
+    if (current.sourceKind == "tone" && !current.sourceUri.isNullOrBlank()) {
+      playTone(current.note ?: "The original alarm source is unavailable")
+      return
+    }
     if (!current.sourceUri.isNullOrBlank()) {
       playUri(
         current.sourceUri,
@@ -275,21 +306,102 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   }
 
   private fun playTone(reason: String) {
-    val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-      ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-    if (uri == null) {
-      activeFolder = null
-      currentUri = null
-      sourceKind = "tone"
-      sourceIsHls = false
-      updateRingingSource(
-        "tone", "System alarm", "$reason; no system alarm tone is configured",
-        uri = null, folder = null, isHls = false,
-      )
+    val uris = listOfNotNull(
+      RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM),
+      RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
+    ).distinct()
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+      val uri = uris.firstOrNull()
+      if (uri == null) {
+        failSystemTone("$reason; no system alarm tone is configured")
+        return
+      }
+      // Ringtone cannot control its own volume or looping before API 28.
+      // Keep Media3's per-alarm fade and repeat behavior on those versions.
+      playUri(uri.toString(), "System alarm", null, "tone", reason)
+      player.repeatMode = Player.REPEAT_MODE_ONE
       return
     }
-    playUri(uri.toString(), "System alarm", null, "tone", reason)
-    player.repeatMode = Player.REPEAT_MODE_ONE
+
+    stopSystemTone()
+    handler.removeCallbacks(progressWatchdog)
+    player.stop()
+    player.clearMediaItems()
+    activeFolder = null
+    currentUri = null
+    sourceKind = "tone"
+    sourceIsHls = false
+    sourceFailure = reason
+    for ((index, uri) in uris.withIndex()) {
+      val output = runCatching { systemToneFactory(this, uri) }
+        .onFailure { Log.e("AerowaveAlarmPlayback", "System tone could not open", it) }
+        .getOrNull() ?: continue
+      systemTone = output
+      currentUri = uri.toString()
+      toneWatchdogMisses = 0
+      if (setSystemToneVolume(currentOutputVolume()) &&
+        (!focusGranted || focusPaused || startSystemTonePlayback())) {
+        sourceFailure = listOfNotNull(
+          reason,
+          "Using the system notification sound".takeIf { index > 0 },
+        ).joinToString("; ")
+        val note = listOfNotNull(sourceFailure, focusError).joinToString("; ")
+        updateRingingSource("tone", "System alarm", note, uri.toString(), null, false)
+        handler.removeCallbacks(fadeTick)
+        handler.post(fadeTick)
+        return
+      }
+      stopSystemTone()
+    }
+    failSystemTone(
+      if (uris.isEmpty()) "$reason; no system alarm tone is configured"
+      else "$reason; the system alarm sound could not play",
+    )
+  }
+
+  private fun currentOutputVolume(): Float {
+    val current = ring ?: return 0f
+    val fadeMs = current.alarm.fadeSecs * 1000L
+    val multiplier = if (fadeMs <= 0) 1f else
+      ((SystemClock.elapsedRealtime() - current.startedElapsedMs).toFloat() / fadeMs)
+        .coerceIn(0.02f, 1f)
+    return (desiredVolume * multiplier * focusMultiplier).coerceIn(0f, 1f)
+  }
+
+  private fun setSystemToneVolume(volume: Float): Boolean {
+    val output = systemTone ?: return true
+    return runCatching { output.setVolume(volume) }
+      .onFailure { Log.e("AerowaveAlarmPlayback", "System tone volume failed", it) }
+      .isSuccess
+  }
+
+  private fun startSystemTonePlayback(): Boolean {
+    val output = systemTone ?: return false
+    if (!setSystemToneVolume(currentOutputVolume())) return false
+    val started = runCatching { if (!output.isPlaying()) output.play() }
+      .onFailure { Log.e("AerowaveAlarmPlayback", "System tone playback failed", it) }
+      .isSuccess
+    if (started) {
+      handler.removeCallbacks(toneWatchdog)
+      handler.postDelayed(toneWatchdog, WATCHDOG_TICK_MS)
+    }
+    return started
+  }
+
+  private fun failSystemTone(reason: String) {
+    stopSystemTone()
+    currentUri = null
+    activeFolder = null
+    sourceKind = "tone"
+    sourceIsHls = false
+    updateRingingSource("tone", "System alarm", reason, null, null, false)
+  }
+
+  private fun stopSystemTone() {
+    handler.removeCallbacks(toneWatchdog)
+    systemTone?.let { runCatching { it.stop() } }
+    systemTone = null
+    toneWatchdogMisses = 0
   }
 
   private fun playUri(
@@ -300,6 +412,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     note: String?,
     isHls: Boolean = uri.substringBefore('?').endsWith(".m3u8", true),
   ) {
+    stopSystemTone()
     activeFolder = folder
     currentUri = uri
     sourceKind = kind
@@ -358,6 +471,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   }
 
   override fun onPlaybackStateChanged(playbackState: Int) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && sourceKind == "tone") return
     if (playbackState == Player.STATE_READY && rejectSourceWithoutAudio()) return
     if (playbackState != Player.STATE_ENDED) return
     val folder = activeFolder
@@ -369,6 +483,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   }
 
   override fun onPlayerError(error: PlaybackException) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && sourceKind == "tone") return
     Log.e("AerowaveAlarmPlayback", "Playback failed for $sourceKind source", error)
     val reason = when (sourceKind) {
       "station" -> "The selected station could not play"
@@ -385,6 +500,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   }
 
   private fun rejectSourceWithoutAudio(): Boolean {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && sourceKind == "tone") return false
     if (ring == null || player.playbackState != Player.STATE_READY) return false
     val tracks = player.currentTracks
     if (tracks.isEmpty) return false
@@ -419,27 +535,16 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     val current = ring ?: return
     if (current.trigger == "test" || shakeSensor == null ||
       event.sensor.type != shakeSensor?.type) return
-    val x: Float
-    val y: Float
-    val z: Float
-    if (event.sensor.type == Sensor.TYPE_LINEAR_ACCELERATION) {
-      x = event.values[0]
-      y = event.values[1]
-      z = event.values[2]
-    } else {
-      if (!gravityInitialized) {
-        for (index in 0..2) gravity[index] = event.values[index]
-        gravityInitialized = true
-        return
-      }
-      for (index in 0..2) {
-        gravity[index] = 0.8f * gravity[index] + 0.2f * event.values[index]
-      }
-      x = event.values[0] - gravity[0]
-      y = event.values[1] - gravity[1]
-      z = event.values[2] - gravity[2]
+    // DeskClock's raw accelerometer filter retains abrupt motion while
+    // removing gravity, regardless of the phone's orientation.
+    for (index in 0..2) {
+      gravity[index] = 0.8f * gravity[index] + 0.2f * event.values[index]
     }
-    if (shakeDetector.sample(x, y, z, event.timestamp / 1_000_000L) &&
+    if (shakeDetector.sample(
+        event.values[0] - gravity[0],
+        event.values[1] - gravity[1],
+        event.values[2] - gravity[2],
+      ) &&
       AlarmStateStore.snapshot(this).ringing?.occurrenceId == current.occurrenceId) {
       stopShakeListening()
       finishRing(current.occurrenceId, snooze = true, auto = false)
@@ -449,10 +554,8 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
   private fun startShakeListening() {
-    val sensor = sensors.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
-      ?: sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-      ?: return
-    gravityInitialized = false
+    val sensor = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return
+    gravity.fill(0f)
     shakeDetector.reset()
     if (sensors.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME, handler)) {
       shakeSensor = sensor
@@ -462,7 +565,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   private fun stopShakeListening() {
     if (shakeSensor != null) sensors.unregisterListener(this)
     shakeSensor = null
-    gravityInitialized = false
+    gravity.fill(0f)
     shakeDetector.reset()
   }
 
@@ -477,6 +580,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     handler.removeCallbacks(fadeTick)
     handler.removeCallbacks(autoStop)
     sourceResolutionToken++
+    stopSystemTone()
     player.stop()
     player.clearMediaItems()
     abandonAlarmFocus()
@@ -545,14 +649,26 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
 
   private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
     handler.post {
+      if (ring == null) return@post
       when (change) {
         AudioManager.AUDIOFOCUS_GAIN -> {
           focusPaused = false
           focusGranted = true
           focusError = null
           focusMultiplier = 1f
-          sourceProgress.resumeFromFocus(player.currentPosition)
-          if (ring != null && currentUri != null && !player.isPlaying) player.play()
+          if (systemTone != null && sourceKind == "tone") {
+            toneWatchdogMisses = 0
+            if (!startSystemTonePlayback()) {
+              failSystemTone("${sourceFailure ?: "The alarm source is unavailable"}; the system alarm sound could not play")
+              return@post
+            }
+          } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && sourceKind == "tone") {
+            // A failed Ringtone must keep its error instead of reviving the old Media3 URI.
+            return@post
+          } else {
+            sourceProgress.resumeFromFocus(player.currentPosition)
+            if (ring != null && currentUri != null && !player.isPlaying) player.play()
+          }
           ring?.let {
             updateRingingSource(
               sourceKind, it.title, sourceFailure, currentUri, activeFolder, sourceIsHls,
@@ -569,7 +685,12 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
         AudioManager.AUDIOFOCUS_LOSS,
         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
           focusPaused = true
-          sourceProgress.pauseForFocus()
+          if (systemTone != null && sourceKind == "tone") {
+            handler.removeCallbacks(toneWatchdog)
+            runCatching { systemTone?.stop() }
+          } else {
+            sourceProgress.pauseForFocus()
+          }
           if (change == AudioManager.AUDIOFOCUS_LOSS) focusGranted = false
           player.pause()
         }
@@ -639,6 +760,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
 
   override fun onDestroy() {
     handler.removeCallbacksAndMessages(null)
+    stopSystemTone()
     stopShakeListening()
     sourceResolutionToken++
     player.removeListener(this)

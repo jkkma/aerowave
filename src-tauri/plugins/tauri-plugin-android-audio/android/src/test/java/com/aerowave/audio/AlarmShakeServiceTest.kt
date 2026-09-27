@@ -27,6 +27,7 @@ class AlarmShakeServiceTest {
     event.sensor = sensor
     event.timestamp = elapsedMs * 1_000_000L
     event.values[0] = x
+    event.values[2] = 9.81f
     sensors.sendSensorEventToListeners(event, sensor)
   }
 
@@ -49,7 +50,7 @@ class AlarmShakeServiceTest {
     AlarmStateStore.update(context) { PersistedAlarmState(ringing = active) }
     val sensorManager = context.getSystemService(SensorManager::class.java)
     val shadowSensors = Shadows.shadowOf(sensorManager)
-    shadowSensors.addSensor(ShadowSensor.newInstance(Sensor.TYPE_LINEAR_ACCELERATION))
+    shadowSensors.addSensor(ShadowSensor.newInstance(Sensor.TYPE_ACCELEROMETER))
 
     val controller = Robolectric.buildService(AlarmPlaybackService::class.java).create()
     val service = controller.get()
@@ -74,7 +75,7 @@ class AlarmShakeServiceTest {
     val context = RuntimeEnvironment.getApplication()
     val sensorManager = context.getSystemService(SensorManager::class.java)
     val shadowSensors = Shadows.shadowOf(sensorManager)
-    val sensor = ShadowSensor.newInstance(Sensor.TYPE_LINEAR_ACCELERATION)
+    val sensor = ShadowSensor.newInstance(Sensor.TYPE_ACCELEROMETER)
     shadowSensors.addSensor(sensor)
     val testRing = ring("test")
     AlarmStateStore.update(context) { PersistedAlarmState(ringing = testRing) }
@@ -89,7 +90,7 @@ class AlarmShakeServiceTest {
     for (index in 0..3) {
       val at = 1_000L + index * 280
       sendAcceleration(shadowSensors, sensor, 0f, at)
-      sendAcceleration(shadowSensors, sensor, if (index % 2 == 0) 16f else -16f, at + 30)
+      sendAcceleration(shadowSensors, sensor, if (index % 2 == 0) 35f else -35f, at + 30)
     }
     assertEquals(testRing.occurrenceId, AlarmStateStore.snapshot(context).ringing?.occurrenceId)
     assertTrue(AlarmStateStore.snapshot(context).snoozes.isEmpty())
@@ -115,7 +116,7 @@ class AlarmShakeServiceTest {
     AlarmStateStore.update(context) { PersistedAlarmState(ringing = active) }
     val sensorManager = context.getSystemService(SensorManager::class.java)
     val shadowSensors = Shadows.shadowOf(sensorManager)
-    val sensor = ShadowSensor.newInstance(Sensor.TYPE_LINEAR_ACCELERATION)
+    val sensor = ShadowSensor.newInstance(Sensor.TYPE_ACCELEROMETER)
     shadowSensors.addSensor(sensor)
     val controller = Robolectric.buildService(AlarmPlaybackService::class.java).create()
     val service = controller.get()
@@ -125,18 +126,18 @@ class AlarmShakeServiceTest {
     )
     assertTrue(shadowSensors.hasListener(service))
 
-    for (index in 0..40) sendAcceleration(shadowSensors, sensor, 5f, index * 50L)
-    sendAcceleration(shadowSensors, sensor, 0f, 2_050L)
-    sendAcceleration(shadowSensors, sensor, 18f, 2_100L)
-    sendAcceleration(shadowSensors, sensor, 0f, 2_150L)
+    for (index in 0..39) sendAcceleration(shadowSensors, sensor, 5f, index * 20L)
+    sendAcceleration(shadowSensors, sensor, 0f, 800L)
+    sendAcceleration(shadowSensors, sensor, 18f, 820L)
+    sendAcceleration(shadowSensors, sensor, 0f, 840L)
     assertEquals(active.occurrenceId, AlarmStateStore.snapshot(context).ringing?.occurrenceId)
     assertTrue(AlarmStateStore.snapshot(context).snoozes.isEmpty())
 
-    for (index in 0..3) {
-      val at = 3_200L + index * 280
-      sendAcceleration(shadowSensors, sensor, 0f, at)
-      sendAcceleration(shadowSensors, sensor, if (index % 2 == 0) 16f else -16f, at + 30)
-      if (index < 3) {
+    for (index in 0..5) {
+      sendAcceleration(
+        shadowSensors, sensor, if (index % 2 == 0) 35f else -35f, 860L + index * 20,
+      )
+      if (index < 5) {
         assertEquals(active.occurrenceId, AlarmStateStore.snapshot(context).ringing?.occurrenceId)
       }
     }

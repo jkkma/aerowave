@@ -1,6 +1,7 @@
 package com.aerowave.audio
 
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -31,38 +32,64 @@ class AlarmInputTest {
     assertFalse(gate.beginAction("first"))
   }
 
-  @Test fun deliberateAlternatingShakesTriggerOnce() {
+  @Test fun lineageCalibrationUsesSixSamplesAndChecksOnTheSeventh() {
     val detector = AlarmShakeDetector()
-    var time = 1_000L
-    for (index in 0..3) {
-      val direction = if (index % 2 == 0) 16f else -16f
-      assertFalse(detector.sample(0f, 0f, 0f, time))
-      val triggered = detector.sample(direction, 0f, 0f, time + 30)
-      assertTrue(triggered == (index == 3))
-      assertFalse(detector.sample(direction, 0f, 0f, time + 40))
-      time += 280
+    repeat(6) { assertFalse(detector.sample(13.3f, 0f, 0f)) }
+    assertFalse(detector.sample(0f, 0f, 0f))
+    repeat(6) { assertFalse(detector.sample(13.4f, 0f, 0f)) }
+    assertTrue(detector.sample(0f, 0f, 0f))
+    assertFalse(detector.sample(0f, 0f, 0f))
+  }
+
+  @Test fun mixedAxisContinuousBurstTriggersWithoutQuietValleys() {
+    // Synthetic gravity-free motion that rotates across axes without settling.
+    val motion = arrayOf(
+      floatArrayOf(2f, 1f, 0f),
+      floatArrayOf(3f, -2f, 1f),
+      floatArrayOf(4f, -1f, 0f),
+      floatArrayOf(-2f, 3f, -1f),
+      floatArrayOf(1f, 2f, 2f),
+      floatArrayOf(0f, -3f, 1f),
+      floatArrayOf(22f, 2f, 0f),
+      floatArrayOf(20f, 10f, -3f),
+      floatArrayOf(3f, 25f, -2f),
+      floatArrayOf(-10f, 25f, 5f),
+      floatArrayOf(-25f, 8f, 4f),
+      floatArrayOf(-20f, -10f, 1f),
+      floatArrayOf(-2f, -26f, 0f),
+      floatArrayOf(8f, -20f, 1f),
+      floatArrayOf(18f, -10f, 2f),
+    )
+    val detector = AlarmShakeDetector()
+    val triggerIndexes = motion.indices.filter { index ->
+      val vector = motion[index]
+      detector.sample(vector[0], vector[1], vector[2])
+    }
+    assertEquals(listOf(13), triggerIndexes)
+  }
+
+  @Test fun strongMotionOnAnyAxisDoesNotNeedGeometricReversal() {
+    val detector = AlarmShakeDetector()
+    repeat(6) { assertFalse(detector.sample(20f, 0f, 0f)) }
+    assertTrue(detector.sample(0f, 0f, 0f))
+    repeat(6) { assertFalse(detector.sample(0f, -20f, 0f)) }
+    assertTrue(detector.sample(0f, 0f, 0f))
+  }
+
+  @Test fun ordinaryMotionAndOneJoltDoNotSnooze() {
+    val detector = AlarmShakeDetector()
+    repeat(28) { index ->
+      val x = if (index == 14) 40f else 4f
+      assertFalse(detector.sample(x, 2f, 0f))
     }
   }
 
-  @Test fun normalMovementSingleJoltAndOneDirectionDoNotSnooze() {
+  @Test fun resetDropsAnIncompleteWindowBetweenRings() {
     val detector = AlarmShakeDetector()
-    for (index in 0..40) {
-      assertFalse(detector.sample(4f, 3f, 0f, index * 50L))
-    }
-    assertFalse(detector.sample(18f, 0f, 0f, 2_100))
-    assertFalse(detector.sample(0f, 0f, 0f, 2_140))
-    for (index in 1..6) {
-      assertFalse(detector.sample(18f, 0f, 0f, 2_100L + index * 260))
-      assertFalse(detector.sample(0f, 0f, 0f, 2_140L + index * 260))
-    }
-  }
-
-  @Test fun slowShakesCannotAccumulateAcrossMinutes() {
-    val detector = AlarmShakeDetector()
-    for (index in 0..7) {
-      val time = index * 1_000L
-      assertFalse(detector.sample(0f, 0f, 0f, time))
-      assertFalse(detector.sample(if (index % 2 == 0) 17f else -17f, 0f, 0f, time + 30))
-    }
+    repeat(5) { assertFalse(detector.sample(20f, 0f, 0f)) }
+    detector.reset()
+    assertFalse(detector.sample(20f, 0f, 0f))
+    repeat(5) { assertFalse(detector.sample(0f, 0f, 0f)) }
+    assertFalse(detector.sample(0f, 0f, 0f))
   }
 }
