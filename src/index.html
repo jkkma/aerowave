@@ -472,16 +472,48 @@
           </div>
         </section>
         <section class="settings-section android-only android-alarm-settings" aria-labelledby="settings-android">
-          <h3 id="settings-android">Android alarms</h3>
-          <p id="android-alarm-status" class="editor-note" role="status">Checking permissions…</p>
-          <div class="editor-actions">
-            <button class="gel" data-android-setting="exact">Alarms &amp; reminders</button>
-            <button class="gel" data-android-setting="notifications">Notifications</button>
+          <div class="settings-section-heading">
+            <h3 id="settings-android">Permissions</h3>
+            <button class="gel" id="android-permissions-refresh" type="button">Check again</button>
           </div>
-          <p id="android-fullscreen-status" class="editor-note"></p>
-          <button class="gel" data-android-setting="fullscreen">Lock-screen alarms</button>
-          <p id="android-battery-status" class="editor-note"></p>
-          <button class="gel" data-android-setting="battery">Battery settings</button>
+          <p id="android-alarm-status" class="editor-note" role="status">Checking Android settings…</p>
+          <ul class="android-permission-list">
+            <li class="android-permission-row">
+              <div class="android-permission-heading"><strong>Alarms &amp; reminders</strong><span id="android-exact-status" class="android-permission-state">Checking…</span></div>
+              <p id="android-exact-help">Lets Aerowave schedule alarms at the right time.</p>
+              <button class="gel" type="button" data-android-setting="exact">Open alarm access</button>
+            </li>
+            <li class="android-permission-row">
+              <div class="android-permission-heading"><strong>Notifications</strong><span id="android-notifications-status" class="android-permission-state">Checking…</span></div>
+              <p id="android-notifications-help">Shows the ringing alarm and its Dismiss and Snooze controls.</p>
+              <button class="gel" type="button" data-android-setting="notifications">Open notifications</button>
+            </li>
+            <li class="android-permission-row">
+              <div class="android-permission-heading"><strong>Alarm alerts</strong><span id="android-channel-status" class="android-permission-state">Checking…</span></div>
+              <p id="android-channel-help">The Alarms notification channel needs high priority to appear over other apps.</p>
+              <button class="gel" type="button" data-android-setting="notifications">Open notification settings</button>
+            </li>
+            <li class="android-permission-row">
+              <div class="android-permission-heading"><strong>Full-screen alarm access</strong><span id="android-fullscreen-status" class="android-permission-state">Checking…</span></div>
+              <p id="android-fullscreen-help">Allows a ringing alarm to open over the lock screen when Android permits it.</p>
+              <button class="gel" id="android-fullscreen-action" type="button" data-android-setting="fullscreen">Open full-screen access</button>
+            </li>
+            <li class="android-permission-row">
+              <div class="android-permission-heading"><strong>Battery use</strong><span id="android-battery-status" class="android-permission-state">Checking…</span></div>
+              <p id="android-battery-help">Battery restrictions can interfere with background alarms and audio.</p>
+              <button class="gel" type="button" data-android-setting="battery">Open battery settings</button>
+            </li>
+            <li class="android-permission-row">
+              <div class="android-permission-heading"><strong>Phone-specific restrictions</strong><span class="android-permission-state manual">Check manually</span></div>
+              <p id="android-phone-help">Your phone may have extra lock-screen or background-start controls that Aerowave cannot read.</p>
+              <button class="gel" type="button" data-android-setting="appInfo">Open app info</button>
+            </li>
+          </ul>
+          <details class="settings-details">
+            <summary>Screen wake and quick controls</summary>
+            <p>A ringing alarm shows Dismiss and Snooze over the lock screen. Shake firmly several times to snooze, or press either volume button while the alarm screen is open to dismiss. Test alarms can only be dismissed.</p>
+            <p>Full-screen access alone does not guarantee that every phone will wake its display. Schedule an alarm with the screen off to check it.</p>
+          </details>
           <details class="settings-details">
             <summary>Alarms after a restart</summary>
             <p>Keep the phone powered on. After restarting, music folders may need the first unlock; the system alarm sound is the fallback. Force-stopping Aerowave prevents alarms until you open it again.</p>

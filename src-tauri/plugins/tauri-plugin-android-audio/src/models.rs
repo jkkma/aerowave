@@ -245,8 +245,14 @@ pub struct TrackPick {
 pub struct AlarmPermissions {
     pub exact: String,
     pub notifications: String,
+    #[serde(default)]
+    pub alarm_channel: Option<String>,
     pub full_screen: String,
     pub battery_optimized: bool,
+    #[serde(default)]
+    pub manufacturer: String,
+    #[serde(default)]
+    pub brand: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

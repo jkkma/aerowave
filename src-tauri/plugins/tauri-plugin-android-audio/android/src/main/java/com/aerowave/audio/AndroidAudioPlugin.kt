@@ -3,6 +3,7 @@ package com.aerowave.audio
 import android.Manifest
 import android.app.Activity
 import android.app.NotificationManager
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -510,12 +511,13 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
   fun openAlarmSettings(invoke: Invoke) {
     try {
       val setting = invoke.parseArgs(AlarmSettingsArgs::class.java).setting
+      val appInfo = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.parse("package:${activity.packageName}"))
       val intent = when (setting) {
         "exact" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
           Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
             Uri.parse("package:${activity.packageName}"))
-        } else Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-          Uri.parse("package:${activity.packageName}"))
+        } else appInfo
         "notifications" -> Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
           .putExtra(Settings.EXTRA_APP_PACKAGE, activity.packageName)
         "battery" -> Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
@@ -523,10 +525,16 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
         "fullscreen" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
           Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
             Uri.parse("package:${activity.packageName}"))
-        } else Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${activity.packageName}"))
+        } else appInfo
+        "appInfo" -> appInfo
         else -> throw IllegalArgumentException("Unknown alarm setting")
       }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-      activity.startActivity(intent)
+      try {
+        activity.startActivity(intent)
+      } catch (error: ActivityNotFoundException) {
+        if (setting == "appInfo") throw error
+        activity.startActivity(appInfo.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+      }
       invoke.resolve(AlarmStateStore.snapshot(activity).toAlarmJsObject(activity))
     } catch (error: Exception) {
       invoke.reject(error.message ?: "Unable to open Android settings")
@@ -682,11 +690,19 @@ private fun alarmPermissions(context: Context): JSObject = JSObject().apply {
     else -> "denied"
   })
   put("notifications", when {
-    !AlarmPlaybackService.alarmChannelEnabled(context) -> "denied"
+    !context.getSystemService(NotificationManager::class.java).areNotificationsEnabled() -> "denied"
     Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU -> "notRequired"
     ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
       PackageManager.PERMISSION_GRANTED -> "granted"
     else -> "denied"
+  })
+  val channelImportance = AlarmPlaybackService.alarmChannelImportance(context)
+  put("alarmChannel", when {
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.O -> "notRequired"
+    channelImportance == null -> "notCreated"
+    channelImportance == NotificationManager.IMPORTANCE_NONE -> "blocked"
+    channelImportance < NotificationManager.IMPORTANCE_HIGH -> "quiet"
+    else -> "high"
   })
   put("fullScreen", when {
     Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> "notRequired"
@@ -695,4 +711,6 @@ private fun alarmPermissions(context: Context): JSObject = JSObject().apply {
   })
   val power = context.getSystemService(PowerManager::class.java)
   put("batteryOptimized", !power.isIgnoringBatteryOptimizations(context.packageName))
+  put("manufacturer", Build.MANUFACTURER)
+  put("brand", Build.BRAND)
 }

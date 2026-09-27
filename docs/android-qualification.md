@@ -1,7 +1,7 @@
-# Android qualification record — 2026-09-19
+# Android qualification record
 
-This record summarizes the Android checks retained on 2026-09-19. It is an
-evidence snapshot, not final release qualification. The raw device artifacts
+The initial checks below were retained on 2026-09-19; later checks are dated
+separately. This is an evidence record, not final release qualification. Raw artifacts
 are retained separately; this public record omits device identifiers, local
 paths and personal information.
 
@@ -253,6 +253,45 @@ actual screen state and filtered renderer evidence.
 The one-minute monitor validation completed with six active-renderer samples
 and no detected issues. Unknown MediaSession positions were correctly treated
 as unavailable telemetry.
+
+## Screen wake and alarm controls — 2026-09-27
+
+The POCO X3 Pro running Android 13 had standard alarm and notification access,
+but Xiaomi's **Show on Lock screen** and **Open new windows while running in the
+background** permissions were denied. Both were enabled through app settings.
+A scheduled alarm then changed Android's reported display state from asleep to
+awake and showed its controls.
+
+A signed ARM64 development build based on 0.13.5 added a native alarm screen.
+A scheduled alarm woke the display and made that screen the resumed activity;
+its Dismiss and Snooze buttons were visible without opening the WebView.
+An ADB-injected Volume Up press dismissed this occurrence. Volume Down also
+dismissed a foreground test alarm in the main activity. Neither changed the
+phone's media volume. Tapping the native Dismiss button stopped another
+scheduled occurrence and closed its screen.
+
+Device sensor diagnostics confirmed that the alarm service registered a linear
+acceleration listener during scheduled ringing and removed it after dismissal.
+Physical shake-to-snooze testing was deferred because the tester was unavailable.
+The automated service test delivers sensor events through the registered
+listener: ordinary movement and a single jolt leave ringing active, while
+repeated alternating peaks create one durable snooze and remove the listener.
+Test alarms do not register this gesture.
+
+The installed development build also passed the Settings > Permissions bridge
+check: exact alarms allowed, notifications on, alarm alerts high priority,
+battery exemption reported, and Xiaomi/POCO-specific manual instructions shown.
+The package hash read back from the phone matched the retained signed APK:
+`C0561657ECF63F8195E1260009C9A5C4FE7D46D8995F313984163A2CCD56798D`.
+The temporary alarm was removed, and the final exported stations, alarms and
+preferences matched the original backup exactly.
+
+Validation passed 350 frontend tests and 211 Rust tests, including the production
+permission-response bridge regression. The full Android JVM suite passed 108
+tests, including the motion-to-snooze service regression. Packaged startup bridge
+and signing checks also passed.
+This session did not qualify a credential-protected lock screen, a cold process
+start, physical volume-button presses, audibility, or overnight delivery.
 
 ## Qualification still open
 

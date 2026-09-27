@@ -5,7 +5,10 @@ const { createHarness, deferred, flush } = require("./frontend-harness.cjs");
 const navigator = { userAgent: "Mozilla/5.0 (Linux; Android 13; Mobile)" };
 const snapshot = (revision, ringing = null, extra = {}) => ({
   initialized: true, revision, alarms: [], next: null, ringing,
-  permissions: { exact: "granted", notifications: "granted", fullScreen: "granted", batteryOptimized: true },
+  permissions: {
+    exact: "granted", notifications: "granted", alarmChannel: "high", fullScreen: "granted",
+    batteryOptimized: true, manufacturer: "Google", brand: "Pixel",
+  },
   error: null, ...extra,
 });
 const ring = (occurrenceId = "one") => ({
@@ -122,6 +125,60 @@ test("revoked exact permission has visible guidance and no invented next alarm",
   assert.match(h.el("#android-alarm-status").textContent, /Alarms & reminders/);
   assert.match(h.el("#android-alarm-status").textContent, /notifications/);
   assert.equal(h.el("#android-alarm-status").classList.contains("warn"), true);
+});
+
+test("alarm channel priority is checked separately from app notifications", () => {
+  for (const [channel, label] of [["blocked", "Off"], ["quiet", "Low priority"]]) {
+    const h = createHarness({ navigator });
+    h.context.fixture = snapshot(3, null, { permissions: { ...snapshot(3).permissions, alarmChannel: channel } });
+    h.evaluate("applyAndroidAlarmState(fixture)");
+    assert.equal(h.el("#android-notifications-status").textContent, "On");
+    assert.equal(h.el("#android-channel-status").textContent, label);
+    assert.equal(h.el("#android-channel-status").classList.contains("attention"), true);
+    assert.match(h.el("#android-alarm-status").textContent, /Needs attention: Alarm alerts/);
+    assert.match(h.el("#android-alarm-hint").textContent, /Review Android permissions/);
+  }
+});
+
+test("a new alarm channel is pending rather than reported as blocked", () => {
+  const h = createHarness({ navigator });
+  h.context.fixture = snapshot(3, null, { permissions: { ...snapshot(3).permissions, alarmChannel: "notCreated" } });
+  h.evaluate("applyAndroidAlarmState(fixture)");
+  assert.equal(h.el("#android-channel-status").textContent, "Not created yet");
+  assert.equal(h.el("#android-channel-status").classList.contains("attention"), false);
+  assert.match(h.el("#android-alarm-status").textContent, /Run a test alarm/);
+});
+
+test("Xiaomi restrictions stay manual when Android has no separate full-screen switch", () => {
+  const h = createHarness({ navigator });
+  h.context.fixture = snapshot(3, null, { permissions: {
+    ...snapshot(3).permissions, manufacturer: "Xiaomi", brand: "POCO", fullScreen: "notRequired",
+  } });
+  h.evaluate("applyAndroidAlarmState(fixture)");
+  assert.equal(h.el("#android-fullscreen-status").textContent, "No extra switch");
+  assert.equal(h.el("#android-fullscreen-action").textContent, "Open app info");
+  assert.match(h.el("#android-phone-help").textContent, /Other permissions/);
+  assert.match(h.el("#android-phone-help").textContent, /Show on Lock screen/);
+  assert.match(h.el("#android-phone-help").textContent, /Open new windows while running in the background/);
+  assert.match(h.el("#android-phone-help").textContent, /cannot read/);
+  assert.match(h.el("#android-fullscreen-help").textContent, /Test with the screen off/);
+});
+
+test("Check again refreshes the native permission snapshot", async () => {
+  let permission = "denied";
+  const h = createHarness({ navigator, invoke: command => {
+    if (command.endsWith("|get_alarm_state")) return snapshot(3, null, {
+      permissions: { ...snapshot(3).permissions, exact: permission },
+    });
+  } });
+  h.evaluate("wire()");
+  await h.el("#android-permissions-refresh").dispatch("click");
+  assert.equal(h.el("#android-exact-status").textContent, "Not allowed");
+  permission = "granted";
+  await h.el("#android-permissions-refresh").dispatch("click");
+  assert.equal(h.el("#android-exact-status").textContent, "Allowed");
+  assert.equal(h.el("#android-permissions-refresh").disabled, false);
+  assert.equal(h.calls.filter(call => call.command.endsWith("|get_alarm_state")).length, 2);
 });
 
 for (const firstIncludesAlarms of [true, false]) {

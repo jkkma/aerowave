@@ -2,26 +2,26 @@ package com.aerowave.radio
 
 import android.os.Bundle
 import android.os.Build
-import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
 import android.webkit.WebView
-import android.view.WindowManager
 import android.graphics.Color
+import android.view.KeyEvent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import kotlin.math.roundToInt
+import com.aerowave.audio.AlarmInputGate
 import com.aerowave.audio.AlarmPlaybackService
 
 class MainActivity : TauriActivity() {
   private var appWebView: WebView? = null
+  private val alarmKeys = AlarmInputGate()
 
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
-    showAlarmOverLockScreen(intent)
     // Keep every WebView control inside system bars, cutouts and the keyboard.
     // Consuming these insets avoids applying the same space again in CSS.
     val content = findViewById<android.view.View>(android.R.id.content)
@@ -55,23 +55,31 @@ class MainActivity : TauriActivity() {
     applyFontScale()
   }
 
-  override fun onNewIntent(intent: Intent) {
-    super.onNewIntent(intent)
-    showAlarmOverLockScreen(intent)
+  override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+    if (event.keyCode != KeyEvent.KEYCODE_VOLUME_UP &&
+      event.keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) return super.dispatchKeyEvent(event)
+    val occurrence = AlarmPlaybackService.liveOccurrenceId(this)
+    alarmKeys.bind(occurrence)
+    if (occurrence == null) return super.dispatchKeyEvent(event)
+    when (event.action) {
+      KeyEvent.ACTION_DOWN -> {
+        alarmKeys.volumeDown(event.keyCode, event.repeatCount, occurrence)
+        return true
+      }
+      KeyEvent.ACTION_UP -> {
+        if (alarmKeys.volumeUp(event.keyCode, occurrence) && !event.isCanceled &&
+          alarmKeys.beginAction(occurrence)) {
+          AlarmPlaybackService.dismissIfMatching(this, occurrence)
+        }
+        return true
+      }
+    }
+    return true
   }
 
-  private fun showAlarmOverLockScreen(intent: Intent?) {
-    if (intent?.getBooleanExtra("aerowaveAlarm", false) != true) return
-    intent.removeExtra("aerowaveAlarm")
-    if (!AlarmPlaybackService.isRinging()) return
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-      setShowWhenLocked(true)
-      setTurnScreenOn(true)
-    } else {
-      @Suppress("DEPRECATION")
-      window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
-    }
+  override fun onPause() {
+    alarmKeys.bind(null)
+    super.onPause()
   }
 
   override fun onConfigurationChanged(newConfig: Configuration) {

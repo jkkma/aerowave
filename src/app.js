@@ -479,24 +479,93 @@ function renderAndroidAlarmPermissions() {
   const snapshot = androidAlarmSnapshot;
   if (!snapshot) return;
   const permissions = snapshot.permissions || {};
+  const show = (name, label, detail, tone = "") => {
+    const status = $(`#android-${name}-status`);
+    status.textContent = label;
+    status.classList.toggle("ready", tone === "ready");
+    status.classList.toggle("attention", tone === "attention");
+    $(`#android-${name}-help`).textContent = detail;
+  };
+
+  if (permissions.exact === "denied") {
+    show("exact", "Not allowed", "Allow Alarms & reminders so scheduled alarms can ring on time.", "attention");
+  } else if (permissions.exact === "granted") {
+    show("exact", "Allowed", "Aerowave can schedule alarms at the right time.", "ready");
+  } else if (permissions.exact === "notRequired") {
+    show("exact", "No extra switch", "This Android version does not require a separate exact-alarm permission.", "ready");
+  } else {
+    show("exact", "Could not check", "Open Alarms & reminders to check this permission.");
+  }
+
+  if (permissions.notifications === "denied") {
+    show("notifications", "Off", "Allow notifications so ringing alarms and their controls can be shown.", "attention");
+  } else if (permissions.notifications === "granted" || permissions.notifications === "notRequired") {
+    show("notifications", "On", "Android allows Aerowave to show alarm notifications and controls.", "ready");
+  } else {
+    show("notifications", "Could not check", "Open notification settings to check app notifications.");
+  }
+
+  if (permissions.alarmChannel === "high") {
+    show("channel", "High priority", "Alarm alerts can appear over other apps when Android allows them.", "ready");
+  } else if (permissions.alarmChannel === "blocked") {
+    show("channel", "Off", "Turn on the Alarms notification category in Android settings.", "attention");
+  } else if (permissions.alarmChannel === "quiet") {
+    show("channel", "Low priority", "Set the Alarms notification category to high priority so alerts can appear over other apps.", "attention");
+  } else if (permissions.alarmChannel === "notCreated") {
+    show("channel", "Not created yet", "Android creates this category when the first alarm rings. Check again after a test alarm.");
+  } else if (permissions.alarmChannel === "notRequired") {
+    show("channel", "No channel needed", "This Android version does not use separate notification categories.", "ready");
+  } else {
+    show("channel", "Could not check", "Check the Alarms notification category after an alarm has rung.");
+  }
+
+  if (permissions.fullScreen === "denied") {
+    show("fullscreen", "Off", "Allow full-screen alarms to open the ringing screen from the lock screen.", "attention");
+  } else if (permissions.fullScreen === "granted") {
+    show("fullscreen", "Allowed", "Android allows full-screen alarms. The phone may still have another lock-screen restriction.", "ready");
+  } else if (permissions.fullScreen === "notRequired") {
+    show("fullscreen", "No extra switch", "This Android version has no separate full-screen alarm switch. Test with the screen off.", "ready");
+  } else {
+    show("fullscreen", "Could not check", "Open app settings and test an alarm with the screen off.");
+  }
+  $("#android-fullscreen-action").textContent = permissions.fullScreen === "notRequired"
+    ? "Open app info" : "Open full-screen access";
+
+  if (permissions.batteryOptimized === true) {
+    show("battery", "Optimization on", "Review battery restrictions if alarms or background audio stop on this phone.", "attention");
+  } else if (permissions.batteryOptimized === false) {
+    show("battery", "Exempt", "Android battery optimization exemption is on. Your phone may have other limits.", "ready");
+  } else {
+    show("battery", "Could not check", "Open battery settings to review background restrictions.");
+  }
+
+  const maker = `${permissions.manufacturer || ""} ${permissions.brand || ""}`;
+  $("#android-phone-help").textContent = /xiaomi|redmi|poco/i.test(maker)
+    ? "On Xiaomi/POCO, open App info → Other permissions. Allow Show on Lock screen and Open new windows while running in the background. Aerowave cannot read these switches."
+    : "Some phones add lock-screen, background start, or auto-start limits. Review App info and battery settings; Aerowave cannot read these phone-specific switches.";
+
   const required = [];
-  if (permissions.exact === "denied") required.push("allow Alarms & reminders");
-  if (permissions.notifications === "denied") required.push("allow notifications for alarm controls");
-  const summary = required.length ? "To use alarms, " + required.join(" and ") + "."
-    : "Android alarm permissions are ready.";
+  if (permissions.exact === "denied") required.push("Alarms & reminders");
+  if (permissions.notifications === "denied") required.push("notifications");
+  if (permissions.alarmChannel === "blocked" || permissions.alarmChannel === "quiet") required.push("Alarm alerts");
+  if (permissions.fullScreen === "denied") required.push("full-screen access");
+  const incomplete = !permissions.exact || !permissions.notifications || !permissions.alarmChannel ||
+    !permissions.fullScreen || typeof permissions.batteryOptimized !== "boolean";
+  const summary = required.length ? "Needs attention: " + required.join(", ") + "."
+    : incomplete ? "Some Android settings could not be checked. Review the rows below."
+    : permissions.alarmChannel === "notCreated"
+      ? "Core alarm access looks ready. Run a test alarm to create its alert category, then check again."
+    : permissions.batteryOptimized === true
+      ? "Android alarm access looks ready. Review battery use and phone-specific settings, then test with the screen off."
+      : "Android alarm access looks ready. Check phone-specific settings and test with the screen off.";
   $("#android-alarm-status").textContent = snapshot.error || summary;
-  $("#android-alarm-status").classList.toggle("warn", !!snapshot.error || !!required.length);
-  $("#android-alarm-hint").textContent = required.length ? summary
-    : "Alarms run with the screen locked and are restored after a restart.";
-  $("#android-battery-status").textContent = permissions.batteryOptimized
-    ? "Battery optimization is enabled. Check this phone’s battery settings if background audio stops."
-    : "Android battery optimization is unrestricted for Aerowave.";
-  $("#android-fullscreen-status").textContent = permissions.fullScreen === "denied"
-    ? "Full-screen alarms are off. Use the notification to snooze or dismiss."
-    : "Alarm notifications can show over the lock screen.";
+  $("#android-alarm-status").classList.toggle("warn", !!snapshot.error || !!required.length || incomplete);
+  $("#android-alarm-hint").textContent = snapshot.error || (required.length
+    ? "Review Android permissions in Settings before relying on alarms."
+    : "Check phone-specific settings in Settings, then test an alarm with the screen off.");
 }
 
-async function refreshAndroidAlarms({ initialize = false } = {}) {
+async function refreshAndroidAlarms({ initialize = false, reportError = false } = {}) {
   if (!IS_ANDROID || androidAlarmPending || (document.hidden && !initialize)) return;
   const request = ++androidAlarmRequest;
   try {
@@ -518,6 +587,7 @@ async function refreshAndroidAlarms({ initialize = false } = {}) {
   } catch (error) {
     if (request !== androidAlarmRequest || androidAlarmPending) return;
     if (initialize) say("Could not load Android alarms: " + String(error), "bad", true);
+    else if (reportError) say("Could not check Android settings: " + String(error), "bad");
   }
 }
 
@@ -5091,6 +5161,18 @@ function wire() {
         await androidCommand("open_alarm_settings", { setting: button.dataset.androidSetting });
       } catch (error) { say(String(error), "bad"); }
     }));
+    $("#android-permissions-refresh").addEventListener("click", async () => {
+      const button = $("#android-permissions-refresh");
+      button.disabled = true;
+      button.textContent = "Checking…";
+      try {
+        await refreshAndroidAlarms({ reportError: true });
+        renderAndroidAlarmPermissions();
+      } finally {
+        button.textContent = "Check again";
+        button.disabled = false;
+      }
+    });
     $$("#al-days button").forEach(button => {
       button.setAttribute("aria-label", DAY_NAMES[+button.dataset.day]);
     });
