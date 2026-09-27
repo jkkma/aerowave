@@ -9,6 +9,10 @@ import android.app.AlarmManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.media.AudioAttributes as PlatformAudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -37,7 +41,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import java.util.concurrent.Executors
 
-class AlarmPlaybackService : Service(), Player.Listener {
+class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   private val handler = Handler(Looper.getMainLooper())
   private lateinit var player: ExoPlayer
   private var ring: RingingRecord? = null
@@ -59,6 +63,11 @@ class AlarmPlaybackService : Service(), Player.Listener {
   private lateinit var audioManager: AudioManager
   private var audioFocusRequest: AudioFocusRequest? = null
   private var focusMultiplier = 1f
+  private lateinit var sensors: SensorManager
+  private var shakeSensor: Sensor? = null
+  private val shakeDetector = AlarmShakeDetector()
+  private val gravity = FloatArray(3)
+  private var gravityInitialized = false
 
   private val fadeTick = object : Runnable {
     override fun run() {
@@ -99,6 +108,7 @@ class AlarmPlaybackService : Service(), Player.Listener {
     super.onCreate()
     instance = this
     audioManager = getSystemService(AudioManager::class.java)
+    sensors = getSystemService(SensorManager::class.java)
     ringWakeLock = getSystemService(PowerManager::class.java)
       .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:active-alarm")
       .apply { setReferenceCounted(false) }
@@ -157,6 +167,7 @@ class AlarmPlaybackService : Service(), Player.Listener {
       return
     }
     clearPending(current.occurrenceId)
+    stopShakeListening()
     ring = current
     sourceResolutionToken++
     fallbackStarted = false
@@ -174,6 +185,7 @@ class AlarmPlaybackService : Service(), Player.Listener {
       MAX_RING_WAKE_MS
     }.coerceAtMost(MAX_RING_WAKE_MS)
     if (!ringWakeLock.isHeld) ringWakeLock.acquire(holdMs)
+    if (current.trigger != "test") startShakeListening()
     requestAlarmFocus()
     handler.removeCallbacks(fadeTick)
     handler.removeCallbacks(autoStop)
@@ -403,6 +415,57 @@ class AlarmPlaybackService : Service(), Player.Listener {
     }
   }
 
+  override fun onSensorChanged(event: SensorEvent) {
+    val current = ring ?: return
+    if (current.trigger == "test" || shakeSensor == null ||
+      event.sensor.type != shakeSensor?.type) return
+    val x: Float
+    val y: Float
+    val z: Float
+    if (event.sensor.type == Sensor.TYPE_LINEAR_ACCELERATION) {
+      x = event.values[0]
+      y = event.values[1]
+      z = event.values[2]
+    } else {
+      if (!gravityInitialized) {
+        for (index in 0..2) gravity[index] = event.values[index]
+        gravityInitialized = true
+        return
+      }
+      for (index in 0..2) {
+        gravity[index] = 0.8f * gravity[index] + 0.2f * event.values[index]
+      }
+      x = event.values[0] - gravity[0]
+      y = event.values[1] - gravity[1]
+      z = event.values[2] - gravity[2]
+    }
+    if (shakeDetector.sample(x, y, z, event.timestamp / 1_000_000L) &&
+      AlarmStateStore.snapshot(this).ringing?.occurrenceId == current.occurrenceId) {
+      stopShakeListening()
+      finishRing(current.occurrenceId, snooze = true, auto = false)
+    }
+  }
+
+  override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+
+  private fun startShakeListening() {
+    val sensor = sensors.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+      ?: sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+      ?: return
+    gravityInitialized = false
+    shakeDetector.reset()
+    if (sensors.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME, handler)) {
+      shakeSensor = sensor
+    }
+  }
+
+  private fun stopShakeListening() {
+    if (shakeSensor != null) sensors.unregisterListener(this)
+    shakeSensor = null
+    gravityInitialized = false
+    shakeDetector.reset()
+  }
+
   private fun finishRing(
     occurrenceId: String?,
     snooze: Boolean,
@@ -410,6 +473,7 @@ class AlarmPlaybackService : Service(), Player.Listener {
   ): PersistedAlarmState? {
     val current = ring ?: AlarmStateStore.snapshot(this).ringing ?: return null
     if (occurrenceId != null && occurrenceId != current.occurrenceId) return null
+    stopShakeListening()
     handler.removeCallbacks(fadeTick)
     handler.removeCallbacks(autoStop)
     sourceResolutionToken++
@@ -452,11 +516,9 @@ class AlarmPlaybackService : Service(), Player.Listener {
   }
 
   private fun notification(current: RingingRecord): Notification {
-    val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-      ?: Intent(Intent.ACTION_MAIN).setPackage(packageName)
-    launchIntent.putExtra(EXTRA_ALARM_LAUNCH, true)
     val launch = PendingIntent.getActivity(
-      this, 71_000, launchIntent,
+      this, current.occurrenceId.hashCode() and 0x7fffffff,
+      AlarmActivity.intentFor(this, current.occurrenceId),
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
     val snooze = AlarmActionReceiver.pendingIntent(this, ACTION_SNOOZE, current)
@@ -577,6 +639,7 @@ class AlarmPlaybackService : Service(), Player.Listener {
 
   override fun onDestroy() {
     handler.removeCallbacksAndMessages(null)
+    stopShakeListening()
     sourceResolutionToken++
     player.removeListener(this)
     player.release()
@@ -592,7 +655,6 @@ class AlarmPlaybackService : Service(), Player.Listener {
     const val ACTION_SNOOZE = "com.aerowave.audio.action.SNOOZE_ALARM"
     const val ACTION_DISMISS = "com.aerowave.audio.action.DISMISS_ALARM"
     private const val EXTRA_OCCURRENCE_ID = "occurrenceId"
-    const val EXTRA_ALARM_LAUNCH = "aerowaveAlarm"
     private const val CHANNEL_ID = "aerowave_alarms_v1"
     internal const val NOTIFICATION_ID = 71_001
     private const val FADE_TICK_MS = 250L
@@ -604,6 +666,22 @@ class AlarmPlaybackService : Service(), Player.Listener {
 
     @JvmStatic
     fun isRinging(): Boolean = instance?.ring != null
+
+    /** Hardware keys may act only on the occurrence owned by a live service. */
+    @JvmStatic
+    fun liveOccurrenceId(context: Context): String? {
+      val active = instance?.ring?.occurrenceId ?: return null
+      return active.takeIf { AlarmStateStore.snapshot(context).ringing?.occurrenceId == it }
+    }
+
+    @JvmStatic
+    fun canShakeToSnooze(occurrenceId: String): Boolean =
+      instance?.let { it.ring?.occurrenceId == occurrenceId && it.shakeSensor != null } == true
+
+    @JvmStatic
+    fun dismissIfMatching(context: Context, occurrenceId: String) {
+      stopIfMatching(context, occurrenceId, snooze = false)
+    }
 
     internal fun activeOccurrenceId(): String? =
       instance?.ring?.occurrenceId ?: pendingOccurrenceId
@@ -692,6 +770,11 @@ class AlarmPlaybackService : Service(), Player.Listener {
       return context.getSystemService(NotificationManager::class.java)
         .getNotificationChannel(CHANNEL_ID)?.importance != NotificationManager.IMPORTANCE_NONE
     }
+
+    internal fun alarmChannelImportance(context: Context): Int? =
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) null else
+        context.getSystemService(NotificationManager::class.java)
+          .getNotificationChannel(CHANNEL_ID)?.importance
   }
 }
 

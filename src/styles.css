@@ -1594,7 +1594,18 @@ body.android {
 .android #pane-alarms.on.editing { grid-template-rows: minmax(0, 1fr); align-content: stretch; overflow: hidden; }
 .android #pane-alarms .list { overflow: visible; }
 .android .android-alarm-settings { padding: 11px 12px; }
-.android .android-alarm-settings p { margin: 10px 0; line-height: 1.5; }
+.android .android-alarm-settings > p { margin: 8px 0 10px; line-height: 1.5; }
+.android #android-alarm-status.warn { color: var(--amber-hi); }
+.android .android-permission-list { display: grid; gap: 7px; margin: 0 0 8px; padding: 0; list-style: none; }
+.android .android-permission-row { min-width: 0; padding: 10px; border: 1px solid rgba(170, 231, 247, .15); border-radius: 9px; background: rgba(2, 20, 32, .28); }
+.android .android-permission-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 10px; flex-wrap: wrap; }
+.android .android-permission-heading strong { color: #e6f8fa; font-size: 12px; font-weight: 650; }
+.android .android-permission-state { padding: 3px 7px; border: 1px solid rgba(168, 219, 231, .25); border-radius: 999px; color: #c7e1e8; font-size: 10px; line-height: 1.3; }
+.android .android-permission-state.ready { border-color: rgba(125, 224, 160, .45); color: #b9f5d0; }
+.android .android-permission-state.attention { border-color: rgba(255, 185, 104, .55); color: var(--amber-hi); }
+.android .android-permission-state.manual { border-color: rgba(180, 211, 235, .38); }
+.android .android-permission-row p { margin: 5px 0 8px; color: #bedce8; font-size: 11px; line-height: 1.45; }
+.android .android-permission-row .gel { padding: 8px 12px; font-size: 11px; }
 .android .timerow, .android .sourcerow, .android .folderpick { flex-wrap: wrap; }
 .android .timerow .grow { flex: 1 1 150px; }
 .android .stepper { width: 52px; height: 48px; font-size: 14px; }

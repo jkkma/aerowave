@@ -112,10 +112,30 @@ Temporary audio-focus loss pauses the alarm source watchdog. Regaining focus
 gives the decoder a fresh startup or stall interval, so time spent interrupted
 does not cause a healthy station to switch to backup audio.
 
-Settings provides shortcuts for Alarms & reminders, notifications, lock-screen
-alarms and battery restrictions. A denied permission is shown in the app. Keep
-the phone powered on: force-stopping the application prevents delivery until
-it is opened again. OEM battery controls require testing on each phone.
+**Settings > Permissions** shows Alarms & reminders, app notifications, the
+Alarms notification category, full-screen alarm access, and battery restrictions,
+with a settings shortcut for each. **Check again** refreshes those checks;
+returning from Android settings also updates them. Phone-specific restrictions
+are labeled as manual checks because Android's public permission APIs cannot
+verify every manufacturer's switches. Keep the phone powered on: force-stopping
+the application prevents delivery until it is opened again. OEM battery controls
+require testing on each phone.
+
+Ringing alarms use a native screen with Dismiss and Snooze controls. It requests
+screen wake, appears over the lock screen, and keeps the display on while visible.
+Dismiss or snooze closes that screen without unlocking the phone. Either volume
+button dismisses while the alarm screen or Aerowave is in front. Shaking firmly
+several times snoozes a scheduled alarm; ordinary movement does not count, and a
+test alarm cannot be snoozed. Motion sensing runs only during a snoozable ring.
+
+Android's full-screen notification permission does not cover every manufacturer's
+restrictions. On Xiaomi/POCO, open Aerowave's app info, then **Other permissions**,
+and allow **Show on Lock screen** and **Open new windows while running in the
+background**. Schedule an alarm with the phone locked and display off to verify
+the result. When the phone is already in use, Android may show the alarm as a
+heads-up notification; tap it to open the alarm screen. See Android's
+[time-sensitive notification guidance](https://developer.android.com/develop/ui/views/notifications/time-sensitive)
+and [full-screen permission rules](https://source.android.com/docs/core/permissions/fsi-limits).
 
 Alarms must also start when the activity and Rust relay are absent. Their
 native player uses a guarded public-network connection and the Aerowave

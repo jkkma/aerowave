@@ -28,6 +28,15 @@
             android:foregroundServiceType="mediaPlayback"
             android:stopWithTask="false" />
 
+        <activity
+            android:name="com.aerowave.audio.AlarmActivity"
+            android:directBootAware="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
+
         <receiver
             android:name="com.aerowave.audio.AlarmReceiver"
             android:directBootAware="true"
