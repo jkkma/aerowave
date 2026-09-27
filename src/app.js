@@ -151,6 +151,7 @@ const player = {
   target: 0.8,        // volume we are heading for
   fadeTimer: null,
   metaTimer: null,
+  metadataStarted: false, // keep retries from reopening a titleless poll
   retries: 0,
   retryProgressSeconds: 0, // decoded audio since this reconnect began
   retryTimer: null,
@@ -249,6 +250,7 @@ function stopPlayback(quiet, { skipNative = false } = {}) {
   player.probed = false;
   player.relayed = false;
   player.triedDirect = false;
+  player.metadataStarted = false;
   stopHls();
   player.nativeGeneration = null;
   player.trackTitle = null;
@@ -1452,6 +1454,7 @@ async function setOrbArt(source, retry = 0) {
 function startMetadata(source, initialInfo = null) {
   clearInterval(player.metaTimer);
   if (state.settings.showMetadata === false) return;
+  player.metadataStarted = true;
   // Plenty of stations send no ICY titles at all. Polling one of those opens a
   // connection a minute, for ever, to learn nothing - so give up after three.
   let titleless = 0;
@@ -1496,6 +1499,12 @@ function startMetadata(source, initialInfo = null) {
   player.metaTimer = player.streamTitle ? null : setInterval(poll, 60000);
 }
 
+function startRecoveredMetadata(source, generation) {
+  if (superseded(generation) || player.source !== source || player.paused || givingUp ||
+      player.hls || source.kind !== "station" || player.metadataStarted) return;
+  startMetadata(source);
+}
+
 /**
  * A title the relay read out of the stream that is playing.
  *
@@ -1507,6 +1516,10 @@ function onStreamTitle(payload) {
   if (!payload || typeof payload.title !== "string") return;
   const source = player.source;
   if (!source || source.kind !== "station") return;
+  // A relay socket may send one last title after desktop audio switches to a
+  // direct URL. Android can restore native relay playback without this page's
+  // relayed flag; its service checks the active source independently.
+  if (!IS_ANDROID && !player.relayed) return;
   // A relay connection outlives by a moment the station that opened it, so a
   // title from the one we are no longer listening to is not ours.
   const mine = String(player.resolved || source.url || "").trim();
@@ -1641,7 +1654,7 @@ function failure(detail, opts = {}) {
       player.relayed = playUrl !== upstream;
       setAudioSource(playUrl);
     }
-    audio.play().catch((e) => {
+    audio.play().then(() => startRecoveredMetadata(source, generation)).catch((e) => {
       if (superseded(generation) || isAbort(e)) return;
       failure(String(e && e.message ? e.message : e));
     });
@@ -1657,8 +1670,15 @@ function failure(detail, opts = {}) {
  * direct connection is worth trying. HLS must still go through hls.js.
  */
 async function fallBackToDirect(source, generation) {
+  const hadRelayTitle = player.relayed && player.streamTitle;
   player.triedDirect = true;
   player.relayed = false;
+  if (hadRelayTitle) {
+    // The relay title stopped polling. A direct media request has no such
+    // channel, so give it one new bounded metadata poller.
+    player.streamTitle = false;
+    player.metadataStarted = false;
+  }
   if (!player.probed) {
     try {
       const info = await invoke("probe_stream", { url: source.url, wantTitle: false });
@@ -1677,7 +1697,7 @@ async function fallBackToDirect(source, generation) {
     setStatus("Trying another connection", "busy");
     setAudioSource(upstream);
   }
-  audio.play().catch((e) => {
+  audio.play().then(() => startRecoveredMetadata(source, generation)).catch((e) => {
     if (superseded(generation) || isAbort(e)) return;
     failure(String(e && e.message ? e.message : e));
   });
@@ -1996,7 +2016,7 @@ function wireMediaKeys() {
   const on = (action, handler) => {
     try {
       navigator.mediaSession.setActionHandler(action, () => {
-        if (activeWindowActions.size) return;
+        if (activeWindowActions.size || ringing) return;
         handler();
       });
     } catch {
@@ -2838,6 +2858,7 @@ let givingUp = false;
 let ringActionFailures = 0;
 let ringCompletionIntent = null;
 let latestAlarmOccurrence = null;
+let desktopRingFocusBefore = null;
 /** How long an alarm takes to recede once it has given up. */
 const GIVE_UP_FADE_SECS = 6;
 const RING_ACTION_RETRY_MS = 30000;
@@ -2954,6 +2975,7 @@ function onAlarmFire(payload) {
   // A replacement ring still interrupts the same listening session. Capture
   // it only once, before the alarm's source and volume replace the player's.
   if (!ringing) {
+    if (!IS_ANDROID) desktopRingFocusBefore = document.activeElement;
     interruptedPlayback = player.source ? {
       source: { ...player.source },
       position: player.source.kind === "folder" ? player.pendingPosition ?? audio.currentTime : 0,
@@ -2996,6 +3018,14 @@ function onAlarmFire(payload) {
   $("#ring-snooze").disabled = payload.trigger === "test";
   $("#ring-snooze").title = payload.trigger === "test" ? "Test alarms cannot be snoozed" : "";
   overlay.hidden = false;
+  if (!IS_ANDROID) {
+    // The titlebar and footer sit outside #app-content, so they need the same
+    // modal treatment as the main controls while the alarm is on screen.
+    for (const selector of ["header", "#app-content", "footer"]) {
+      const background = $(selector);
+      if (background) background.inert = true;
+    }
+  }
   // After unhiding, not before: focus() on a hidden subtree does nothing, and
   // an alarm nobody can dismiss from the keyboard is not much of an alarm.
   $("#ring-dismiss").focus();
@@ -3048,7 +3078,9 @@ function onAlarmFire(payload) {
   }
 
   if (payload.autoStopMins > 0) {
-    autoStopTimer = setTimeout(giveUp, payload.autoStopMins * 60000);
+    const remaining = payload.autoStopRemainingMs ?? payload.autoStopMins * 60000;
+    if (remaining > 0) autoStopTimer = setTimeout(giveUp, remaining);
+    else autoStopTimer = setTimeout(() => giveUp(Math.max(0, GIVE_UP_FADE_SECS * 1000 + remaining)), 0);
   }
 }
 
@@ -3057,7 +3089,7 @@ function onAlarmFire(payload) {
  * it dead mid-bar - the last thing a room hears from an alarm nobody
  * answered should not be a click - and then end the ring, or hand it to a snooze.
  */
-function giveUp() {
+function giveUp(fadeMs = GIVE_UP_FADE_SECS * 1000) {
   if (!ringing || givingUp) return;
   givingUp = true;
   // On the way out. A fallback track started now would come in at full
@@ -3066,15 +3098,15 @@ function giveUp() {
   ringWatchdog = null;
   // Nothing is making a sound - the silent card, or a source that never
   // started - so there is nothing to let go of.
-  if (!player.playing) {
+  if (!player.playing || fadeMs <= 0) {
     endGiveUp();
     return;
   }
-  fadeOut(GIVE_UP_FADE_SECS);
+  fadeOut(fadeMs / 1000);
   // The ending is its own timer rather than the fade's callback. Touching the
   // volume knob cancels a fade, and a ring that then never ended would be a
   // good deal worse than one that ends at the volume you just chose.
-  autoStopTimer = setTimeout(endGiveUp, GIVE_UP_FADE_SECS * 1000);
+  autoStopTimer = setTimeout(endGiveUp, fadeMs);
 }
 
 /** Should this give-up come back later instead of being the end of it? */
@@ -3120,6 +3152,14 @@ function finishRing(resumePrevious) {
   ringCompletionIntent = null;
   $("#ringing").hidden = true;
   ringing = null;
+  if (!IS_ANDROID) {
+    for (const selector of ["header", "#app-content", "footer"]) {
+      const background = $(selector);
+      if (background) background.inert = false;
+    }
+    if (desktopRingFocusBefore?.isConnected) desktopRingFocusBefore.focus();
+    desktopRingFocusBefore = null;
+  }
   renderSleepTimer();
   if (previous) {
     folderHistory = previous.history;
@@ -3983,6 +4023,7 @@ function renderSettings() {
 
 let stationSaveTail = Promise.resolve();
 let stationSaveFailures = 0;
+let stationStateRevision = 0;
 
 /**
  * Station writes run in order and take their snapshot only at the head of the
@@ -3991,6 +4032,7 @@ let stationSaveFailures = 0;
  */
 function saveStations({ extraStation = null, move = null, patch = null, removeId = null, onSuccess = null, onFailure = null } = {}) {
   if (setupRestorePending) return Promise.resolve(false);
+  ++stationStateRevision;
   const run = async () => {
     const stations = state.stations.map((station) => ({ ...station }));
     if (patch) {
@@ -4047,6 +4089,7 @@ function saveStations({ extraStation = null, move = null, patch = null, removeId
       // refresh fails rather than replaying a durable write as though it did not.
       say(String(error), "bad");
     }
+    ++stationStateRevision;
     if (IS_ANDROID) {
       try {
         await syncAndroidAlarms();
@@ -4187,10 +4230,12 @@ async function flushSettings() {
 async function loadState(expectedSettingsRevision = null) {
   const setupRequest = setupRestoreEpoch;
   const alarmRequest = ++alarmStateRequest;
+  const stationRevision = stationStateRevision;
   const loaded = await invoke("get_state");
   if (setupRestorePending || setupRequest !== setupRestoreEpoch) return;
   if (expectedSettingsRevision !== null && expectedSettingsRevision !== settingsRevision) return;
   if (alarmRequest !== alarmStateRequest) loaded.alarms = state.alarms;
+  if (stationRevision !== stationStateRevision) loaded.stations = state.stations;
   state = loaded;
   renderStations();
   refreshBrowseIndicators();
@@ -4219,8 +4264,11 @@ function setBackupBusy(busy) {
 }
 
 async function settleSetupWrites() {
+  const stationFailures = stationSaveFailures;
   if (!(await flushSettings())) throw new Error("Save your current settings successfully before continuing.");
   await stationSaveTail;
+  if (stationEditorSaveFailed || stationFailures !== stationSaveFailures)
+    throw new Error("Your station change could not be saved. Retry it or cancel the draft before continuing.");
   if (IS_ANDROID) await androidAlarmQueue;
   if (alarmSavePending || alarmEditorSaving || alarmSkipPending || alarmDeletePending)
     throw new Error("Wait for your alarm change to finish, then try again.");
@@ -4349,8 +4397,8 @@ async function handleWindowAction({ requestId }) {
       stationTail = stationSaveTail;
       await stationTail;
     } while (stationTail !== stationSaveTail);
-    if (stationFailures !== stationSaveFailures) {
-      say("Your station change could not be saved. Retry it before closing Aerowave.", "bad");
+    if (stationEditorSaveFailed || stationFailures !== stationSaveFailures) {
+      say("Your station change could not be saved. Retry it or cancel the draft before closing Aerowave.", "bad");
       return;
     }
     saved = await flushSettings();
@@ -4377,6 +4425,7 @@ let stationEditorReturnFocus = null;
 function openStationEditor(station) {
   if (stationEditorSaving) return;
   cancelStationTest();
+  stationEditorSaveFailed = false;
   stationEditorReturnFocus = { element: document.activeElement, stationId: station?.id };
   editingStation = station || null;
   stationDraftId = station?.id || newId();
@@ -4396,6 +4445,7 @@ function closeStationEditor() {
   if (stationEditorSaving) return;
   const wasOpen = !$("#station-editor").classList.contains("hidden");
   cancelStationTest();
+  stationEditorSaveFailed = false;
   editingStation = null;
   $("#station-editor").classList.add("hidden");
   $("#pane-radio").classList.remove("editing");
@@ -4409,6 +4459,7 @@ function closeStationEditor() {
 }
 
 let stationEditorSaving = false;
+let stationEditorSaveFailed = false;
 let stationDraftId = null;
 
 async function saveStationEditorChange(change, message) {
@@ -4425,6 +4476,7 @@ async function saveStationEditorChange(change, message) {
     editor.removeAttribute("aria-busy");
   }
   if (!saved) {
+    stationEditorSaveFailed = true;
     $("#st-note").textContent = "Could not save. Your draft is still here; try again.";
     $("#st-note").className = "editor-note bad";
     return;
@@ -5042,21 +5094,22 @@ function wire() {
     $$("#al-days button").forEach(button => {
       button.setAttribute("aria-label", DAY_NAMES[+button.dataset.day]);
     });
-    document.addEventListener("keydown", event => {
-      if (!ringing?.native || event.key !== "Tab") return;
-      const controls = [$("#ring-snooze"), $("#ring-dismiss")].filter(button => !button.disabled);
-      if (!controls.length) { event.preventDefault(); return; }
-      const at = controls.indexOf(document.activeElement);
-      const next = (at + (event.shiftKey ? -1 : 1) + controls.length) % controls.length;
-      event.preventDefault();
-      controls[next].focus();
-    });
   } else {
     window.addEventListener("focus", refreshPowerStatus);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) refreshPowerStatus();
     });
   }
+
+  document.addEventListener("keydown", event => {
+    if (!ringing || event.key !== "Tab") return;
+    const controls = [$("#ring-snooze"), $("#ring-dismiss")].filter(button => !button.disabled);
+    if (!controls.length) { event.preventDefault(); return; }
+    const at = controls.indexOf(document.activeElement);
+    const next = (at + (event.shiftKey ? -1 : 1) + controls.length) % controls.length;
+    event.preventDefault();
+    controls[next].focus();
+  });
 
   // window controls
   if (appWindow) {

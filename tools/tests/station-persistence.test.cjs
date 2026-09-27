@@ -134,3 +134,32 @@ test("a station failure during close acknowledgement keeps the failed draft open
   await closing;
   assert.equal(h.calls.find(call => call.command === "complete_window_action").args.saved, false);
 });
+
+test("quit after a failed station editor save waits for retry or explicit cancel", async () => {
+  let fail = true;
+  const h = fixture(command => {
+    if (command === "save_stations" && fail) throw new Error("disk full");
+    if (command === "acknowledge_window_action") return true;
+  });
+  h.evaluate("openStationEditor(null)");
+  h.el("#st-name").value = "Draft";
+  h.el("#st-url").value = "https://radio.test/draft";
+  await h.el("#station-editor").dispatch("submit");
+  await h.evaluate('handleWindowAction({requestId:"quit-after-failure"})');
+  assert.equal(h.calls.find(call => call.command === "complete_window_action").args.saved, false);
+  assert.equal(h.el("#station-editor").classList.contains("hidden"), false);
+
+  fail = false;
+  await h.el("#station-editor").dispatch("submit");
+  await h.evaluate('handleWindowAction({requestId:"quit-after-retry"})');
+  assert.equal(h.calls.filter(call => call.command === "complete_window_action")[1].args.saved, true);
+
+  h.evaluate("openStationEditor(null)");
+  h.el("#st-name").value = "Discarded draft";
+  h.el("#st-url").value = "https://radio.test/discarded";
+  fail = true;
+  await h.el("#station-editor").dispatch("submit");
+  h.evaluate("closeStationEditor()");
+  await h.evaluate('handleWindowAction({requestId:"quit-after-cancel"})');
+  assert.equal(h.calls.filter(call => call.command === "complete_window_action")[2].args.saved, true);
+});

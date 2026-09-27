@@ -961,7 +961,7 @@ fn pending_alarm(app: AppHandle, state: State<AppState>) -> Option<FirePayload> 
     if cfg!(mobile) { return None; }
     let sched = state.sched.lock().unwrap();
     if sched.ringing.is_some() {
-        return sched.payload.clone();
+        return sched.pending_payload();
     }
     drop(sched);
     {

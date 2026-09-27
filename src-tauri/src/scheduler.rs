@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use aerowave_core::ring::{RingAction, RingActions, RingHolds};
+use aerowave_core::ring::{deadline_remaining_ms, RingAction, RingActions, RingHolds};
 use aerowave_core::schedule;
 use aerowave_core::source_resolution::{accepts_result, cancel_unresolved_ring, Decision, Resolution};
 use aerowave_core::sleep::{
@@ -32,13 +32,14 @@ pub struct SchedState {
     /// alarm id -> the "%Y-%m-%d %H:%M" it last rang at, so a 1 s tick
     /// cannot fire the same alarm sixty times in its minute.
     fired: HashMap<String, String>,
-    /// alarm id -> unix seconds when a snooze runs out.
+    /// alarm id -> elapsed deadline and its wall-time display projection.
     snoozed: HashMap<String, schedule::Snooze>,
     /// Whatever is ringing right now.
     pub ringing: Option<String>,
     pub preview_alarm: Option<Alarm>,
     pub payload: Option<FirePayload>,
     ring_generation: u64,
+    auto_stop_at_elapsed_ms: Option<u64>,
     /// The track each folder alarm's current occurrence is playing, held so
     /// that the snoozes after it come back with the same one.
     holds: RingHolds,
@@ -183,6 +184,7 @@ pub async fn test_alarm(app: &AppHandle, alarm: Alarm) -> Result<FirePayload, St
         sched.preview_alarm = Some(alarm.clone());
         sched.payload = None;
         sched.ring_generation = sched.ring_generation.wrapping_add(1);
+        sched.auto_stop_at_elapsed_ms = None;
         sched.sleep.cancel(SleepOutcome::Alarm);
         (sched.sleep.clone(), sched.ring_generation)
     };
@@ -195,7 +197,7 @@ pub async fn test_alarm(app: &AppHandle, alarm: Alarm) -> Result<FirePayload, St
             if !accepts_result(sched.ringing.as_deref(), &alarm.id, sched.ring_generation, generation) {
                 return Err("alarm test was dismissed".into());
             }
-            sched.payload = Some(payload.clone());
+            let payload = sched.publish_payload(payload);
             let _ = app.emit("alarm-fire", payload.clone());
             Ok(payload)
         }
@@ -238,6 +240,32 @@ impl SchedState {
         self.wake_hold.set_enabled(enabled);
     }
 
+    fn start_ring_deadline(&mut self, minutes: u32) {
+        self.auto_stop_at_elapsed_ms = (minutes > 0).then(||
+            elapsed_ms().saturating_add(u64::from(minutes) * 60_000));
+    }
+
+    fn with_remaining_stop(&self, mut payload: FirePayload) -> FirePayload {
+        payload.auto_stop_remaining_ms = self.auto_stop_at_elapsed_ms
+            .map(|deadline| deadline_remaining_ms(deadline, elapsed_ms()));
+        payload
+    }
+
+    fn publish_payload(&mut self, payload: FirePayload) -> FirePayload {
+        // The ring reaches the page when its source is ready, not when the
+        // scheduler first claims it before a possible five-second scan.
+        if self.payload.is_none() {
+            self.start_ring_deadline(payload.auto_stop_mins);
+        }
+        let payload = self.with_remaining_stop(payload);
+        self.payload = Some(payload.clone());
+        payload
+    }
+
+    pub fn pending_payload(&self) -> Option<FirePayload> {
+        self.payload.clone().map(|payload| self.with_remaining_stop(payload))
+    }
+
     fn active_alarm_cycle(&self) -> bool {
         (self.ringing.is_some() && self.preview_alarm.is_none()) || !self.snoozed.is_empty()
     }
@@ -256,6 +284,7 @@ impl SchedState {
             self.preview_alarm = None;
             self.payload = None;
             self.ring_generation = self.ring_generation.wrapping_add(1);
+            self.auto_stop_at_elapsed_ms = None;
         }
         if !self.active_alarm_cycle() {
             self.wake_hold = AlarmWakeHold::default();
@@ -289,6 +318,7 @@ pub struct FirePayload {
     pub fade_secs: u32,
     pub snooze_mins: u32,
     pub auto_stop_mins: u32,
+    pub auto_stop_remaining_ms: Option<i64>,
     pub auto_snoozes: u32,
     pub auto_snoozed: u32,
     /// Set when the intended source was unusable and the tone stood in.
@@ -330,6 +360,7 @@ impl FirePayload {
             kind: "none".into(), url: None, path: None, folder: None,
             title: None, volume: alarm.volume, fade_secs: alarm.fade_secs,
             snooze_mins: alarm.snooze_mins, auto_stop_mins: alarm.auto_stop_mins,
+            auto_stop_remaining_ms: None,
             auto_snoozes: alarm.auto_snoozes, auto_snoozed: 0, note: None,
         }
     }
@@ -461,8 +492,7 @@ impl PendingSource {
                 "no playable alarm source or backup track was available"
             }.into());
         }
-        sched.payload = Some(payload.clone());
-        Some(payload)
+        Some(sched.publish_payload(payload))
     }
 }
 
@@ -493,11 +523,12 @@ fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str, pending: &mut Option<Pend
         };
         if current != alarm { return false; }
         let now = Local::now();
-        if !schedule::alarm_may_fire(
+        if !schedule::alarm_may_fire_elapsed(
             trigger == "snooze",
             current.enabled,
             sched.snoozed.get(&alarm.id).copied(),
             now.timestamp(),
+            elapsed_ms(),
             sched.ringing.is_some(),
         ) {
             return false;
@@ -506,6 +537,7 @@ fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str, pending: &mut Option<Pend
         sched.preview_alarm = None;
         sched.payload = None;
         sched.ring_generation = sched.ring_generation.wrapping_add(1);
+        sched.auto_stop_at_elapsed_ms = None;
         let generation = sched.ring_generation;
         sched.actions.begin(&alarm.id, generation, trigger == "snooze", alarm.auto_snoozes);
         if trigger != "snooze" { sched.holds.release(&alarm.id); }
@@ -524,7 +556,7 @@ fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str, pending: &mut Option<Pend
         Ok(payload) => {
             let mut sched = state.sched.lock().unwrap();
             if accepts_result(sched.ringing.as_deref(), &alarm.id, sched.ring_generation, generation) {
-                sched.payload = Some(payload.clone());
+                let payload = sched.publish_payload(payload);
                 surface_window(app);
                 let _ = app.emit("alarm-fire", payload);
             }
@@ -563,6 +595,7 @@ pub fn dismiss_test(app: &AppHandle, alarm_id: &str) {
         sched.preview_alarm = None;
         sched.payload = None;
         sched.ring_generation = sched.ring_generation.wrapping_add(1);
+        sched.auto_stop_at_elapsed_ms = None;
         if sched.ringing.as_deref() == Some(alarm_id) {
             sched.ringing = None;
         }
@@ -596,6 +629,7 @@ pub fn dismiss(app: &AppHandle, alarm_id: &str, occurrence: u64, automatic: bool
         sched.preview_alarm = None;
         sched.payload = None;
         sched.ring_generation = sched.ring_generation.wrapping_add(1);
+        sched.auto_stop_at_elapsed_ms = None;
     }
     if sched.ringing.is_none() {
         if sched.snoozed.is_empty() {
@@ -613,9 +647,8 @@ pub fn dismiss(app: &AppHandle, alarm_id: &str, occurrence: u64, automatic: bool
 }
 
 pub fn snooze(app: &AppHandle, alarm_id: &str, occurrence: u64, minutes: u32, automatic: bool) -> Result<i64, String> {
-    let at = Local::now().timestamp() + (minutes.max(1) as i64) * 60;
     let state = app.state::<AppState>();
-    {
+    let at_ms = {
         let data = state.store.data.lock().unwrap();
         if !data.alarms.iter().any(|alarm| alarm.id == alarm_id) {
             return Err("that alarm is no longer saved".into());
@@ -630,12 +663,21 @@ pub fn snooze(app: &AppHandle, alarm_id: &str, occurrence: u64, minutes: u32, au
             return Err("A test alarm cannot schedule a snooze".into());
         }
         if !sched.actions.complete(alarm_id, occurrence, RingAction::Snooze, automatic)? {
-            return sched.snoozed.get(alarm_id).map(|snooze| snooze.at * 1000)
+            return sched.snoozed.get(alarm_id).map(|snooze|
+                snooze.projected_at_ms(Local::now().timestamp_millis(), elapsed_ms()))
                 .ok_or_else(|| "that alarm is no longer snoozed".into());
         }
-        sched
-            .snoozed
-            .insert(alarm_id.to_string(), schedule::Snooze::new(at));
+        let duration_ms = u64::from(minutes.max(1)) * 60_000;
+        let now_wall_ms = Local::now().timestamp_millis();
+        let at_ms = now_wall_ms.saturating_add(duration_ms as i64);
+        // Windows uptime includes suspend. Other targets' monotonic clocks may
+        // not, so keep their wall-clock catch-up behavior after sleep.
+        #[cfg(windows)]
+        let snooze = schedule::Snooze::with_elapsed_deadline(
+            at_ms.div_euclid(1000), elapsed_ms().saturating_add(duration_ms));
+        #[cfg(not(windows))]
+        let snooze = schedule::Snooze::new(at_ms.div_euclid(1000));
+        sched.snoozed.insert(alarm_id.to_string(), snooze);
         // A manual snooze may overtake an automatic dismissal after the ring
         // and its old hold were cleared. This accepted action starts a new
         // active wait for the same occurrence.
@@ -644,6 +686,7 @@ pub fn snooze(app: &AppHandle, alarm_id: &str, occurrence: u64, minutes: u32, au
             sched.ringing = None;
             sched.payload = None;
             sched.ring_generation = sched.ring_generation.wrapping_add(1);
+            sched.auto_stop_at_elapsed_ms = None;
         }
         if sched.ringing.is_none() {
             #[cfg(desktop)]
@@ -651,10 +694,11 @@ pub fn snooze(app: &AppHandle, alarm_id: &str, occurrence: u64, minutes: u32, au
                 let _ = w.set_always_on_top(false);
             }
         }
-    }
+        at_ms
+    };
     let _ = app.emit("alarms-updated", ());
     refresh(app);
-    Ok(at * 1000)
+    Ok(at_ms)
 }
 
 pub fn next_alarm(app: &AppHandle) -> Option<NextAlarm> {
@@ -662,18 +706,20 @@ pub fn next_alarm(app: &AppHandle) -> Option<NextAlarm> {
     let alarms = state.store.data.lock().unwrap().alarms.clone();
     let snoozed = state.sched.lock().unwrap().snoozed.clone();
     let now = Local::now();
+    let now_wall_ms = now.timestamp_millis();
+    let now_elapsed_ms = elapsed_ms();
 
     let mut best: Option<(i64, &Alarm, bool)> = None;
     for alarm in &alarms {
         let mut candidates: Vec<(i64, bool)> = Vec::new();
         if let Some(snooze) = snoozed.get(&alarm.id) {
-            candidates.push((snooze.at, true));
+            candidates.push((snooze.projected_at_ms(now_wall_ms, now_elapsed_ms), true));
         }
         if alarm.enabled {
             if let Some(at) = schedule::next_occurrence_except(alarm.hour, alarm.minute, &alarm.days,
                 alarm.skip_date.as_deref(), &now)
             {
-                candidates.push((at, false));
+                candidates.push((at.saturating_mul(1000), false));
             }
         }
         for (at, is_snooze) in candidates {
@@ -686,8 +732,8 @@ pub fn next_alarm(app: &AppHandle) -> Option<NextAlarm> {
     best.map(|(at, alarm, is_snooze)| NextAlarm {
         alarm_id: alarm.id.clone(),
         label: alarm.label.clone(),
-        at_ms: at * 1000,
-        in_secs: at - now.timestamp(),
+        at_ms: at,
+        in_secs: at.saturating_sub(now_wall_ms) / 1000,
         snoozed: is_snooze,
     })
 }
@@ -728,7 +774,8 @@ fn tick(app: &AppHandle, power: &mut power::PowerManager, pending_source: &mut O
         let last = sched.last_tick;
         sched.last_tick = now_secs;
 
-        let (due, stale) = schedule::next_due_snooze(&mut sched.snoozed, now_secs, busy);
+        let (due, stale) = schedule::next_due_snooze_elapsed(
+            &mut sched.snoozed, now_secs, elapsed_ms(), busy);
         for id in &stale {
             sched.holds.release(id);
             sched.actions.cancel(id);

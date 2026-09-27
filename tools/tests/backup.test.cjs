@@ -58,6 +58,50 @@ test("desktop export waits for pending settings writes before creating and savin
   assert.equal(h.evaluate("backupBusy"), false);
 });
 
+test("export refuses a failed pending station draft and succeeds after retry", async () => {
+  const firstWrite = deferred();
+  let stationWrites = 0;
+  const h = backupHarness({ invoke: (command) => {
+    if (command === "save_stations") return ++stationWrites === 1 ? firstWrite.promise : null;
+    if (command === "create_backup") return "saved backup";
+    if (command === "save_backup_file") return "C:/Backups/aerowave.json";
+  } });
+  h.evaluate("openStationEditor(null)");
+  h.el("#st-name").value = "Draft";
+  h.el("#st-url").value = "https://radio.test/draft";
+  const saving = h.el("#station-editor").dispatch("submit");
+  await flush();
+  const exporting = h.evaluate("exportSetup()");
+  firstWrite.reject(new Error("disk full"));
+  await saving;
+  await exporting;
+  assert.equal(h.calls.some(({ command }) => command === "create_backup"), false);
+  assert.match(h.el("#backup-status").textContent, /station/i);
+  assert.equal(h.el("#station-editor").classList.contains("hidden"), false);
+
+  await h.el("#station-editor").dispatch("submit");
+  await h.evaluate("exportSetup()");
+  assert.equal(h.calls.filter(({ command }) => command === "create_backup").length, 1);
+});
+
+test("restore refuses a failed station draft before replacing the setup", async () => {
+  const h = backupHarness({ invoke: (command) => {
+    if (command === "save_stations") throw new Error("disk full");
+    if (command === "read_backup_file") return "valid backup";
+    if (command === "inspect_backup") return { stationCount: 1, alarmCount: 0, warnings: [] };
+    if (command === "restore_backup") return appData();
+  } });
+  h.evaluate("openStationEditor(null)");
+  h.el("#st-name").value = "Draft";
+  h.el("#st-url").value = "https://radio.test/draft";
+  await h.el("#station-editor").dispatch("submit");
+  await h.evaluate("previewSetupRestore()");
+  await h.evaluate("restoreSetup()");
+  assert.equal(h.calls.some(({ command }) => command === "restore_backup"), false);
+  assert.match(h.el("#backup-error").textContent, /station/i);
+  assert.equal(h.el("#backup-preview").open, true);
+});
+
 test("Android export uses the canonical backend snapshot and unified file commands", async () => {
   const h = backupHarness({ navigator: androidNavigator, invoke: (command) => {
     if (command === "create_backup") return "android-backup-content";

@@ -14,12 +14,41 @@ pub const CATCHUP_GRACE_SECS: i64 = 15 * 60;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Snooze {
     pub at: i64,
+    elapsed_deadline_ms: Option<u64>,
     ready: bool,
 }
 
 impl Snooze {
     pub fn new(at: i64) -> Self {
-        Self { at, ready: false }
+        Self { at, elapsed_deadline_ms: None, ready: false }
+    }
+
+    /// Desktop snoozes last the requested duration even if Windows corrects
+    /// its wall clock while the app is running.
+    pub fn with_elapsed_deadline(at: i64, elapsed_deadline_ms: u64) -> Self {
+        Self { at, elapsed_deadline_ms: Some(elapsed_deadline_ms), ready: false }
+    }
+
+    fn due(&self, now: i64, elapsed_ms: u64) -> bool {
+        self.elapsed_deadline_ms.map_or(self.at <= now, |deadline| elapsed_ms >= deadline)
+    }
+
+    fn too_late(&self, now: i64, elapsed_ms: u64) -> bool {
+        self.elapsed_deadline_ms.map_or(
+            now.saturating_sub(self.at) > CATCHUP_GRACE_SECS,
+            |deadline| elapsed_ms.saturating_sub(deadline) > CATCHUP_GRACE_SECS as u64 * 1000,
+        )
+    }
+
+    /// Remap the elapsed deadline onto the current wall clock for the UI and
+    /// Windows wake timer. The elapsed clock remains the source of truth.
+    pub fn projected_at_ms(&self, now_wall_ms: i64, elapsed_ms: u64) -> i64 {
+        match self.elapsed_deadline_ms {
+            Some(deadline) => now_wall_ms.saturating_add(
+                deadline.saturating_sub(elapsed_ms).min(i64::MAX as u64) as i64,
+            ),
+            None => self.at.saturating_mul(1000),
+        }
     }
 }
 
@@ -30,17 +59,26 @@ pub fn next_due_snooze(
     now: i64,
     busy: bool,
 ) -> (Option<String>, Vec<String>) {
+    next_due_snooze_elapsed(pending, now, 0, busy)
+}
+
+pub fn next_due_snooze_elapsed(
+    pending: &mut HashMap<String, Snooze>,
+    now: i64,
+    elapsed_ms: u64,
+    busy: bool,
+) -> (Option<String>, Vec<String>) {
     let mut expired = Vec::new();
     pending.retain(|id, snooze| {
         // Catch-up grace applies when first observing a deadline after sleep.
         // Once eligible, waiting behind another ring must not expire it.
         if snooze.ready {
             true
-        } else if now.saturating_sub(snooze.at) > CATCHUP_GRACE_SECS {
+        } else if snooze.too_late(now, elapsed_ms) {
             expired.push(id.clone());
             false
         } else {
-            snooze.ready = snooze.at <= now;
+            snooze.ready = snooze.due(now, elapsed_ms);
             true
         }
     });
@@ -49,8 +87,15 @@ pub fn next_due_snooze(
     } else {
         pending
             .iter()
-            .filter(|(_, snooze)| snooze.ready && snooze.at <= now)
-            .min_by(|(id_a, a), (id_b, b)| a.at.cmp(&b.at).then_with(|| id_a.cmp(id_b)))
+            .filter(|(_, snooze)| snooze.ready && snooze.due(now, elapsed_ms))
+            .min_by(|(id_a, a), (id_b, b)| {
+                let order = match (a.elapsed_deadline_ms, b.elapsed_deadline_ms) {
+                    (Some(a), Some(b)) => a.cmp(&b),
+                    _ => a.projected_at_ms(now.saturating_mul(1000), elapsed_ms)
+                        .cmp(&b.projected_at_ms(now.saturating_mul(1000), elapsed_ms)),
+                };
+                order.then_with(|| id_a.cmp(id_b))
+            })
             .map(|(id, _)| id.clone())
     };
     (next, expired)
@@ -78,9 +123,20 @@ pub fn alarm_may_fire(
     now: i64,
     busy: bool,
 ) -> bool {
+    alarm_may_fire_elapsed(is_snooze, enabled, snooze, now, 0, busy)
+}
+
+pub fn alarm_may_fire_elapsed(
+    is_snooze: bool,
+    enabled: bool,
+    snooze: Option<Snooze>,
+    now: i64,
+    elapsed_ms: u64,
+    busy: bool,
+) -> bool {
     !busy
         && if is_snooze {
-            snooze.is_some_and(|s| s.ready && s.at <= now)
+            snooze.is_some_and(|s| s.ready && s.due(now, elapsed_ms))
         } else {
             enabled
         }
@@ -391,10 +447,37 @@ mod tests {
         assert!(!alarm_may_fire(false, false, None, 100, false));
         let ready = Snooze {
             at: 90,
+            elapsed_deadline_ms: None,
             ready: true,
         };
         assert!(alarm_may_fire(true, false, Some(ready), 100, false));
         assert!(!alarm_may_fire(true, false, Some(ready), 100, true));
+    }
+
+    #[test]
+    fn wall_clock_corrections_do_not_move_an_elapsed_snooze() {
+        let snooze = Snooze::with_elapsed_deadline(600, 600_000);
+        let mut pending = HashMap::from([("wake".into(), snooze)]);
+        // One real minute later, a one-hour forward correction must not expire
+        // or ring the ten-minute snooze.
+        assert_eq!(next_due_snooze_elapsed(&mut pending, 3660, 60_000, false), (None, vec![]));
+        assert_eq!(snooze.projected_at_ms(3_660_000, 60_000), 4_200_000);
+        // Nor may a backward correction delay it by an hour.
+        assert_eq!(next_due_snooze_elapsed(&mut pending, -3540, 60_000, false), (None, vec![]));
+        assert_eq!(snooze.projected_at_ms(-3_540_000, 60_000), -3_000_000);
+        assert_eq!(next_due_snooze_elapsed(&mut pending, -3000, 600_000, false).0.as_deref(), Some("wake"));
+        assert!(alarm_may_fire_elapsed(true, false, pending.get("wake").copied(), -3000, 600_000, false));
+    }
+
+    #[test]
+    fn elapsed_snoozes_wait_in_original_deadline_order() {
+        let mut pending = HashMap::from([
+            // The wall clock jumped backwards between these two requests, so
+            // their saved wall times disagree with their elapsed deadlines.
+            ("later".into(), Snooze::with_elapsed_deadline(100, 660_000)),
+            ("first".into(), Snooze::with_elapsed_deadline(700, 600_000)),
+        ]);
+        assert_eq!(next_due_snooze_elapsed(&mut pending, 3700, 700_000, false).0.as_deref(), Some("first"));
     }
 
     /// The local calendar date an instant falls on, in a given zone.

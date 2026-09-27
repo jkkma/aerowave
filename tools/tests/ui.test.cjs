@@ -376,6 +376,30 @@ test("a failed older save cannot reload over a newer settings edit", async () =>
   assert.equal(h.calls.some(c => c.command === "get_state"), false);
 });
 
+test("a delayed settings readback cannot erase a newer saved station", async () => {
+  const oldRead = deferred();
+  const h = createHarness({ invoke: command => {
+    if (command === "save_settings") throw new Error("disk unavailable");
+    if (command === "get_state") return oldRead.promise;
+  } });
+  h.context.oldState = {
+    stations: [{ id: "saved", name: "Saved", url: "https://radio.test/saved" }],
+    alarms: [], settings: { volume: 0.8 },
+  };
+  h.evaluate("state=JSON.parse(JSON.stringify(oldState)); state.settings.volume=0.3; saveSettings()");
+  await h.fireTimer(h.evaluate("settingsSaveTimer"));
+  await flush();
+  h.context.added = { id: "new", name: "New", url: "https://radio.test/new" };
+  await h.evaluate("saveStations({ patch: { id: 'new', changes: added, create: true } })");
+  assert.equal(h.evaluate("state.stations.map(station => station.id).join(',')"), "saved,new");
+  oldRead.resolve(h.context.oldState);
+  await flush();
+  assert.equal(h.evaluate("state.stations.map(station => station.id).join(',')"), "saved,new");
+  await h.evaluate("saveStations()");
+  const saved = h.calls.filter(({ command }) => command === "save_stations").at(-1).args.stations;
+  assert.equal(saved.map(station => station.id).join(","), "saved,new");
+});
+
 test("a failed close waits for settings readback before it is cancelled", async () => {
   const readback = deferred();
   const h = createHarness({ invoke: command => {

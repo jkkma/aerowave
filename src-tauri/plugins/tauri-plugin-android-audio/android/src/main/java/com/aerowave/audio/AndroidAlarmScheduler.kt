@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
+import android.provider.Settings
 
 internal object AndroidAlarmScheduler {
   const val ACTION_FIRE = "com.aerowave.audio.action.FIRE_ALARM"
@@ -28,22 +29,29 @@ internal object AndroidAlarmScheduler {
     if (!before.initialized && before.error != null) return before
     cancelKnown(context, before)
     val now = System.currentTimeMillis()
+    val nowElapsed = SystemClock.elapsedRealtime()
+    val bootCount = currentBootCount(context)
     val exact = canScheduleExact(context)
     val activeOccurrenceId = AlarmPlaybackService.activeOccurrenceId()
     val changed = AlarmStateStore.update(context) { old ->
       val ringDecision = AlarmStateTransitions.ringDuringRebuild(old, now, activeOccurrenceId)
-      val scheduled = old.alarms.asSequence()
+      val retainedSnoozes = AlarmStateTransitions.rebuildSnoozes(
+        old.alarms, old.snoozes, now, nowElapsed, bootCount,
+      )
+      val alarms = AlarmStateTransitions.consumeExpiredDeferredOneShots(
+        old.alarms, old.snoozes, retainedSnoozes,
+      )
+      val scheduled = alarms.asSequence()
         .filter { it.enabled }
         .mapNotNull { alarm ->
           AlarmStateTransitions.nextScheduled(alarm, old.scheduled[alarm.id], now)
             ?.let { alarm.id to it }
         }.toMap()
-      val snoozes = old.snoozes.filter { (id, occurrence) ->
-        old.alarms.any { it.id == id } &&
-          (occurrence.atMs > now || AlarmSchedule.isDeliverable(occurrence.atMs, now))
-      } + listOfNotNull(ringDecision.recoveredSnooze).associateBy { it.alarmId }
+      val snoozes = retainedSnoozes +
+        listOfNotNull(ringDecision.recoveredSnooze).associateBy { it.alarmId }
       old.copy(
         revision = old.revision + 1,
+        alarms = alarms,
         scheduled = scheduled,
         snoozes = snoozes,
         ringing = ringDecision.ringing,
@@ -62,30 +70,47 @@ internal object AndroidAlarmScheduler {
     snoozed: Boolean,
   ): RingingRecord? {
     val now = System.currentTimeMillis()
+    val nowElapsed = SystemClock.elapsedRealtime()
+    val bootCount = currentBootCount(context)
     var claimed: RingingRecord? = null
     val changed = AlarmStateStore.update(context) { old ->
-      val expected = (if (snoozed) old.snoozes else old.scheduled)[alarmId]
+      val stored = (if (snoozed) old.snoozes else old.scheduled)[alarmId]
       val alarm = old.alarms.find { it.id == alarmId }
-      if (expected == null || alarm == null || expected.occurrenceId != occurrenceId ||
-        expected.atMs != expectedAt || (!snoozed && !alarm.enabled)) {
+      if (stored == null || alarm == null || stored.occurrenceId != occurrenceId ||
+        stored.atMs != expectedAt ||
+        ((!snoozed || stored.deferredFromScheduled) && !alarm.enabled)) {
         return@update old
+      }
+      val expected = if (snoozed) AlarmStateTransitions.reprojectSnooze(
+        stored, now, nowElapsed, bootCount,
+      ) else stored
+      // An RTC AlarmClock can arrive early after the wall clock jumps forward,
+      // before TIME_SET has rebuilt it. Keep the elapsed deadline and rearm it.
+      if (snoozed && expected.atMs > now) {
+        return@update if (expected == stored) old else old.copy(
+          revision = old.revision + 1,
+          snoozes = old.snoozes + (alarmId to expected),
+        )
       }
       if (!snoozed && AlarmStateTransitions.isSkipped(alarm, expectedAt)) {
         return@update AlarmStateTransitions.expire(old, alarm, expected, now)
       }
-      if (!AlarmSchedule.isDeliverable(expectedAt, now)) {
+      if (!AlarmSchedule.isDeliverable(expected.atMs, now)) {
         return@update AlarmStateTransitions.expire(old, alarm, expected, now)
       }
       // If two alarm clocks share a minute, keep the second durable instead
       // of replacing the notification/actions of the one already ringing.
       if (old.ringing != null) {
-        return@update AlarmStateTransitions.deferBehindActive(old, expected, now)
+        return@update AlarmStateTransitions.deferBehindActive(
+          old, expected, now, nowElapsed, bootCount,
+        )
       }
-      val disabled = if (!snoozed && alarm.days.isEmpty()) alarm.copy(enabled = false) else alarm
+      val disabled = AlarmStateTransitions.claimedAlarm(alarm, expected)
       val ring = RingingRecord(
         alarm = disabled,
         occurrenceId = occurrenceId,
-        trigger = if (snoozed) "snooze" else "scheduled",
+        trigger = if (snoozed && !AlarmStateTransitions.isDeferredScheduled(expected))
+          "snooze" else "scheduled",
         startedAtMs = now,
         startedElapsedMs = SystemClock.elapsedRealtime(),
         autoSnoozesUsed = expected.autoSnoozesUsed,
@@ -125,7 +150,9 @@ internal object AndroidAlarmScheduler {
     autoSnoozesUsed: Int = ring.autoSnoozesUsed,
   ): PersistedAlarmState {
     if (ring.trigger == "test") return dismiss(context, ring.occurrenceId)
-    val at = System.currentTimeMillis() + ring.alarm.snoozeMins.coerceAtLeast(1) * 60_000L
+    val delayMs = ring.alarm.snoozeMins.coerceAtLeast(1) * 60_000L
+    val at = System.currentTimeMillis() + delayMs
+    val bootCount = currentBootCount(context)
     val occurrence = ScheduledOccurrence(
       ring.alarm.id, AlarmSchedule.occurrenceId(ring.alarm.id, at, true), at, true,
       autoSnoozesUsed,
@@ -135,6 +162,8 @@ internal object AndroidAlarmScheduler {
       ring.sourceKind,
       ring.note,
       ring.sourceIsHls,
+      elapsedDeadlineMs = bootCount?.let { SystemClock.elapsedRealtime() + delayMs },
+      bootCount = bootCount,
     )
     val changed = AlarmStateStore.update(context) { old ->
       AlarmStateTransitions.snooze(old, ring, occurrence, canScheduleExact(context))
@@ -168,6 +197,11 @@ internal object AndroidAlarmScheduler {
   private fun schedulePersisted(context: Context, state: PersistedAlarmState) {
     (state.scheduled.values + state.snoozes.values).forEach { schedule(context, it) }
   }
+
+  private fun currentBootCount(context: Context): Int? = runCatching {
+    Settings.Global.getInt(context.contentResolver, Settings.Global.BOOT_COUNT, -1)
+      .takeIf { it >= 0 }
+  }.getOrNull()
 
   private fun cancelKnown(context: Context, state: PersistedAlarmState) {
     (state.scheduled.keys + state.snoozes.keys + state.alarms.map { it.id }).toSet().forEach {

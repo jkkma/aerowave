@@ -192,6 +192,80 @@ test("a reloaded WebView respects the native auto-snooze tally", async () => {
   assert.equal(reloadedPage.calls.filter(({ command }) => command === "dismiss_alarm").length, 1);
 });
 
+test("a restored desktop ring uses the native remaining give-up time", async () => {
+  const h = harness();
+  await ring(h, { occurrenceId: "41", autoStopRemainingMs: 16000 });
+  assert.equal(h.timers.get(h.evaluate("autoStopTimer"))?.ms, 16000);
+});
+
+test("a reload during give-up uses only the remaining fade", async () => {
+  const h = harness();
+  await ring(h, { occurrenceId: "42", autoStopRemainingMs: -3000 });
+  assert.equal(h.timers.get(h.evaluate("autoStopTimer"))?.ms, 0);
+  await h.fireTimer(h.evaluate("autoStopTimer"));
+  assert.equal(h.evaluate("givingUp"), true);
+  assert.equal(h.timers.get(h.evaluate("autoStopTimer"))?.ms, 3000);
+  await h.fireTimer(h.evaluate("autoStopTimer"));
+  await flush();
+  assert.equal(h.evaluate("ringing"), null);
+  assert.equal(h.calls.filter(({ command }) => command === "dismiss_alarm").length, 1);
+});
+
+test("a reload after the give-up fade completes the old occurrence immediately", async () => {
+  const h = harness();
+  await ring(h, { occurrenceId: "43", autoStopRemainingMs: -7000 });
+  assert.equal(h.timers.get(h.evaluate("autoStopTimer"))?.ms, 0);
+  await h.fireTimer(h.evaluate("autoStopTimer"));
+  await flush();
+  assert.equal(h.evaluate("ringing"), null);
+  assert.equal(h.calls.filter(({ command }) => command === "dismiss_alarm").length, 1);
+});
+
+test("desktop media keys cannot stop or replace an active alarm", async () => {
+  const actions = new Map();
+  const h = harness({ navigator: { mediaSession: {
+    setActionHandler: (action, handler) => actions.set(action, handler),
+  } } });
+  h.evaluate("wireMediaKeys()");
+  await ring(h, { autoStopMins: 0 });
+  const ringNow = h.evaluate("ringing");
+  const source = h.evaluate("player.source");
+  for (const action of ["stop", "nexttrack", "previoustrack", "play", "pause"]) {
+    actions.get(action)();
+    await flush();
+    assert.equal(h.evaluate("ringing"), ringNow, action);
+    assert.equal(h.evaluate("player.source"), source, action);
+    assert.equal(h.audios[0].paused, false, action);
+  }
+});
+
+test("desktop ringing contains Tab focus and restores the previous control", async () => {
+  const h = harness();
+  const header = h.el("#header");
+  const footer = h.el("#footer");
+  h.queries.set("header", [header]);
+  h.queries.set("footer", [footer]);
+  h.evaluate("wire()");
+  const previous = h.el("#btn-min");
+  previous.focus();
+  await ring(h, { autoStopMins: 0 });
+  assert.equal(header.inert, true);
+  assert.equal(h.el("#app-content").inert, true);
+  assert.equal(footer.inert, true);
+  assert.equal(h.document.activeElement, h.el("#ring-dismiss"));
+  let tab = await h.document.dispatch("keydown", { key: "Tab" });
+  assert.equal(tab.defaultPrevented, true);
+  assert.equal(h.document.activeElement, h.el("#ring-snooze"));
+  tab = await h.document.dispatch("keydown", { key: "Tab", shiftKey: true });
+  assert.equal(tab.defaultPrevented, true);
+  assert.equal(h.document.activeElement, h.el("#ring-dismiss"));
+  await h.evaluate("dismissRing()");
+  assert.equal(header.inert, false);
+  assert.equal(h.el("#app-content").inert, false);
+  assert.equal(footer.inert, false);
+  assert.equal(h.document.activeElement, previous);
+});
+
 test("overlapping alarms restore the original listening source when the last one gives up", async () => {
   const h = harness();
   await playMusic(h);
