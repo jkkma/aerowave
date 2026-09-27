@@ -52,6 +52,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   private var sourceIsHls = false
   private var sourceFailure: String? = null
   private val sourceProgress = AlarmPlaybackProgress(SystemClock::elapsedRealtime)
+  private val fadeProgress = AlarmFadeProgress(SystemClock::elapsedRealtime)
   private var focusPaused = false
   private var focusGranted = false
   private var focusError: String? = null
@@ -73,17 +74,22 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
 
   private val fadeTick = object : Runnable {
     override fun run() {
-      val current = ring ?: return
-      val fadeMs = current.alarm.fadeSecs * 1000L
-      val multiplier = if (fadeMs <= 0) 1f else
-        ((SystemClock.elapsedRealtime() - current.startedElapsedMs).toFloat() / fadeMs).coerceIn(0.02f, 1f)
-      val volume = (desiredVolume * multiplier * focusMultiplier).coerceIn(0f, 1f)
+      if (ring == null) return
+      if (systemTone != null && sourceKind == "tone") {
+        fadeProgress.sampleTone(
+          runCatching { systemTone?.isPlaying() }.getOrDefault(false) == true,
+          focusPaused,
+        )
+      } else {
+        fadeProgress.samplePlayer(player.currentPosition, player.isPlaying, focusPaused)
+      }
+      val volume = currentOutputVolume()
       player.volume = volume
       if (!setSystemToneVolume(volume)) {
         failSystemTone("${sourceFailure ?: "The alarm source is unavailable"}; the system alarm sound could not play")
         return
       }
-      if (multiplier < 1f) handler.postDelayed(this, FADE_TICK_MS)
+      if (!fadeProgress.isComplete()) handler.postDelayed(this, FADE_TICK_MS)
     }
   }
   private val toneWatchdog = object : Runnable {
@@ -202,6 +208,8 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     currentUri = current.sourceUri
     sourceFailure = current.note
     desiredVolume = current.alarm.volume
+    fadeProgress.start(current.alarm.fadeSecs)
+    player.volume = currentOutputVolume()
     startForeground(NOTIFICATION_ID, notification(current))
     PlaybackService.interruptForAlarm(current.occurrenceId)
     val holdMs = if (current.alarm.autoStopMins > 0) {
@@ -306,6 +314,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   }
 
   private fun playTone(reason: String) {
+    fadeProgress.sourceChanged()
     val uris = listOfNotNull(
       RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM),
       RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
@@ -360,12 +369,8 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   }
 
   private fun currentOutputVolume(): Float {
-    val current = ring ?: return 0f
-    val fadeMs = current.alarm.fadeSecs * 1000L
-    val multiplier = if (fadeMs <= 0) 1f else
-      ((SystemClock.elapsedRealtime() - current.startedElapsedMs).toFloat() / fadeMs)
-        .coerceIn(0.02f, 1f)
-    return (desiredVolume * multiplier * focusMultiplier).coerceIn(0f, 1f)
+    if (ring == null) return 0f
+    return (desiredVolume * fadeProgress.multiplier() * focusMultiplier).coerceIn(0f, 1f)
   }
 
   private fun setSystemToneVolume(volume: Float): Boolean {
@@ -389,6 +394,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   }
 
   private fun failSystemTone(reason: String) {
+    fadeProgress.sourceChanged()
     stopSystemTone()
     currentUri = null
     activeFolder = null
@@ -413,11 +419,13 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     isHls: Boolean = uri.substringBefore('?').endsWith(".m3u8", true),
   ) {
     stopSystemTone()
+    fadeProgress.sourceChanged()
     activeFolder = folder
     currentUri = uri
     sourceKind = kind
     sourceIsHls = isHls
     sourceFailure = note
+    player.volume = currentOutputVolume()
     player.repeatMode = if (kind == "folder" || kind == "tone") Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
     sourceProgress.start(focusPaused)
     handler.removeCallbacks(progressWatchdog)
@@ -517,6 +525,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
 
   private fun handleSourceFailure(reason: String) {
     handler.removeCallbacks(progressWatchdog)
+    fadeProgress.pause()
     player.stop()
     when (sourceKind) {
       "tone" -> updateRingingSource("tone", "System alarm", reason)
@@ -685,6 +694,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
         AudioManager.AUDIOFOCUS_LOSS,
         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
           focusPaused = true
+          fadeProgress.pause()
           if (systemTone != null && sourceKind == "tone") {
             handler.removeCallbacks(toneWatchdog)
             runCatching { systemTone?.stop() }

@@ -30,8 +30,10 @@ class AlarmToneFallbackTest {
     var stopCalls = 0
     var playing = false
     val volumes = mutableListOf<Float>()
+    var volumeAtFirstPlay: Float? = null
 
     override fun play() {
+      if (playCalls == 0) volumeAtFirstPlay = volumes.lastOrNull()
       playCalls++
       if (throwsOnPlay) throw IllegalStateException("tone unavailable")
       playing = !neverReportsPlaying
@@ -51,6 +53,7 @@ class AlarmToneFallbackTest {
 
   private fun ring(
     sourceKind: String = "tone", sourceUri: String? = null, fadeSecs: Int = 0,
+    startedAgoMs: Long = 0,
   ) = RingingRecord(
     alarm = NativeAlarm(
       id = "wake", label = "Wake", hour = 7, minute = 0,
@@ -60,7 +63,8 @@ class AlarmToneFallbackTest {
       autoStopMins = 0, autoSnoozes = 0,
     ),
     occurrenceId = "scheduled:tone", trigger = "scheduled",
-    startedAtMs = System.currentTimeMillis(), startedElapsedMs = SystemClock.elapsedRealtime(),
+    startedAtMs = System.currentTimeMillis(),
+    startedElapsedMs = SystemClock.elapsedRealtime() - startedAgoMs,
     sourceKind = sourceKind, sourceUri = sourceUri,
   )
 
@@ -146,6 +150,16 @@ class AlarmToneFallbackTest {
     assertTrue(tone.volumes.last() in 0.25f..0.35f)
     assertEquals(mediaVolume, context.getSystemService(AudioManager::class.java)
       .getStreamVolume(AudioManager.STREAM_MUSIC))
+    controller.destroy()
+  }
+
+  @Test fun delayedFallbackStartsQuietlyDespiteOldRingClock() {
+    val context = RuntimeEnvironment.getApplication()
+    val tone = FakeTone()
+    val (controller, _) = start(context, ring(fadeSecs = 20, startedAgoMs = 15_000)) { _, _ -> tone }
+    assertEquals(0.012f, tone.volumeAtFirstPlay ?: 1f, 0.001f)
+    Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(5))
+    assertEquals(0.15f, tone.volumes.last(), 0.015f)
     controller.destroy()
   }
 
