@@ -293,6 +293,63 @@ and signing checks also passed.
 This session did not qualify a credential-protected lock screen, a cold process
 start, physical volume-button presses, audibility, or overnight delivery.
 
+## Shake detection correction — 2026-09-27
+
+A later scheduled-alarm check on the same POCO reproduced missed shake-to-snooze.
+The service had registered its sensor, and a partial sensor diagnostic captured
+strong movement. Replaying those samples through the original detector never
+cleared its peak latch because the movement did not settle below the reset
+threshold between strokes. The earlier synthetic tests had inserted quiet
+samples between every reversal and had missed this failure.
+
+The replacement follows LineageOS DeskClock's raw-accelerometer gravity filter
+and short motion-strength window, preserving its six-sample accumulation and
+seventh-event threshold check. A replay of the recorded linear-acceleration
+data crosses the new motion threshold in every window alignment. That capture
+does not contain raw accelerometer readings, so it cannot qualify the new
+gravity filter or physical snooze behavior by itself.
+
+The full Android JVM suite passed 110 tests. Synthetic regressions cover
+continuous motion across axes without quiet valleys, reference sensitivity,
+resting gravity, a moderate jolt, and one durable snooze followed by listener
+removal. Test rings remain excluded from shake sensing.
+
+A signed ARM64 development build based on 0.14.0 installed over the existing
+phone app and opened successfully. The installed APK hash matched the retained
+build:
+`6B224F0390A4A4432DBF6DDE703BD00934305AB0E716626729E1430BF5B90BF5`.
+Packaged DEX startup checks, signing verification, and the bundled LineageOS
+attribution and Apache 2.0 licence check passed.
+
+That build's scheduled phone check exposed a separate fallback failure. The
+station connection failed with an AAC-header parsing error, then the phone's
+content provider refused Media3's direct read of the default ringtone and
+required Android's `Ringtone` player. The native alarm screen remained visible
+with the playback error. Its two-minute automatic stop scheduled a snooze;
+that pending test occurrence was cancelled before further work.
+
+The tone correction uses `Ringtone` on Android 9 and later, including volume,
+fade, audio-focus changes, liveness checks and cleanup. Fresh alarm records still
+resolve their configured station or folder; a saved tone URI resumes through
+the ringtone path. Android 8 keeps its existing Media3 path. All 117 Android JVM
+tests passed, including the fresh-source and restored-tone cases.
+
+The corrected signed ARM64 build installed successfully, and its on-phone APK
+hash matched the retained artifact:
+`41CF24A3B0CB5996ABB75A3D57C8CD38A70A8479B2CFC8AD14DB4EEB0B7DA49F`.
+
+A controlled scheduled alarm then woke the display from dozing, showed the
+native Dismiss and Snooze controls, registered the raw accelerometer at 50 Hz,
+and started Android's ringtone player with media audio attributes. The earlier
+system-tone error did not recur. The alarm reached its two-minute automatic
+stop, which stopped the service and removed its sensor listener. No snooze was
+observed, and the tester has not confirmed audible output or a physical shake
+during this check, so those behaviors remain unqualified.
+
+The temporary test alarm was removed by restoring the fresh pre-test backup.
+A new export matched the entire original settings, stations and alarms data
+exactly, and no Aerowave RTC alarm remained pending.
+
 ## Qualification still open
 
 The Android scope is not complete or release-qualified. The remaining gates

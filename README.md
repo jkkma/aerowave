@@ -655,6 +655,10 @@ MIT — see [LICENSE](LICENSE).
 Three.js is bundled in `src/vendor/` under its own MIT licence, kept alongside
 it in `src/vendor/THREE-LICENSE.txt`.
 
+The Android shake detector adapts LineageOS DeskClock code under Apache 2.0.
+Its [attribution and licence](src-tauri/plugins/tauri-plugin-android-audio/android/src/main/assets/licenses/lineageos-deskclock.txt)
+are also included in the APK.
+
 The seeded stations are other people's broadcasts: the URLs are here, the audio
 is theirs, and each broadcaster sets its own terms for listening and
 redistribution.
