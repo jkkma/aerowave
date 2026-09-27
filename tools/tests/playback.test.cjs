@@ -48,6 +48,74 @@ test("sustained decoded progress restores the reconnect budget", async () => {
   assert.equal(h.evaluate("player.retries"), 1);
 });
 
+test("a recovered relay load starts metadata polling after its initial play failed", async () => {
+  let plays = 0;
+  const h = createHarness({
+    onPlay: () => { if (++plays === 1) throw new Error("temporary decoder failure"); },
+    invoke: (command, args) => command === "probe_stream" && args.wantTitle
+      ? { url: args.url, hls: false, title: "Recovered song" } : undefined,
+  });
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Live' })");
+  await h.fireTimer(h.evaluate("player.retryTimer"));
+  await flush();
+  assert.equal(plays, 2);
+  assert.equal(h.evaluate("!!player.metaTimer"), true);
+  assert.equal(h.calls.filter(({ command, args }) => command === "probe_stream" && args.wantTitle).length, 1);
+  assert.equal(h.el("#np-track").textContent, "Recovered song");
+});
+
+test("a direct fallback starts metadata polling after the relayed load failed", async () => {
+  const firstPlay = deferred();
+  let plays = 0;
+  const h = createHarness({
+    onPlay: () => ++plays === 1 ? firstPlay.promise : undefined,
+    invoke: (command, args) => command === "probe_stream" && args.wantTitle
+      ? { url: args.url, hls: false, title: "Recovered song" } : undefined,
+  });
+  const first = h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Live' })");
+  await flush();
+  h.audios[0].error = { code: 4 };
+  await h.audios[0].dispatch("error");
+  firstPlay.reject(Object.assign(new Error("interrupted by a new load request"), { name: "AbortError" }));
+  await first;
+  await flush();
+  assert.equal(plays, 2);
+  assert.equal(h.audios[0].src, "https://radio.test/live");
+  assert.equal(h.evaluate("!!player.metaTimer"), true);
+  assert.equal(h.calls.filter(({ command, args }) => command === "probe_stream" && args.wantTitle).length, 1);
+  assert.equal(h.el("#np-track").textContent, "Recovered song");
+});
+
+test("a direct fallback resumes polling after a relay title and ignores late relay titles", async () => {
+  const h = createHarness({ invoke: (command, args) => command === "probe_stream" && args.wantTitle
+    ? { url: args.url, hls: false, title: "Direct song" } : undefined });
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Live' })");
+  h.evaluate("onStreamTitle({ url: 'https://radio.test/live', title: 'Relay song' })");
+  assert.equal(h.evaluate("player.metaTimer"), null);
+  h.audios[0].error = { code: 4 };
+  await h.audios[0].dispatch("error");
+  await flush();
+  assert.equal(h.audios[0].src, "https://radio.test/live");
+  assert.equal(h.calls.filter(({ command, args }) => command === "probe_stream" && args.wantTitle).length, 1);
+  assert.equal(h.el("#np-track").textContent, "Direct song");
+  h.evaluate("onStreamTitle({ url: 'https://radio.test/live', title: 'Late relay song' })");
+  assert.equal(h.el("#np-track").textContent, "Direct song");
+});
+
+test("a direct fallback does not restart polling after three titleless polls", async () => {
+  const h = createHarness();
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Live' })");
+  const pollTimer = h.evaluate("player.metaTimer");
+  for (let i = 0; i < 3; i++) await h.fireTimer(pollTimer);
+  assert.equal(h.evaluate("player.metaTimer"), null);
+  h.audios[0].error = { code: 4 };
+  await h.audios[0].dispatch("error");
+  await flush();
+  assert.equal(h.audios[0].src, "https://radio.test/live");
+  assert.equal(h.evaluate("player.metaTimer"), null);
+  assert.equal(h.calls.filter(({ command, args }) => command === "probe_stream" && args.wantTitle).length, 3);
+});
+
 for (const routed of [null, "http://127.0.0.1:1234/f/private-token"]) {
   test(`local files use ${routed ? "the scoped media route" : "the platform asset URL"}`, async () => {
     const h = createHarness({ invoke: (command) => command === "local_file_url" ? routed : undefined });

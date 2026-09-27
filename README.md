@@ -19,7 +19,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   actions and stream-test feedback visible while the fields scroll.
 - Manual station additions, edits, favourites and deletions become visible only
   after saving succeeds. A failed editor save keeps the draft for retry, and
-  quitting waits for pending station writes.
+  quitting waits for pending station writes. Close, Quit, export and restore
+  require retrying or cancelling a failed draft. A delayed settings refresh
+  preserves station changes saved while it was waiting.
 - **Recent** keeps the last 20 stations that actually started playing, newest
   first, including stations tried in Browse. Unsaved discoveries can be saved
   from that list. History survives restarting the app and travels with backups.
@@ -162,6 +164,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   for them to arrive through, so starting from cold is the play button's job.
   Claiming them globally would mean taking them off every other player on the
   machine.
+  While an alarm rings, media actions cannot stop, pause or replace its sound;
+  use the alarm's Dismiss or Snooze controls.
 - **Pause and stop are different operations, and the difference is what makes
   the play key work.** Stopping takes the source off the element, which ends
   the media session — and a session that has ended cannot be reached by the
@@ -361,6 +365,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   does not grant extra rounds. A manual Dismiss or Snooze that arrives while
   an automatic completion is pending takes precedence for that occurrence;
   a delayed request cannot change a newer occurrence of the same alarm.
+  The desktop scheduler also retains the original give-up deadline. Reloading
+  resumes the remaining time, including a fade that has already started.
 - So does the track a folder alarm rings on: it is drawn once, when the alarm
   first goes off, and every snooze after it comes back to that same file. A
   snooze is the same alarm returning, and waking to a different song each time
@@ -375,6 +381,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - Due snoozes wait their turn while another alarm rings. Turning an alarm off
   cancels its pending snooze; a test ring can be dismissed but cannot schedule
   a real snooze.
+  Windows snooze durations use elapsed time, so a wall-clock correction cannot
+  make them ring early, extend them or discard them. Displayed times and wake
+  requests follow the remaining duration.
 - No repeat days set means "once, at the next occurrence", and the alarm disables
   itself afterwards.
 - Fade-in ramps the volume over up to 90 s.
@@ -432,6 +441,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   PC sleep, shutdown and wake actions are available on Windows; Linux retains
   the audio sleep timer and reports that PC power controls are unavailable.
 - Ringing raises the window over whatever else is on screen.
+  Keyboard focus stays in its Dismiss and Snooze controls until the ring ends,
+  then returns to the previous control.
 
 ## Installing it
 
@@ -450,6 +461,11 @@ then Android's alarm sound when necessary. Desktop alarm behavior above is
 unchanged. See the [Android build and testing guide](docs/android.md) for device
 evidence and limitations, and [Android releases](docs/android-release.md) for
 protected signing keys and optimized APKs.
+
+Android snoozes keep their remaining duration when the clock is corrected.
+After a reboot, their saved clock time provides recovery. A one-time alarm
+deferred behind another ring is consumed when it rings or expires, so it does
+not rearm for tomorrow.
 
 If Android settings cannot be read, Settings shows the storage error and startup
 keeps the native alarm store's existing source information. Recover the settings

@@ -321,3 +321,19 @@ start this app's radio engine. Qualifying S0 requires an actual compatible test
 machine, no injected user input, and separate AC/battery and audible-playback
 evidence. The S3-only development PC cannot establish those results. Keep the
 warning until that evidence exists.
+
+A 2026-09-27 check of the packaged 0.13.5 Windows release used fresh portable
+profiles on an awake Windows 11 laptop. Radio Paradise played through the
+loopback relay at `readyState` 4, with its media clock advancing 3.021 seconds
+over a three-second observation. Invoking the registered Stop, Next and Previous
+media handlers through WebView instrumentation left a decoded TEST alarm running.
+Native Tab and Shift+Tab kept the visible focus on Dismiss, the only enabled
+control for TEST; Enter dismissed the ring and restored the main interface.
+
+For a one-minute automatic stop, reloading after about 35 seconds preserved the
+remaining deadline: 24.454 seconds before reload and 24.063 seconds afterward.
+By 78 seconds from the original start, the ring and pending alarm were cleared,
+audio was paused, and the background was interactive again. Both test processes
+exited normally, and the installed portable and AppData profile checksums were
+unchanged. These checks cover awake decoding, native dismissal and reload
+recovery; they do not establish physical speaker output or sleep/wake behavior.

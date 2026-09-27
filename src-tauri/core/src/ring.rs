@@ -12,6 +12,13 @@
 
 use std::collections::HashMap;
 
+/// Keep a ring's original stop deadline across WebView reloads. A negative
+/// remainder tells the page how much of the final fade has already elapsed.
+pub fn deadline_remaining_ms(deadline_ms: u64, now_ms: u64) -> i64 {
+    (i128::from(deadline_ms) - i128::from(now_ms))
+        .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
 /// The trigger string that means "this alarm is coming back", as opposed to
 /// arriving fresh. Kept next to the rule that reads it.
 const SNOOZE: &str = "snooze";
@@ -152,6 +159,13 @@ mod tests {
     use super::*;
 
     const F: &str = "C:/Music/wake";
+
+    #[test]
+    fn reloaded_ring_keeps_its_original_stop_and_fade_deadline() {
+        assert_eq!(deadline_remaining_ms(60_000, 44_000), 16_000);
+        assert_eq!(deadline_remaining_ms(60_000, 63_000), -3_000);
+        assert_eq!(deadline_remaining_ms(60_000, 67_000), -7_000);
+    }
 
     #[test]
     fn manual_choice_overrides_only_the_same_automatic_occurrence() {

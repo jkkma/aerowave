@@ -38,6 +38,9 @@ internal data class ScheduledOccurrence(
   val heldKind: String? = null,
   val heldNote: String? = null,
   val heldIsHls: Boolean = false,
+  val elapsedDeadlineMs: Long? = null,
+  val bootCount: Int? = null,
+  val deferredFromScheduled: Boolean = false,
 )
 
 internal data class RingingRecord(
@@ -135,6 +138,8 @@ internal fun ScheduledOccurrence.toJson(): JSONObject = JSONObject()
   .put("heldUri", heldUri).put("heldTitle", heldTitle).put("heldFolder", heldFolder)
   .put("heldKind", heldKind).put("heldNote", heldNote)
   .put("heldIsHls", heldIsHls)
+  .put("elapsedDeadlineMs", elapsedDeadlineMs).put("bootCount", bootCount)
+  .put("deferredFromScheduled", deferredFromScheduled)
 
 internal fun occurrenceFromJson(value: JSONObject) = ScheduledOccurrence(
   value.getString("alarmId"), value.getString("occurrenceId"),
@@ -146,6 +151,9 @@ internal fun occurrenceFromJson(value: JSONObject) = ScheduledOccurrence(
   value.optNullableString("heldKind"),
   value.optNullableString("heldNote"),
   value.optBoolean("heldIsHls", false),
+  value.optLong("elapsedDeadlineMs", -1).takeIf { it >= 0 },
+  value.optInt("bootCount", -1).takeIf { it >= 0 },
+  value.optBoolean("deferredFromScheduled", false),
 )
 
 internal fun RingingRecord.toJson(): JSONObject = JSONObject()

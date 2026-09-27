@@ -122,6 +122,67 @@ internal object AlarmStateTransitions {
     }
   }
 
+  /** Keep an in-boot snooze on elapsed time while AlarmClock uses an RTC timestamp. */
+  fun reprojectSnooze(
+    occurrence: ScheduledOccurrence,
+    nowMs: Long,
+    nowElapsedMs: Long,
+    bootCount: Int?,
+  ): ScheduledOccurrence {
+    if (!occurrence.snoozed) return occurrence
+    if (bootCount != null && occurrence.bootCount == bootCount &&
+      occurrence.elapsedDeadlineMs != null
+    ) {
+      return occurrence.copy(atMs = nowMs + occurrence.elapsedDeadlineMs - nowElapsedMs)
+    }
+    // A reboot resets elapsedRealtime. Recover from the durable wall deadline,
+    // then anchor the remaining interval to this boot. Old records take this path too.
+    val remaining = occurrence.atMs - nowMs
+    return if (bootCount != null && remaining > 0) occurrence.copy(
+      elapsedDeadlineMs = nowElapsedMs + remaining,
+      bootCount = bootCount,
+    ) else occurrence.copy(elapsedDeadlineMs = null, bootCount = null)
+  }
+
+  fun rebuildSnoozes(
+    alarms: List<NativeAlarm>,
+    snoozes: Map<String, ScheduledOccurrence>,
+    nowMs: Long,
+    nowElapsedMs: Long,
+    bootCount: Int?,
+  ): Map<String, ScheduledOccurrence> {
+    val alarmIds = alarms.mapTo(mutableSetOf()) { it.id }
+    return buildMap {
+      snoozes.forEach { (id, occurrence) ->
+        if (id !in alarmIds) return@forEach
+        val projected = reprojectSnooze(occurrence, nowMs, nowElapsedMs, bootCount)
+        if (projected.atMs > nowMs || AlarmSchedule.isDeliverable(projected.atMs, nowMs)) {
+          put(id, projected)
+        }
+      }
+    }
+  }
+
+  fun consumeExpiredDeferredOneShots(
+    alarms: List<NativeAlarm>,
+    before: Map<String, ScheduledOccurrence>,
+    kept: Map<String, ScheduledOccurrence>,
+  ): List<NativeAlarm> {
+    val expired = before.filter { (id, occurrence) ->
+      occurrence.deferredFromScheduled && id !in kept
+    }.keys
+    return alarms.map { alarm ->
+      if (alarm.id in expired && alarm.days.isEmpty()) alarm.copy(enabled = false) else alarm
+    }
+  }
+
+  fun isDeferredScheduled(occurrence: ScheduledOccurrence): Boolean =
+    !occurrence.snoozed || occurrence.deferredFromScheduled
+
+  fun claimedAlarm(alarm: NativeAlarm, occurrence: ScheduledOccurrence): NativeAlarm =
+    if (alarm.days.isEmpty() && isDeferredScheduled(occurrence))
+      alarm.copy(enabled = false) else alarm
+
   fun recoverableRing(state: PersistedAlarmState, nowMs: Long): RingingRecord? =
     state.ringing?.takeIf {
       it.trigger != "test" && state.alarms.any { alarm -> alarm.id == it.alarm.id } &&
@@ -162,6 +223,8 @@ internal object AlarmStateTransitions {
     state: PersistedAlarmState,
     expected: ScheduledOccurrence,
     nowMs: Long,
+    nowElapsedMs: Long? = null,
+    bootCount: Int? = null,
   ): PersistedAlarmState {
     val retryAt = maxOf(nowMs + 60_000L, expected.atMs + 60_000L)
     val retry = ScheduledOccurrence(
@@ -176,6 +239,10 @@ internal object AlarmStateTransitions {
       expected.heldKind,
       expected.heldNote,
       expected.heldIsHls,
+      elapsedDeadlineMs = if (nowElapsedMs != null && bootCount != null)
+        nowElapsedMs + retryAt - nowMs else null,
+      bootCount = bootCount,
+      deferredFromScheduled = expected.deferredFromScheduled || !expected.snoozed,
     )
     return state.copy(
       revision = state.revision + 1,
@@ -217,8 +284,12 @@ internal object AlarmStateTransitions {
         nextScheduled(alarm, null, nowMs, zone)?.let { scheduled[alarm.id] = it }
       }
     }
+    val consumed = claimedAlarm(alarm, expected)
     return state.copy(
       revision = state.revision + 1,
+      alarms = if (consumed != alarm) state.alarms.map {
+        if (it.id == alarm.id) consumed else it
+      } else state.alarms,
       scheduled = scheduled,
       snoozes = snoozes,
       error = "A stale alarm delivery was ignored",
