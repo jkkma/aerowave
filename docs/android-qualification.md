@@ -350,6 +350,53 @@ The temporary test alarm was removed by restoring the fresh pre-test backup.
 A new export matched the entire original settings, stations and alarms data
 exactly, and no Aerowave RTC alarm remained pending.
 
+## Caprice AAC startup, fallback and fade — 2026-09-27
+
+The same POCO X3 Pro reproduced a silent scheduled Radio Caprice Jazz Fusion
+alarm using the saved AAC+ 320 kbps endpoint, `http://79.111.119.111:9009/;`.
+Media3 selected an incorrect 8 kHz, six-channel AAC format, and the twelve-second
+playback-progress watchdog advanced to the system tone. No backup music folder
+was configured. Normal listening used the Rust relay, while a cold native alarm
+opened the station directly.
+
+A synthetic regression through Media3's real ADTS extractor reproduces that
+format error when a partial frame at connection startup contains a false header.
+The native extractor now aligns HTTP(S) `audio/aacp` input to four consistent
+ADTS frames before reading. It also realigns a reopened connection. Local files,
+other response types and the existing Opus handling keep their previous paths.
+
+The fade previously counted connection and buffering time from alarm delivery.
+It now sets the starting volume before playback and counts only advancing player
+position or an active system ringtone. Buffering and focus loss pause the fade;
+fallback preserves the portion already played. The automatic-stop clock remains
+anchored to alarm delivery.
+
+All 126 Android JVM tests passed. The signed ARM64 development build based on
+0.14.1 passed packaged startup and signing checks, installed over the existing
+app, and matched this SHA-256 when read back from the phone:
+`76D0330BF483AD0EC31FB3D40D26D2FA1E2E77CBCA2FA1D1D11564BE90072FAA`.
+
+At 16:19 local time (UTC−03), a scheduled alarm started a new app process with the
+screen dozing, woke the display and showed the native alarm controls. Caprice
+decoded at 44.1 kHz stereo. AudioTrack received volume 0.02 before starting at
+16:19:10.535 and reached 1.0 at 16:19:30.946. Later buffering stopped progress;
+after twelve seconds the alarm switched to a local MP3 at 16:19:59.402. The log
+does not establish the cause of that stream interruption.
+
+A downloaded [sample MP3](https://samplelib.com/sample-mp3.html) was placed in
+`Music/Aerowave-Alarm-Backup`, selected through Android's folder picker and kept
+as the configured backup. With networking disabled, another Caprice test used
+that track, began at volume 0.02 and completed its fade across a track loop.
+With networking disabled and that sample temporarily moved out of the folder,
+the alarm reported both source failures and started Android's local ringtone
+player. Networking and the sample were restored afterward.
+
+The final exported setup matched the pre-test setup exactly except for the
+requested backup folder. The original one-shot alarm was restored to 15:51 and
+off; no test ring or snooze remained pending. These checks establish renderer,
+volume-command and screen behavior. Audible fade perception, a credential-locked
+screen and overnight reliability remain unverified.
+
 ## Qualification still open
 
 The Android scope is not complete or release-qualified. The remaining gates

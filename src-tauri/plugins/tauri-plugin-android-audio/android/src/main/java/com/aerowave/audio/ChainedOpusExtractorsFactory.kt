@@ -18,6 +18,7 @@ import androidx.media3.extractor.ForwardingExtractorsFactory
 import androidx.media3.extractor.ForwardingTrackOutput
 import androidx.media3.extractor.TrackOutput
 import androidx.media3.extractor.ogg.OggExtractor
+import androidx.media3.extractor.ts.AdtsExtractor
 import java.io.ByteArrayOutputStream
 import java.io.EOFException
 
@@ -30,17 +31,32 @@ internal class ChainedOpusExtractorsFactory(
   delegate: ExtractorsFactory = DefaultExtractorsFactory(),
   private val onStreamMetadata: (OpusStreamMetadata) -> Unit = {},
 ) : ForwardingExtractorsFactory(delegate) {
-  override fun createExtractors(): Array<Extractor> = wrap(super.createExtractors())
+  override fun createExtractors(): Array<Extractor> = wrap(super.createExtractors(), alignLiveAac = false)
 
   override fun createExtractors(
     uri: Uri,
     responseHeaders: Map<String, List<String>>,
-  ): Array<Extractor> = wrap(super.createExtractors(uri, responseHeaders))
+  ): Array<Extractor> = wrap(
+    super.createExtractors(uri, responseHeaders),
+    alignLiveAac = isLiveAacp(uri, responseHeaders),
+  )
 
-  private fun wrap(extractors: Array<Extractor>): Array<Extractor> =
+  private fun wrap(extractors: Array<Extractor>, alignLiveAac: Boolean): Array<Extractor> =
     extractors.map {
-      if (it is OggExtractor) ChainedOpusExtractor(it, onStreamMetadata) else it
+      when {
+        it is OggExtractor -> ChainedOpusExtractor(it, onStreamMetadata)
+        alignLiveAac && it is AdtsExtractor -> AacStartAlignedExtractor(it)
+        else -> it
+      }
     }.toTypedArray()
+
+  private fun isLiveAacp(uri: Uri, responseHeaders: Map<String, List<String>>): Boolean =
+    (uri.scheme.equals("http", true) || uri.scheme.equals("https", true)) &&
+      responseHeaders.entries.any { (name, values) ->
+        name.equals("content-type", true) && values.any {
+          it.substringBefore(';').trim().equals("audio/aacp", true)
+        }
+      }
 }
 
 private class ChainedOpusExtractor(
