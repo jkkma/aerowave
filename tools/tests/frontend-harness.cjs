@@ -90,6 +90,9 @@ class Element {
     return null;
   }
   focus() { if (this.ownerDocument) this.ownerDocument.activeElement = this; }
+  blur() {
+    if (this.ownerDocument?.activeElement === this) this.ownerDocument.activeElement = this.ownerDocument.body;
+  }
   showModal() { this.open = true; }
   close() { this.open = false; }
   select() {}

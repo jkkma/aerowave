@@ -36,7 +36,7 @@
 
 <main id="app-content">
   <!-- ============================ left: the stage ====================== -->
-  <section class="stage panel bevel">
+  <section class="stage panel bevel" id="player-stage">
     <div class="corner tl"></div><div class="corner tr"></div>
     <div class="corner bl"></div><div class="corner br"></div>
 
@@ -105,11 +105,17 @@
     <div class="corner bl"></div><div class="corner br"></div>
 
     <nav class="tabs" role="tablist" aria-label="Main navigation">
-      <button class="tab on" id="tab-radio" data-pane="radio" role="tab" aria-selected="true" aria-controls="pane-radio">Stations</button>
-      <button class="tab" id="tab-browse" data-pane="browse" role="tab" aria-selected="false" aria-controls="pane-browse" tabindex="-1">Browse</button>
-      <button class="tab" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms" tabindex="-1">Alarms</button>
-      <button class="tab" id="tab-settings" data-pane="settings" role="tab" aria-selected="false" aria-controls="pane-settings" tabindex="-1">Settings</button>
+      <button class="android-only" id="tab-player" data-pane="player" role="tab" aria-selected="false" aria-controls="pane-player" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="m10 8 6 4-6 4z"/></svg><span>Player</span></button>
+      <button class="android-only" id="tab-library" data-pane="library" role="tab" aria-selected="false" aria-controls="pane-radio" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10h16v10H4zM8 10V6l8-3v7M8 15h8M16 15h2"/></svg><span>Stations</span></button>
+      <button class="tab on" id="tab-radio" data-pane="radio" role="tab" aria-selected="true" aria-controls="pane-radio"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10h16v10H4zM8 10V6l8-3v7M8 15h8M16 15h2"/></svg><span id="tab-radio-label">Stations</span></button>
+      <button class="tab" id="tab-browse" data-pane="browse" role="tab" aria-selected="false" aria-controls="pane-browse" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m15.5 15.5 5 5"/></svg><span>Browse</span></button>
+      <button class="tab" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 17h14l-2-3V9a5 5 0 0 0-10 0v5zM10 20h4M4 5 2 7M20 5l2 2"/></svg><span>Alarms</span></button>
+      <button class="tab" id="tab-settings" data-pane="settings" role="tab" aria-selected="false" aria-controls="pane-settings" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 2h4l.5 2.2 1.8.8 2-.9 2.8 2.8-.9 2 .8 1.8L23 11v4l-2.2.5-.8 1.8.9 2-2.8 2.8-2-.9-1.8.8L14 24h-4l-.5-2.2-1.8-.8-2 .9-2.8-2.8.9-2-.8-1.8L1 15v-4l2.2-.5.8-1.8-.9-2L5.9 3.9l2 .9 1.8-.8z" transform="translate(0 -1) scale(.96)"/><circle cx="12" cy="12" r="3"/></svg><span>Settings</span></button>
     </nav>
+    <nav class="station-subtabs" id="station-subtabs" role="tablist" aria-label="Stations views"></nav>
+
+    <!-- ---------------------------- player --------------------------- -->
+    <div class="pane" id="pane-player" role="tabpanel" aria-labelledby="tab-player"></div>
 
     <!-- ---------------------------- radio ---------------------------- -->
     <div class="pane on" id="pane-radio" role="tabpanel" aria-labelledby="tab-radio">
@@ -146,20 +152,19 @@
       <ul class="list" id="station-list" aria-label="Saved stations"></ul>
 
       <form class="editor hidden" id="station-editor" autocomplete="off" aria-labelledby="station-editor-title">
-        <div class="editor-title" id="station-editor-title">Add station</div>
+        <div class="editor-title" id="station-editor-title" tabindex="-1">Add station</div>
         <div class="station-editor-body">
           <p class="editor-note">Keep a station here by adding its stream link, or find one in Browse.</p>
           <label class="lbl">Name<input class="field" id="st-name" maxlength="60" placeholder="Station name" required></label>
           <label class="lbl">Stream URL<input class="field" id="st-url" placeholder="https://…" aria-describedby="st-url-hint" required></label>
           <p class="editor-note" id="st-url-hint">Use a direct audio stream or a .pls / .m3u playlist link.</p>
           <label class="lbl">Tag (optional)<input class="field" id="st-tag" maxlength="24" placeholder="Jazz, ambient, news…"></label>
+          <div class="editor-test-row"><button type="button" class="gel" id="st-test">Test</button><button type="button" class="gel danger hidden" id="st-delete">Delete</button></div>
         </div>
         <div class="station-editor-footer">
           <p class="editor-note" id="st-note" role="status" aria-live="polite"></p>
           <div class="editor-actions">
-            <button type="button" class="gel" id="st-test">Test</button>
             <span class="flex"></span>
-            <button type="button" class="gel danger hidden" id="st-delete">Delete</button>
             <button type="button" class="gel" id="st-cancel">Cancel</button>
             <button type="submit" class="gel primary">Save</button>
           </div>
@@ -192,43 +197,46 @@
             <button type="button" class="gel wide" id="btn-browse">Search</button>
           </div>
         </div>
-        <div class="browsefilters">
-          <label class="lbl" for="browse-country"><span class="sr-only">Country</span>
-            <select class="field" id="browse-country">
-              <option value="">Any country</option>
-            </select>
-          </label>
-          <label class="lbl" for="browse-tag"><span class="sr-only">Genre</span>
-            <select class="field" id="browse-tag">
-              <option value="">Any genre</option>
-            </select>
-          </label>
-        </div>
-        <div class="browse-quality-fields">
-          <label class="lbl" for="browse-codec"><span class="sr-only">Format</span>
-            <select class="field" id="browse-codec">
-              <option value="">Any format</option>
-              <option value="MP3">MP3</option>
-              <option value="AAC">AAC</option>
-              <option value="AAC+">AAC+</option>
-              <option value="OGG">OGG</option>
-              <option value="FLAC">FLAC</option>
-            </select>
-          </label>
-          <label class="lbl" for="browse-bitrate"><span class="sr-only">Bitrate</span>
-            <select class="field" id="browse-bitrate">
-              <option value="">Any bitrate</option>
-              <option value="low">Under 48 kbps</option>
-              <option value="48">48 kbps</option>
-              <option value="64">64 kbps</option>
-              <option value="96">96 kbps</option>
-              <option value="128">128 kbps</option>
-              <option value="192">192 kbps</option>
-              <option value="256">256 kbps</option>
-              <option value="320">320 kbps</option>
-              <option value="high">Over 320 kbps</option>
-            </select>
-          </label>
+        <button type="button" class="browse-filters-toggle" id="browse-filters-toggle" aria-controls="browse-filter-fields" aria-expanded="false">Filters <span aria-hidden="true">▾</span></button>
+        <div class="browse-filter-fields" id="browse-filter-fields">
+          <div class="browsefilters">
+            <label class="lbl" for="browse-country"><span class="sr-only">Country</span>
+              <select class="field" id="browse-country">
+                <option value="">Any country</option>
+              </select>
+            </label>
+            <label class="lbl" for="browse-tag"><span class="sr-only">Genre</span>
+              <select class="field" id="browse-tag">
+                <option value="">Any genre</option>
+              </select>
+            </label>
+          </div>
+          <div class="browse-quality-fields">
+            <label class="lbl" for="browse-codec"><span class="sr-only">Format</span>
+              <select class="field" id="browse-codec">
+                <option value="">Any format</option>
+                <option value="MP3">MP3</option>
+                <option value="AAC">AAC</option>
+                <option value="AAC+">AAC+</option>
+                <option value="OGG">OGG</option>
+                <option value="FLAC">FLAC</option>
+              </select>
+            </label>
+            <label class="lbl" for="browse-bitrate"><span class="sr-only">Bitrate</span>
+              <select class="field" id="browse-bitrate">
+                <option value="">Any bitrate</option>
+                <option value="low">Under 48 kbps</option>
+                <option value="48">48 kbps</option>
+                <option value="64">64 kbps</option>
+                <option value="96">96 kbps</option>
+                <option value="128">128 kbps</option>
+                <option value="192">192 kbps</option>
+                <option value="256">256 kbps</option>
+                <option value="320">320 kbps</option>
+                <option value="high">Over 320 kbps</option>
+              </select>
+            </label>
+          </div>
         </div>
         <div id="browse-active-filters" class="browse-active-filters" role="group" hidden aria-label="Active filters"></div>
       </div>
@@ -251,7 +259,7 @@
       <p class="android-only editor-note" id="android-alarm-hint">Checking Android alarm permissions…</p>
 
       <form class="editor hidden" id="alarm-editor" autocomplete="off">
-        <div class="editor-title"><span id="al-editor-title">New alarm</span><p class="hidden" id="al-copy-note"></p></div>
+        <div class="editor-title"><span id="al-editor-title" tabindex="-1">New alarm</span><p class="hidden" id="al-copy-note"></p></div>
         <div class="alarm-editor-body">
           <section class="alarm-editor-section" aria-labelledby="al-time-heading">
             <h3 id="al-time-heading">Time &amp; repeat</h3>
@@ -271,8 +279,9 @@
                 <button type="button" class="chip" data-ampm="am" aria-pressed="false">AM</button>
                 <button type="button" class="chip" data-ampm="pm" aria-pressed="false">PM</button>
               </div>
-              <label class="lbl grow">Label<input class="field" id="al-label" maxlength="40" placeholder="Wake up"></label>
+              <label class="lbl grow alarm-inline-label">Label<input class="field" id="al-label" maxlength="40" placeholder="Wake up"></label>
             </div>
+            <button type="button" class="alarm-name-edit android-only" id="al-name-edit" aria-haspopup="dialog" aria-controls="al-name-dialog"><span class="alarm-name-copy"><span class="hud-mini">Name</span><span id="al-name-value">Optional name</span></span><span class="alarm-name-action">Edit name</span></button>
 
             <div class="quickrow">
               <span class="hud-mini">Ring in</span>
@@ -383,12 +392,11 @@
               </div>
             </div>
           </details>
+          <div class="editor-test-row"><button type="button" class="gel" id="al-test">Test sound</button><button type="button" class="gel danger hidden" id="al-delete">Delete</button></div>
         </div>
 
         <div class="editor-actions">
-          <button type="button" class="gel" id="al-test">Test sound</button>
           <span class="flex"></span>
-          <button type="button" class="gel danger hidden" id="al-delete">Delete</button>
           <button type="button" class="gel" id="al-cancel">Cancel</button>
           <button type="submit" class="gel primary" id="al-save">Save alarm</button>
         </div>
@@ -402,10 +410,9 @@
         <p>Changes save automatically.</p>
       </div>
       <div class="settings-body">
-        <section class="settings-section settings-transfer" aria-labelledby="settings-transfer">
-          <div class="settings-section-heading">
-            <h3 id="settings-transfer">Backup &amp; restore</h3>
-          </div>
+        <details class="settings-section settings-transfer settings-category" aria-labelledby="settings-transfer" open>
+          <summary><h3 id="settings-transfer">Backup &amp; restore</h3></summary>
+          <div class="settings-category-body">
           <p class="editor-note">Keep a copy of your stations, alarms, and preferences.</p>
           <div class="transfer-actions">
             <button class="gel" id="backup-export">Export backup…</button>
@@ -413,10 +420,12 @@
             <button class="station-link" id="backup-previous">Previous setup…</button>
           </div>
           <p class="editor-note" id="backup-status" role="status"></p>
-        </section>
+          </div>
+        </details>
         <div class="settings-preferences">
-          <section class="settings-section" aria-labelledby="settings-display">
-            <h3 id="settings-display">Display</h3>
+          <details class="settings-section settings-category" aria-labelledby="settings-display" open>
+            <summary><h3 id="settings-display">Display</h3></summary>
+            <div class="settings-category-body">
             <ul class="settings">
               <li class="row toggle" data-setting="clock24h">
                 <label for="setting-clock"><span id="setting-clock-label">24-hour clock</span><em id="setting-clock-help">Use 14:00 instead of 2:00 PM.</em></label>
@@ -427,7 +436,8 @@
                 <button id="setting-metadata" class="sw" aria-pressed="true" aria-labelledby="setting-metadata-label" aria-describedby="setting-metadata-help"></button>
               </li>
             </ul>
-          </section>
+            </div>
+          </details>
           <section class="settings-section android-unavailable" aria-labelledby="settings-startup">
             <h3 id="settings-startup">Startup &amp; closing</h3>
             <ul class="settings">
@@ -442,15 +452,15 @@
             </ul>
           </section>
         </div>
-        <section class="settings-section settings-backup" aria-labelledby="settings-backup">
-          <div class="settings-section-heading">
-            <h3 id="settings-backup">Backup music</h3>
-            <button class="gel" id="btn-pick-backup">Choose folder…</button>
-          </div>
+        <details class="settings-section settings-backup settings-category" aria-labelledby="settings-backup" open>
+          <summary><h3 id="settings-backup">Backup music</h3></summary>
+          <div class="settings-category-body">
+          <button class="gel" id="btn-pick-backup">Choose folder…</button>
           <p class="editor-note">Plays when a station or alarm source is unavailable.</p>
           <p class="folderpath" id="backup-path" role="status">No backup folder chosen</p>
           <p class="editor-note android-only">If no backup track can play, alarms use the phone’s default alarm sound.</p>
-        </section>
+          </div>
+        </details>
         <section class="settings-section android-unavailable" aria-labelledby="settings-wake">
           <h3 id="settings-wake">Alarms &amp; sleep</h3>
           <ul class="settings">
@@ -471,11 +481,10 @@
             </details>
           </div>
         </section>
-        <section class="settings-section android-only android-alarm-settings" aria-labelledby="settings-android">
-          <div class="settings-section-heading">
-            <h3 id="settings-android">Permissions</h3>
-            <button class="gel" id="android-permissions-refresh" type="button">Check again</button>
-          </div>
+        <details class="settings-section android-only android-alarm-settings settings-category" aria-labelledby="settings-android" open>
+          <summary><h3 id="settings-android">Permissions</h3></summary>
+          <div class="settings-category-body">
+          <button class="gel" id="android-permissions-refresh" type="button">Check again</button>
           <p id="android-alarm-status" class="editor-note" role="status">Checking Android settings…</p>
           <ul class="android-permission-list">
             <li class="android-permission-row">
@@ -518,7 +527,8 @@
             <summary>Alarms after a restart</summary>
             <p>Keep the phone powered on. After restarting, music folders may need the first unlock; the system alarm sound is the fallback. Force-stopping Aerowave prevents alarms until you open it again.</p>
           </details>
-        </section>
+          </div>
+        </details>
         <details class="settings-details settings-storage" id="config-details">
           <summary>Settings storage</summary>
           <p class="wherefrom" id="config-where"></p>
@@ -531,6 +541,17 @@
     </div>
   </section>
 </main>
+
+<dialog class="alarm-name-dialog panel bevel" id="al-name-dialog" aria-labelledby="al-name-dialog-title">
+  <h2 id="al-name-dialog-title">Alarm name</h2>
+  <div class="alarm-name-dialog-body">
+    <label class="lbl" for="al-name-input">Name (optional)<input class="field" id="al-name-input" maxlength="40" enterkeyhint="done" placeholder="Wake up"></label>
+  </div>
+  <div class="alarm-name-dialog-actions">
+    <button type="button" class="gel" id="al-name-cancel">Cancel</button>
+    <button type="button" class="gel primary" id="al-name-done">Done</button>
+  </div>
+</dialog>
 
 <!-- Announced to a screen reader; #status-msg cannot carry aria-live because
      its six-second reset would announce "Ready" over everything. -->

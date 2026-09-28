@@ -29,9 +29,31 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const pad2 = (n) => String(n).padStart(2, "0");
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
+function dismissAndroidKeyboard() {
+  if (!IS_ANDROID) return;
+  const active = document.activeElement;
+  if (/^(INPUT|TEXTAREA)$/.test(active?.tagName || "") || active?.isContentEditable) active.blur();
+}
+
 if (IS_ANDROID) {
   $$('[data-tauri-drag-region]').forEach((element) => element.removeAttribute("data-tauri-drag-region"));
   $("#build-label").textContent = "Android";
+  $("#pane-player").append($("#player-stage"));
+  const stationSubtabs = $("#station-subtabs");
+  for (const id of ["radio", "browse"]) {
+    const tab = $("#tab-" + id);
+    tab.classList.remove("tab");
+    tab.classList.add("station-tab");
+    stationSubtabs.append(tab);
+  }
+  $("#tab-radio-label").textContent = "Saved";
+  $("#tab-player").classList.add("tab", "on");
+  $("#tab-player").setAttribute("aria-selected", "true");
+  $("#tab-player").tabIndex = 0;
+  $("#tab-library").classList.add("tab");
+  $("#tab-library").setAttribute("aria-controls", "pane-radio");
+  $("#pane-radio").classList.remove("on");
+  $("#pane-player").classList.add("on");
   showTrackText("Choose a station or browse the directory.");
 }
 
@@ -2105,6 +2127,9 @@ function wireMediaKeys() {
 
 /** Which tab is in front. */
 const currentPane = () => {
+  if (IS_ANDROID && $("#tab-library").classList.contains("on")) {
+    return $("#tab-browse").classList.contains("on") ? "browse" : "radio";
+  }
   const tab = $(".tab.on");
   return tab ? tab.dataset.pane : "";
 };
@@ -3447,7 +3472,7 @@ function resetStationFilters() {
   stationFavoritesOnly = false;
   stationRecentOnly = false;
   renderStations();
-  $("#station-filter").focus();
+  if (!IS_ANDROID) $("#station-filter").focus();
 }
 
 function canReorderStations() {
@@ -3641,7 +3666,10 @@ function renderStations() {
     action.textContent = !state.stations.length ? "Discover stations" : q ? "Clear filters" : "Show all stations";
     action.addEventListener("click", () => {
       if (state.stations.length) resetStationFilters();
-      else { $("#tab-browse").click(); $("#browse-query").focus(); }
+      else {
+        $("#tab-browse").click();
+        if (!IS_ANDROID) $("#browse-query").focus();
+      }
     });
     li.append(title, hint, action);
     list.append(li);
@@ -3945,14 +3973,17 @@ function renderAlarms() {
     footer.className = "alarm-card-next";
     const tools = document.createElement("div");
     tools.className = "alarm-card-tools";
-    const duplicate = document.createElement("button");
-    duplicate.type = "button";
-    duplicate.className = "gel alarm-duplicate";
-    duplicate.textContent = "Duplicate";
-    duplicate.disabled = !!alarmSkipPending || !!alarmSavePending || !!alarmDeletePending || setupRestorePending;
-    duplicate.setAttribute("aria-label", `Duplicate ${alarm.label || "alarm"} at ${fmtAlarmTime(alarm.hour, alarm.minute)}`);
-    duplicate.title = "Create an editable copy";
-    duplicate.addEventListener("click", () => openAlarmEditor(alarm, { copy: true }));
+    if (!IS_ANDROID) {
+      const duplicate = document.createElement("button");
+      duplicate.type = "button";
+      duplicate.className = "gel alarm-duplicate";
+      duplicate.textContent = "Duplicate";
+      duplicate.disabled = !!alarmSkipPending || !!alarmSavePending || !!alarmDeletePending || setupRestorePending;
+      duplicate.setAttribute("aria-label", `Duplicate ${alarm.label || "alarm"} at ${fmtAlarmTime(alarm.hour, alarm.minute)}`);
+      duplicate.title = "Create an editable copy";
+      duplicate.addEventListener("click", () => openAlarmEditor(alarm, { copy: true }));
+      tools.append(duplicate);
+    }
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "gel danger alarm-delete";
@@ -3985,7 +4016,7 @@ function renderAlarms() {
       }
       if (saved) say("alarm deleted", "good");
     });
-    tools.append(duplicate, remove);
+    tools.append(remove);
     if (alarm.enabled && alarm.days?.length) {
       const occurrence = alarmOccurrencesKey === alarmScheduleKey() ? alarmOccurrences.get(alarm.id) : null;
       const skipped = occurrence?.skippedAtMs != null;
@@ -4508,12 +4539,16 @@ function openStationEditor(station) {
   $("#st-delete").classList.toggle("hidden", !station);
   $("#station-editor").classList.remove("hidden");
   $("#pane-radio").classList.add("editing");
-  $("#st-name").focus();
+  if (IS_ANDROID) {
+    dismissAndroidKeyboard();
+    $("#station-editor-title").focus({ preventScroll: true });
+  } else $("#st-name").focus();
 }
 
 function closeStationEditor() {
   if (stationEditorSaving) return;
   const wasOpen = !$("#station-editor").classList.contains("hidden");
+  if (wasOpen) dismissAndroidKeyboard();
   cancelStationTest();
   stationEditorSaveFailed = false;
   editingStation = null;
@@ -4784,6 +4819,35 @@ function copiedAlarmLabel(label) {
   return candidate;
 }
 
+function syncAlarmNameButton() {
+  if (IS_ANDROID) $("#al-name-value").textContent = $("#al-label").value.trim() || "Optional name";
+}
+
+function alarmSaveCaption() {
+  return IS_ANDROID && editingAlarm && !editingAlarm.enabled ? "Save & turn on" : "Save alarm";
+}
+
+function openAlarmNameDialog() {
+  if (!IS_ANDROID || alarmEditorSaving || $("#alarm-editor").classList.contains("hidden")) return;
+  const input = $("#al-name-input");
+  input.value = $("#al-label").value;
+  $("#al-name-dialog").showModal();
+  input.focus();
+  input.select();
+}
+
+function closeAlarmNameDialog(save = false, restoreFocus = true) {
+  const dialog = $("#al-name-dialog");
+  if (!dialog.open) return;
+  if (save) {
+    $("#al-label").value = $("#al-name-input").value.trim();
+    syncAlarmNameButton();
+  }
+  dismissAndroidKeyboard();
+  dialog.close();
+  if (restoreFocus) $("#al-name-edit").focus({ preventScroll: true });
+}
+
 function openAlarmEditor(alarm, { copy = false } = {}) {
   if (alarmEditorSaving) return;
   if (!alarm && !clockNow) {
@@ -4794,7 +4858,7 @@ function openAlarmEditor(alarm, { copy = false } = {}) {
   editorReturnFocus = document.activeElement;
   editingAlarm = copy ? null : alarm || null;
   alarmDraftId = editingAlarm?.id || newId();
-  alarmDraftEnabled = alarm?.enabled ?? true;
+  alarmDraftEnabled = IS_ANDROID ? true : (alarm?.enabled ?? true);
   alarmCopySourceId = copy ? alarm?.id : null;
   // A new alarm opens on the last one that was saved. Somebody who wakes to
   // the same station, fading in over the same twenty seconds, should not have
@@ -4815,6 +4879,7 @@ function openAlarmEditor(alarm, { copy = false } = {}) {
   };
 
   $("#al-label").value = copy ? copiedAlarmLabel(base.label) : base.label || "";
+  syncAlarmNameButton();
   editorDays = [...(base.days || [])];
   applyClockMode(base.hour, base.minute);
 
@@ -4845,11 +4910,17 @@ function openAlarmEditor(alarm, { copy = false } = {}) {
     (copy && !alarmDraftEnabled ? " This copy will be off, like the original." : "");
   $("#al-options").open = false;
   $("#al-delete").classList.toggle("hidden", !editingAlarm);
+  $("#al-save").textContent = alarmSaveCaption();
   $("#pane-alarms").classList.add("editing");
   $("#alarm-editor").classList.remove("hidden");
   $("#alarm-editor .alarm-editor-body").scrollTop = 0;
-  $("#al-hour").focus({ preventScroll: true });
-  $("#al-hour").select();
+  if (IS_ANDROID) {
+    dismissAndroidKeyboard();
+    $("#al-editor-title").focus({ preventScroll: true });
+  } else {
+    $("#al-hour").focus({ preventScroll: true });
+    $("#al-hour").select();
+  }
 }
 
 function showEditorFolder(name) {
@@ -4878,8 +4949,10 @@ function rememberAlarmSetup(alarm) {
 
 function closeAlarmEditor(savedId = null) {
   if (alarmEditorSaving) return;
+  closeAlarmNameDialog(false, false);
   ++editorTimeRequest;
   const wasOpen = !$("#alarm-editor").classList.contains("hidden");
+  if (wasOpen) dismissAndroidKeyboard();
   const editedId = savedId || editingAlarm?.id || alarmCopySourceId;
   const wasCopy = !!alarmCopySourceId;
   editingAlarm = null;
@@ -4896,6 +4969,27 @@ function closeAlarmEditor(savedId = null) {
   }
   editorReturnFocus = null;
 }
+
+// The Android activity checks this before letting Back leave the app. A save
+// in progress keeps its editor open, so Back is still consumed in that case.
+function handleAndroidBack() {
+  if (!IS_ANDROID) return false;
+  if ($("#al-name-dialog").open) {
+    closeAlarmNameDialog();
+    return true;
+  }
+  if (!$("#alarm-editor").classList.contains("hidden")) {
+    closeAlarmEditor();
+    return true;
+  }
+  if (!$("#station-editor").classList.contains("hidden")) {
+    closeStationEditor();
+    return true;
+  }
+  return false;
+}
+
+if (IS_ANDROID) window.__aerowaveHandleAndroidBack = handleAndroidBack;
 
 function readAlarmEditor() {
   if (editorPendingTime === editorTimeRequest && editorPendingTime !== 0) {
@@ -5264,23 +5358,42 @@ function wire() {
     event.preventDefault();
     cancelSetupRestore();
   });
+  if (IS_ANDROID) $$(".settings-category").forEach((category) => { category.open = false; });
   const tabs = $$(".tab");
+  const stationTabs = IS_ANDROID ? $$(".station-tab") : [];
   const activateTab = (tab) => {
+      if (IS_ANDROID) {
+        dismissAndroidKeyboard();
+        tab.focus({ preventScroll: true });
+      }
       $$(".tab").forEach((t) => {
         t.classList.toggle("on", t === tab);
         t.setAttribute("aria-selected", String(t === tab));
         t.tabIndex = t === tab ? 0 : -1;
       });
-      $$(".pane").forEach((p) => p.classList.toggle("on", p.id === "pane-" + tab.dataset.pane));
-      if (tab.dataset.pane === "alarms") {
+      const pane = IS_ANDROID && tab === $("#tab-library")
+        ? $("#tab-browse").classList.contains("on") ? "browse" : "radio"
+        : tab.dataset.pane;
+      $$(".pane").forEach((p) => p.classList.toggle("on", p.id === "pane-" + pane));
+      if (IS_ANDROID && tab === $("#tab-library")) tab.setAttribute("aria-controls", "pane-" + pane);
+      if (pane === "alarms") {
         if (IS_ANDROID) refreshAndroidAlarms();
         else {
           refreshDesktopAlarms().then(refreshNextAlarm).catch(error => say(String(error), "bad"));
           refreshPowerStatus();
         }
       }
-      if (tab.dataset.pane === "browse") browseFirstLook();
-      if (!IS_ANDROID && tab.dataset.pane === "settings") refreshPowerStatus();
+      if (pane === "browse") browseFirstLook();
+      if (!IS_ANDROID && pane === "settings") refreshPowerStatus();
+  };
+  const activateStationTab = (tab) => {
+    stationTabs.forEach((item) => {
+      item.classList.toggle("on", item === tab);
+      item.setAttribute("aria-selected", String(item === tab));
+      item.tabIndex = item === tab ? 0 : -1;
+    });
+    activateTab($("#tab-library"));
+    tab.focus({ preventScroll: true });
   };
   tabs.forEach((tab, index) => {
     tab.tabIndex = tab.classList.contains("on") ? 0 : -1;
@@ -5297,16 +5410,39 @@ function wire() {
       tabs[next].focus({ preventScroll: true });
     });
   });
+  stationTabs.forEach((tab, index) => {
+    tab.tabIndex = tab.classList.contains("on") ? 0 : -1;
+    tab.addEventListener("click", () => activateStationTab(tab));
+    tab.addEventListener("keydown", event => {
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      const next = event.key === "Home" ? 0 : event.key === "End" ? stationTabs.length - 1
+        : event.key === "ArrowRight" ? (index + 1) % stationTabs.length
+        : event.key === "ArrowLeft" ? (index + stationTabs.length - 1) % stationTabs.length : null;
+      if (next == null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      activateStationTab(stationTabs[next]);
+    });
+  });
 
   // stations
   $("#station-filter").addEventListener("input", renderStations);
+  $("#station-filter").addEventListener("keydown", (event) => {
+    if (IS_ANDROID && event.key === "Enter") {
+      event.preventDefault();
+      dismissAndroidKeyboard();
+    }
+  });
   $("#station-sort").addEventListener("change", renderStations);
   $("#station-all").addEventListener("click", () => { stationFavoritesOnly = false; stationRecentOnly = false; renderStations(); });
   $("#station-favorites").addEventListener("click", () => { stationFavoritesOnly = true; stationRecentOnly = false; renderStations(); });
   $("#station-recent").addEventListener("click", () => { stationFavoritesOnly = false; stationRecentOnly = true; renderStations(); });
   wireStationDragging();
   $("#station-reset").addEventListener("click", resetStationFilters);
-  $("#btn-discover-stations").addEventListener("click", () => { $("#tab-browse").click(); $("#browse-query").focus(); });
+  $("#btn-discover-stations").addEventListener("click", () => {
+    $("#tab-browse").click();
+    if (!IS_ANDROID) $("#browse-query").focus();
+  });
   $("#btn-add-station").addEventListener("click", () => openStationEditor(null));
   $("#st-cancel").addEventListener("click", closeStationEditor);
 
@@ -5397,6 +5533,16 @@ function wire() {
     e.preventDefault();
     browseSearch(false);
   });
+  const browseFiltersToggle = $("#browse-filters-toggle");
+  const browseFilterFields = $("#browse-filter-fields");
+  browseFilterFields.classList.toggle("open", !IS_ANDROID);
+  browseFiltersToggle.setAttribute("aria-expanded", String(!IS_ANDROID));
+  if (IS_ANDROID) {
+    browseFiltersToggle.addEventListener("click", () => {
+      const open = browseFilterFields.classList.toggle("open");
+      browseFiltersToggle.setAttribute("aria-expanded", String(open));
+    });
+  }
   $("#browse-country").addEventListener("change", (e) => {
     browseCountry = e.target.value;
     browseCountryLabel = labelOf(e.target);
@@ -5437,6 +5583,21 @@ function wire() {
   // alarms
   $("#btn-add-alarm").addEventListener("click", () => openAlarmEditor(null));
   $("#al-cancel").addEventListener("click", () => closeAlarmEditor());
+  if (IS_ANDROID) {
+    $("#al-label").readOnly = true;
+    $("#al-name-edit").addEventListener("click", openAlarmNameDialog);
+    $("#al-name-cancel").addEventListener("click", () => closeAlarmNameDialog());
+    $("#al-name-done").addEventListener("click", () => closeAlarmNameDialog(true));
+    $("#al-name-input").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      closeAlarmNameDialog(true);
+    });
+    $("#al-name-dialog").addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeAlarmNameDialog();
+    });
+  }
   $$("#al-repeat-presets .chip").forEach((button) =>
     button.addEventListener("click", () => setEditorRepeat(button.dataset.repeat))
   );
@@ -5467,6 +5628,10 @@ function wire() {
 
   ["al-hour", "al-minute"].forEach((id) => {
     const field = $("#" + id);
+    if (IS_ANDROID) {
+      field.readOnly = true;
+      field.setAttribute("inputmode", "none");
+    }
     field.addEventListener("input", () => {
       ++editorTimeRequest;
       editorQuickMins = 0; // a typed time is no longer a span from now
@@ -5543,7 +5708,7 @@ function wire() {
       alarmEditorSaving = false;
       $("#alarm-editor").inert = false;
       $("#alarm-editor").removeAttribute("aria-busy");
-      $("#al-save").textContent = "Save alarm";
+      $("#al-save").textContent = alarmSaveCaption();
       $("#al-save").disabled = false;
     }
     if (!saved) {
@@ -5656,6 +5821,11 @@ function wire() {
     }
     if (e.key === "Escape") {
       if (ringing) return; // an alarm should take a deliberate button press
+      if (IS_ANDROID && $("#al-name-dialog").open) {
+        e.preventDefault();
+        closeAlarmNameDialog();
+        return;
+      }
       closeAlarmEditor();
       closeStationEditor();
     }
