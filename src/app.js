@@ -38,8 +38,8 @@ function dismissAndroidKeyboard() {
 if (IS_ANDROID) {
   $$('[data-tauri-drag-region]').forEach((element) => element.removeAttribute("data-tauri-drag-region"));
   $("#build-label").textContent = "Android";
-  $("#pane-player").append($("#android-quick-access"));
   $("#pane-player").append($("#player-stage"));
+  $("#pane-player").append($("#android-quick-access"));
   $("#pane-player").append($("#station-music"));
   $("#pane-player").append($("#player-sleep-timer"));
   $("#station-views").append($("#station-recent"), $("#station-all"));

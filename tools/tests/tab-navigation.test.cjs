@@ -116,7 +116,7 @@ test("Android starts in Player and exposes Stations and Browse directly", async 
   assert.equal(h.el("#android-quick-access").parentElement, h.el("#pane-player"));
   assert.equal(h.el("#player-sleep-timer").parentElement, h.el("#pane-player"));
   assert.deepEqual(h.el("#pane-player").children, [
-    h.el("#android-quick-access"), h.el("#player-stage"),
+    h.el("#player-stage"), h.el("#android-quick-access"),
     h.el("#station-music"), h.el("#player-sleep-timer"),
   ]);
   assert.equal(h.el("#tab-radio").getAttribute("aria-selected"), "false");
