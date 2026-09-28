@@ -34,7 +34,7 @@ function playerHarness(invoke) {
   return h;
 }
 
-test("paused mini player opens fullscreen and Back returns directly to its origin", async () => {
+test("paused mini player opens normal Player and Back returns directly to its origin", async () => {
   const h = playerHarness((command) => {
     if (command === "plugin:android-audio|resume") return native("playing", 1000);
     if (command === "plugin:android-audio|pause") return native("paused", 1000);
@@ -59,149 +59,49 @@ test("paused mini player opens fullscreen and Back returns directly to its origi
   assert.equal(h.el("#mini-state").textContent, "Paused");
 
   await h.el("#mini-open").dispatch("click");
-  await flush();
   assert.equal(h.el("#pane-player").classList.contains("on"), true);
-  assert.equal(h.document.body.classList.contains("player-fullscreen"), true);
-  assert.equal(h.el("#mini-player").hidden, true);
-  assert.equal(h.document.activeElement, h.el("#btn-player-fullscreen"));
-  assert.equal(h.el("#btn-player-fullscreen").getAttribute("aria-label"), "Exit fullscreen Player");
-  assert.equal(h.evaluate("window.__aerowaveHandleAndroidBack()"), true);
-  await flush();
-  assert.equal(h.el("#pane-radio").classList.contains("on"), true);
   assert.equal(h.document.body.classList.contains("player-fullscreen"), false);
+  assert.equal(h.el("#mini-player").hidden, true);
+  assert.equal(h.document.activeElement, h.el("#tab-player"));
+  assert.equal(h.evaluate("window.__aerowaveHandleAndroidBack()"), true);
+  assert.equal(h.el("#pane-radio").classList.contains("on"), true);
   assert.equal(h.el("#mini-player").hidden, false);
   assert.equal(h.document.activeElement, h.el("#tab-radio"));
-  assert.deepEqual(h.calls.filter(({ command }) => command === "plugin:android-audio|set_player_fullscreen")
-    .map(({ args }) => args.payload.enabled), [true, false]);
+  assert.equal(h.calls.some(({ command }) => command === "plugin:android-audio|set_player_fullscreen"), false);
 });
 
-test("Player fullscreen toggle exits to regular Player, while mini Exit returns to its origin", async () => {
+test("mini Player returns in one step from every other destination, including Escape", async () => {
   const h = playerHarness();
-  await h.el("#btn-player-fullscreen").dispatch("click");
-  await flush();
-  assert.equal(h.document.body.classList.contains("player-fullscreen"), true);
-  assert.equal(h.el("#btn-play-folder").textContent, "Shuffle your music");
-  assert.equal(h.el("#btn-player-fullscreen").getAttribute("aria-pressed"), "true");
-  assert.equal(h.evaluate("window.__aerowaveHandleAndroidBack()"), true);
-  await flush();
-  assert.equal(h.el("#pane-player").classList.contains("on"), true);
-  assert.equal(h.document.body.classList.contains("player-fullscreen"), false);
-  assert.equal(h.el("#btn-play-folder").textContent, "Shuffle");
-  assert.equal(h.document.activeElement, h.el("#btn-player-fullscreen"));
-
-  await h.el("#tab-settings").dispatch("click");
-  await h.el("#mini-open").dispatch("click");
-  await flush();
-  assert.equal(h.document.body.classList.contains("player-fullscreen"), true);
-  await h.el("#btn-player-fullscreen").dispatch("click");
-  await flush();
-  assert.equal(h.el("#pane-settings").classList.contains("on"), true);
-  assert.equal(h.document.activeElement, h.el("#tab-settings"));
-  assert.equal(h.evaluate("window.__aerowaveHandleAndroidBack()"), false);
-  assert.deepEqual(h.calls.filter(({ command }) => command === "plugin:android-audio|set_player_fullscreen")
-    .map(({ args }) => args.payload.enabled), [true, false, true, false]);
-});
-
-test("Back during a pending native fullscreen enter still restores the origin and system bars", async () => {
-  const entering = deferred();
-  const h = playerHarness((command, args) => {
-    if (command === "plugin:android-audio|set_player_fullscreen" && args.payload.enabled) return entering.promise;
-  });
-  await h.el("#tab-radio").dispatch("click");
-  await h.el("#mini-open").dispatch("click");
-  await flush();
-  assert.deepEqual(h.calls.filter(({ command }) => command === "plugin:android-audio|set_player_fullscreen")
-    .map(({ args }) => args.payload.enabled), [true]);
-  assert.equal(h.evaluate("window.__aerowaveHandleAndroidBack()"), true);
-  assert.equal(h.el("#pane-radio").classList.contains("on"), true);
-  assert.equal(h.document.body.classList.contains("player-fullscreen"), false);
-  entering.resolve(null);
-  await flush();
-  assert.deepEqual(h.calls.filter(({ command }) => command === "plugin:android-audio|set_player_fullscreen")
-    .map(({ args }) => args.payload.enabled), [true, false]);
-});
-
-test("native fullscreen rejection restores visible navigation without trapping Player", async () => {
-  const h = playerHarness((command, args) => {
-    if (command === "plugin:android-audio|set_player_fullscreen" && args.payload.enabled) {
-      return Promise.reject(new Error("window unavailable"));
-    }
-  });
-  await h.el("#tab-radio").dispatch("click");
-  await h.el("#mini-open").dispatch("click");
-  await flush();
-  assert.equal(h.document.body.classList.contains("player-fullscreen"), false);
-  assert.equal(h.el("#pane-radio").classList.contains("on"), true);
-  assert.equal(h.document.activeElement, h.el("#tab-radio"));
-  assert.match(h.el("#status-msg").textContent, /Could not enter fullscreen: .*window unavailable/);
-});
-
-test("Escape, tab navigation, and an alarm leave fullscreen safely", async () => {
-  const h = playerHarness();
-  await h.el("#btn-player-fullscreen").dispatch("click");
-  await flush();
-  const escape = await h.document.dispatch("keydown", { key: "Escape" });
-  await flush();
-  assert.equal(escape.defaultPrevented, true);
-  assert.equal(h.document.body.classList.contains("player-fullscreen"), false);
-  assert.equal(h.document.activeElement, h.el("#btn-player-fullscreen"));
-
-  await h.el("#btn-player-fullscreen").dispatch("click");
-  await flush();
-  await h.el("#tab-alarms").dispatch("click");
-  await flush();
-  assert.equal(h.el("#pane-alarms").classList.contains("on"), true);
-  assert.equal(h.document.body.classList.contains("player-fullscreen"), false);
-  assert.equal(h.document.activeElement, h.el("#tab-alarms"));
-
+  h.evaluate(`player.source = ${JSON.stringify(source)}; player.nativeGeneration = 7;
+    applyAndroidPlaybackState(${JSON.stringify(native("paused"))})`);
+  for (const pane of ["browse", "alarms", "settings"]) {
+    await h.el("#tab-" + pane).dispatch("click");
+    await h.el("#mini-open").dispatch("click");
+    assert.equal(h.el("#pane-player").classList.contains("on"), true);
+    assert.equal(h.document.activeElement, h.el("#tab-player"));
+    const escape = await h.document.dispatch("keydown", { key: "Escape" });
+    assert.equal(escape.defaultPrevented, true);
+    assert.equal(h.el("#pane-" + pane).classList.contains("on"), true);
+    assert.equal(h.document.activeElement, h.el("#tab-" + pane));
+  }
   await h.el("#tab-player").dispatch("click");
-  await h.el("#btn-player-fullscreen").dispatch("click");
-  await flush();
-  h.evaluate(`applyAndroidAlarmState({ revision: 1, alarms: [], permissions: {},
-    ringing: { occurrenceId: "wake", alarmId: "wake", hour: 7, minute: 0, title: "Morning" } })`);
-  await flush();
-  assert.equal(h.document.body.classList.contains("player-fullscreen"), false);
-  assert.equal(h.el("#ringing").hidden, false);
-  assert.deepEqual(h.calls.filter(({ command }) => command === "plugin:android-audio|set_player_fullscreen")
-    .map(({ args }) => args.payload.enabled), [true, false, true, false, true, false]);
+  assert.equal(h.evaluate("window.__aerowaveHandleAndroidBack()"), false);
+  assert.equal(h.calls.some(({ command }) => command === "plugin:android-audio|set_player_fullscreen"), false);
 });
 
-test("a native exit error leaves the regular Player and controls visible", async () => {
-  const h = playerHarness((command, args) => {
-    if (command === "plugin:android-audio|set_player_fullscreen" && !args.payload.enabled) {
-      return Promise.reject(new Error("bars unavailable"));
-    }
-  });
-  await h.el("#btn-player-fullscreen").dispatch("click");
-  await flush();
-  assert.equal(h.evaluate("window.__aerowaveHandleAndroidBack()"), true);
-  await flush();
-  assert.equal(h.document.body.classList.contains("player-fullscreen"), false);
-  assert.equal(h.el("#pane-player").classList.contains("on"), true);
-  assert.equal(h.document.activeElement, h.el("#btn-player-fullscreen"));
-  assert.match(h.el("#status-msg").textContent, /Could not restore system bars/);
-});
-
-test("fullscreen Shuffle reveals the folder picker or a random-track error", async () => {
+test("Shuffle keeps folder guidance and errors visible in regular Player", async () => {
   const h = playerHarness((command) => {
     if (command === "plugin:android-audio|random_track") return Promise.reject(new Error("folder unavailable"));
   });
-  await h.el("#btn-player-fullscreen").dispatch("click");
-  await flush();
   await h.el("#btn-play-folder").dispatch("click");
-  assert.equal(h.document.body.classList.contains("player-fullscreen"), false);
-  assert.equal(h.document.activeElement, h.el("#btn-pick-folder"));
   assert.equal(h.el("#status-msg").textContent, "choose a folder first");
+  assert.equal(h.el("#btn-pick-folder").hidden, undefined);
 
   h.evaluate('state.settings.shuffleFolder = "content://music/tree"');
-  await h.el("#btn-player-fullscreen").dispatch("click");
-  await flush();
   await h.el("#btn-play-folder").dispatch("click");
-  assert.equal(h.document.body.classList.contains("player-fullscreen"), false);
-  assert.equal(h.document.activeElement, h.el("#btn-play-folder"));
   assert.match(h.el("#status-msg").textContent, /folder unavailable/);
+  assert.equal(h.el("#pane-player").classList.contains("on"), true);
 });
-
 test("Android full Player and Space resume, while its separate Stop ends playback", async () => {
   const h = playerHarness((command) => {
     if (command === "plugin:android-audio|resume") return native("playing", 1000);
@@ -339,12 +239,13 @@ test("Your music retains the folder pick and shuffle controls after moving into 
   assert.equal(h.evaluate("player.source.kind"), "folder");
 });
 
-test("Jump back in follows Your music, keeps focused recent cards stable, and plays a selection", async () => {
+test("Jump back in leads Player, keeps focused recent cards stable, and plays a selection", async () => {
   const h = playerHarness((command) => {
     if (command === "plugin:android-audio|play") return native("buffering");
   });
-  assert.deepEqual(h.el("#pane-player").children.slice(-3), [
-    h.el("#player-stage"), h.el("#station-music"), h.el("#android-quick-access"),
+  assert.deepEqual(h.el("#pane-player").children, [
+    h.el("#android-quick-access"), h.el("#player-stage"),
+    h.el("#station-music"), h.el("#player-sleep-timer"),
   ]);
   h.evaluate("state.stations = []; state.settings.recentStations = []; renderStations()");
   assert.equal(h.el("#android-quick-access").hidden, false);
@@ -389,6 +290,56 @@ test("Jump back in refreshes a focused card when saved playback metadata changes
   assert.equal(h.evaluate("player.source.hls"), true);
   assert.equal(h.evaluate("player.source.logo"), "https://radio.test/new.png");
   assert.equal(h.evaluate("player.source.tag"), "New");
+});
+
+test("Jump back in uses decoded artwork, refreshes a warmed logo, and falls back to letters", async () => {
+  const png = "data:image/png;base64,aW1hZ2U=";
+  const urls = [];
+  const h = playerHarness((command, args) => {
+    if (command === "station_logo") {
+      urls.push(args.url);
+      return png;
+    }
+  });
+  h.context.Image = class {
+    naturalWidth = 128;
+    naturalHeight = 128;
+    async decode() {}
+  };
+  const create = h.document.createElement;
+  h.document.createElement = tag => tag === "canvas" ? {
+    getContext: () => ({ drawImage() {} }), toDataURL: () => png,
+  } : create(tag);
+  h.evaluate(`state.stations = [{ id: "radio", name: "Radio Paradise", url: "https://radio.test/live",
+    logo: "https://art.test/first.png", favorite: true }];
+    state.settings.recentStations = [{ ...state.stations[0] }]; renderStations()`);
+  await flush();
+  const firstMark = h.el("#android-quick-list").children[0].children[0];
+  assert.equal(firstMark.children[1].src, png);
+  await firstMark.children[1].dispatch("load");
+  assert.equal(firstMark.children[1].hidden, false);
+  assert.equal(firstMark.children[0].hidden, true);
+
+  h.evaluate('state.stations[0].tag = "Changed"; renderStations()');
+  const warmedMark = h.el("#android-quick-list").children[0].children[0];
+  assert.notEqual(warmedMark, firstMark);
+  assert.equal(warmedMark.children[1].src, png);
+  assert.deepEqual(urls, ["https://art.test/first.png"]);
+
+  h.evaluate('state.stations[0].logo = "https://art.test/second.png"; renderStations()');
+  await flush();
+  const failedMark = h.el("#android-quick-list").children[0].children[0];
+  assert.equal(failedMark.children[1].src, png);
+  await failedMark.children[1].dispatch("error");
+  assert.equal(failedMark.children[1].hidden, true);
+  assert.equal(failedMark.children[0].hidden, false);
+  assert.deepEqual(urls, ["https://art.test/first.png", "https://art.test/second.png"]);
+
+  h.evaluate('state.stations[0].logo = ""; renderStations()');
+  const plainMark = h.el("#android-quick-list").children[0].children[0];
+  assert.equal(plainMark.children[0].textContent, "R");
+  assert.equal(plainMark.children[0].hidden, false);
+  assert.equal(plainMark.children[1].src, undefined);
 });
 
 test("Android Stations places Recent before All and keeps All sorted without reordering", async () => {
