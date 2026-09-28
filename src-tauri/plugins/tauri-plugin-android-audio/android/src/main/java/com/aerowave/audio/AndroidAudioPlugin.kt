@@ -13,9 +13,13 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.webkit.WebView
+import android.view.View
 import android.view.WindowManager
 import androidx.activity.result.ActivityResult
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import app.tauri.PermissionState
 import app.tauri.annotation.Command
 import app.tauri.annotation.ActivityCallback
@@ -66,6 +70,11 @@ class PlayArgs {
 @InvokeArg
 class SetVolumeArgs {
   var volume: Double = 1.0
+}
+
+@InvokeArg
+class SetPlayerFullscreenArgs {
+  var enabled: Boolean = false
 }
 
 @InvokeArg
@@ -134,6 +143,11 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
 
   override fun load(webView: WebView) {
     super.load(webView)
+    // A recreated WebView starts in the ordinary window layout even if the
+    // previous page left the main activity in immersive mode.
+    activity.runOnUiThread {
+      if (!activity.isFinishing && !activity.isDestroyed) applyPlayerFullscreen(false)
+    }
     val restoredFromPreviousProcess = AudioStateStore.restoredFromPreviousProcess(activity)
     val stale = AudioStateStore.snapshot(activity)
     if (restoredFromPreviousProcess &&
@@ -287,6 +301,41 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
     PlaybackService.setVolume(activity, volume) { state ->
       invoke.resolve(state.toJsObject())
     }
+  }
+
+  @Command
+  fun setPlayerFullscreen(invoke: Invoke) {
+    try {
+      val enabled = invoke.parseArgs(SetPlayerFullscreenArgs::class.java).enabled
+      activity.runOnUiThread {
+        try {
+          if (activity.isFinishing || activity.isDestroyed || !applyPlayerFullscreen(enabled)) {
+            invoke.reject("Player window is not available")
+          } else {
+            invoke.resolve()
+          }
+        } catch (error: Exception) {
+          invoke.reject(error.message ?: "Unable to change player fullscreen")
+        }
+      }
+    } catch (error: Exception) {
+      invoke.reject(error.message ?: "Unable to change player fullscreen")
+    }
+  }
+
+  private fun applyPlayerFullscreen(enabled: Boolean): Boolean {
+    val content = activity.findViewById<View>(android.R.id.content) ?: return false
+    WindowInsetsControllerCompat(activity.window, content).apply {
+      systemBarsBehavior = if (enabled) {
+        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+      } else {
+        WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
+      }
+      if (enabled) hide(WindowInsetsCompat.Type.systemBars())
+      else show(WindowInsetsCompat.Type.systemBars())
+    }
+    ViewCompat.requestApplyInsets(content)
+    return true
   }
 
   @Command

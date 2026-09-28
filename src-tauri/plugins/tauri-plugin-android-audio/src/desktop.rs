@@ -5,8 +5,8 @@ use tauri::{plugin::PluginApi, AppHandle, Runtime};
 use crate::models::{
     AlarmIdPayload, AlarmSettingsPayload, AlarmState, ArtworkPayload, FolderInfo,
     FolderPathPayload, MetadataEnabledPayload, PlayPayload, PlaybackState, RandomTrackPayload,
-    SaveBackupFilePayload, SkipAlarmPayload, SleepTimerPayload, SleepTimerSnapshot,
-    SyncAlarmsPayload, TestAlarmPayload, TrackPick, VolumePayload,
+    SaveBackupFilePayload, SetPlayerFullscreenPayload, SkipAlarmPayload, SleepTimerPayload,
+    SleepTimerSnapshot, SyncAlarmsPayload, TestAlarmPayload, TrackPick, VolumePayload,
 };
 
 pub struct AndroidAudio<R: Runtime>(PhantomData<fn() -> R>);
@@ -41,6 +41,13 @@ impl<R: Runtime> AndroidAudio<R> {
 
     pub fn set_volume(&self, _payload: VolumePayload) -> Result<PlaybackState, String> {
         Ok(PlaybackState::default())
+    }
+
+    pub fn set_player_fullscreen(
+        &self,
+        _payload: SetPlayerFullscreenPayload,
+    ) -> Result<(), String> {
+        Err("Android player fullscreen is only available on Android".into())
     }
 
     pub fn update_artwork(&self, _payload: ArtworkPayload) -> Result<PlaybackState, String> {

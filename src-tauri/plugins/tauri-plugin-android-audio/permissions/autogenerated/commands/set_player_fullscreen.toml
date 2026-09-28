@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-set-player-fullscreen"
+description = "Enables the set_player_fullscreen command without any pre-configured scope."
+commands.allow = ["set_player_fullscreen"]
+
+[[permission]]
+identifier = "deny-set-player-fullscreen"
+description = "Denies the set_player_fullscreen command without any pre-configured scope."
+commands.deny = ["set_player_fullscreen"]

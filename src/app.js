@@ -39,19 +39,16 @@ if (IS_ANDROID) {
   $$('[data-tauri-drag-region]').forEach((element) => element.removeAttribute("data-tauri-drag-region"));
   $("#build-label").textContent = "Android";
   $("#pane-player").append($("#player-stage"));
-  const stationSubtabs = $("#station-subtabs");
-  for (const id of ["radio", "browse"]) {
-    const tab = $("#tab-" + id);
-    tab.classList.remove("tab");
-    tab.classList.add("station-tab");
-    stationSubtabs.append(tab);
-  }
-  $("#tab-radio-label").textContent = "Saved";
+  $("#pane-player").append($("#station-music"));
+  $("#station-views").append($("#station-recent"), $("#station-all"));
+  $("#station-sort").value = "name";
+  $("#station-order-hint").hidden = true;
   $("#tab-player").classList.add("tab", "on");
   $("#tab-player").setAttribute("aria-selected", "true");
   $("#tab-player").tabIndex = 0;
-  $("#tab-library").classList.add("tab");
-  $("#tab-library").setAttribute("aria-controls", "pane-radio");
+  $("#tab-radio").classList.remove("on");
+  $("#tab-radio").setAttribute("aria-selected", "false");
+  $("#tab-radio").tabIndex = -1;
   $("#pane-radio").classList.remove("on");
   $("#pane-player").classList.add("on");
   showTrackText("Choose a station or browse the directory.");
@@ -118,6 +115,7 @@ async function tickClock() {
 function setStatus(text, lamp) {
   $("#statusline").textContent = text;
   $("#lamp").className = "lamp" + (lamp ? " " + lamp : "");
+  if (IS_ANDROID) renderAndroidMiniPlayer();
 }
 
 let statusMsgTimer = null;
@@ -202,10 +200,71 @@ let androidPositionMs = null;
 let androidReadyGeneration = null;
 let androidHandledErrorGeneration = null;
 let androidPollTimer = null;
+let androidPlaybackStatus = "idle";
+let androidPlayPendingGeneration = null;
+let androidTransportPending = null;
+let androidPlayerReturnPane = null;
+let androidNavigateToPane = null;
+let androidPlayerFullscreen = false;
+let androidFullscreenRevision = 0;
+let androidFullscreenTail = Promise.resolve();
 
 function androidCommand(command, payload) {
   const name = `${ANDROID_AUDIO_PLUGIN}|${command}`;
   return payload === undefined ? invoke(name) : invoke(name, { payload });
+}
+
+function renderAndroidPlayerFullscreen() {
+  document.body.classList.toggle("player-fullscreen", androidPlayerFullscreen);
+  const button = $("#btn-player-fullscreen");
+  const label = androidPlayerFullscreen ? "Exit fullscreen Player" : "Enter fullscreen Player";
+  button.setAttribute("aria-label", label);
+  button.setAttribute("aria-pressed", String(androidPlayerFullscreen));
+  button.title = label;
+  $("#btn-play-folder").textContent = androidPlayerFullscreen ? "Shuffle your music" : "Shuffle";
+}
+
+// Serialize window inset changes so an older enter cannot outlive a later Back.
+function queueAndroidPlayerFullscreen(enabled, onFailure = () => {}) {
+  const revision = ++androidFullscreenRevision;
+  androidFullscreenTail = androidFullscreenTail.then(async () => {
+    if (revision !== androidFullscreenRevision) return false;
+    try {
+      await androidCommand("set_player_fullscreen", { enabled });
+      return true;
+    } catch (error) {
+      if (revision === androidFullscreenRevision) onFailure(error);
+      return false;
+    }
+  });
+  return androidFullscreenTail;
+}
+
+function setAndroidPlayerFullscreen(enabled, { returnToOrigin = false, focusExit = true, focusTarget = null } = {}) {
+  if (!IS_ANDROID || enabled === androidPlayerFullscreen) return Promise.resolve(false);
+  if (enabled && (ringing || currentPane() !== "player")) return Promise.resolve(false);
+  androidPlayerFullscreen = enabled;
+  renderAndroidPlayerFullscreen();
+  const button = $("#btn-player-fullscreen");
+  if (enabled) button.focus({ preventScroll: true });
+  else {
+    const origin = returnToOrigin ? androidPlayerReturnPane : null;
+    androidPlayerReturnPane = null;
+    if (origin && origin !== "player") androidNavigateToPane?.(origin);
+    else if (focusExit) (focusTarget || button).focus({ preventScroll: true });
+  }
+  return queueAndroidPlayerFullscreen(enabled, error => {
+    if (enabled && androidPlayerFullscreen) {
+      androidPlayerFullscreen = false;
+      renderAndroidPlayerFullscreen();
+      const origin = androidPlayerReturnPane;
+      androidPlayerReturnPane = null;
+      if (origin) androidNavigateToPane?.(origin);
+      else button.focus({ preventScroll: true });
+      queueAndroidPlayerFullscreen(false);
+    }
+    say((enabled ? "Could not enter fullscreen: " : "Could not restore system bars: ") + String(error), "bad", true);
+  });
 }
 
 function invalidateAndroidStateRequests() {
@@ -241,6 +300,11 @@ function clearTimers() {
 function stopPlayback(quiet, { skipNative = false } = {}) {
   playGeneration += 1;
   invalidateAndroidStateRequests();
+  if (IS_ANDROID) {
+    androidPlaybackStatus = "idle";
+    androidPlayPendingGeneration = null;
+    androidTransportPending = null;
+  }
   if (IS_ANDROID && !skipNative) {
     androidCommand("stop").catch((error) => {
       if (!player.source) {
@@ -290,6 +354,7 @@ function stopPlayback(quiet, { skipNative = false } = {}) {
   }
   refreshBrowseIndicators();
   refreshStationIndicators();
+  if (IS_ANDROID) renderAndroidMiniPlayer();
 }
 
 function androidActiveStatus(status) {
@@ -321,6 +386,7 @@ function restoreAndroidSource(nativeState) {
   resetAndroidPositionSample();
   player.source = source;
   player.nativeGeneration = generation;
+  androidPlaybackStatus = nativeState.status;
   player.resolved = nativeState.sourceUrl || source.url;
   player.hls = source.hls;
   player.target = Number.isFinite(nativeState.volume) ? nativeState.volume : (state.settings.volume ?? 0.8);
@@ -351,6 +417,7 @@ function applyAndroidPlaybackState(nativeState, { allowRestore = false } = {}) {
       nativeState.sourceUrl.startsWith("content://") && androidActiveStatus(nativeState.status)) {
     restoreAndroidSource(nativeState);
   }
+  androidPlaybackStatus = nativeState.status;
 
   if (Number.isFinite(nativeState.volume)) {
     player.target = Math.min(1, Math.max(0, nativeState.volume));
@@ -419,7 +486,7 @@ function applyAndroidPlaybackState(nativeState, { allowRestore = false } = {}) {
 }
 
 async function refreshAndroidPlayback({ allowRestore = false } = {}) {
-  if (!IS_ANDROID || (document.hidden && !allowRestore)) return;
+  if (!IS_ANDROID || androidTransportPending || (document.hidden && !allowRestore)) return;
   const request = ++androidStateRequest;
   try {
     const nativeState = await androidCommand("get_state");
@@ -462,6 +529,9 @@ function applyAndroidAlarmState(snapshot) {
   if (alarmsChanged) renderAlarms();
   if (permissionsChanged) renderAndroidAlarmPermissions();
   const nextRing = snapshot.ringing;
+  if (nextRing && androidPlayerFullscreen) {
+    setAndroidPlayerFullscreen(false, { returnToOrigin: false, focusExit: false });
+  }
   if (!nextRing) {
     if (ringing?.native) {
       ringing = null;
@@ -473,6 +543,7 @@ function applyAndroidAlarmState(snapshot) {
       androidRingFocusBefore = null;
       renderSleepTimer();
     }
+    renderAndroidMiniPlayer();
     return;
   }
   const changed = !ringing?.native || ringing.occurrenceId !== nextRing.occurrenceId;
@@ -494,6 +565,7 @@ function applyAndroidAlarmState(snapshot) {
   $("#ringing").hidden = false;
   $("#app-content").inert = true;
   renderSleepTimer();
+  renderAndroidMiniPlayer();
   if (changed) $("#ring-dismiss").focus();
 }
 
@@ -822,6 +894,7 @@ function showNowPlaying(title, sub, meta) {
   showTrackText(sub);
   if (meta !== undefined) $("#np-meta").textContent = meta || "";
   updateMediaMetadata();
+  if (IS_ANDROID) renderAndroidMiniPlayer();
 }
 
 function updateMediaMetadata() {
@@ -845,6 +918,7 @@ function setTrackTitle(title) {
   showTrackText(source.kind === "station" && state.settings.showMetadata === false
     ? source.url : player.trackTitle);
   updateMediaMetadata();
+  if (IS_ANDROID) renderAndroidMiniPlayer();
 }
 
 function refreshMetadataPreference() {
@@ -1188,6 +1262,7 @@ async function startAndroidPlayback(source, sourceUrl, useHls, generation, volum
   player.relayed = !useHls && playUrl !== sourceUrl;
   player.hls = useHls;
   player.nativeGeneration = generation;
+  androidPlayPendingGeneration = generation;
   androidHandledErrorGeneration = null;
   resetAndroidPositionSample();
   invalidateAndroidStateRequests();
@@ -1218,6 +1293,11 @@ async function startAndroidPlayback(source, sourceUrl, useHls, generation, volum
   } catch (error) {
     if (!superseded(generation) && player.source === source) failure(String(error));
     return false;
+  } finally {
+    if (androidPlayPendingGeneration === generation) {
+      androidPlayPendingGeneration = null;
+      renderAndroidMiniPlayer();
+    }
   }
 }
 
@@ -1237,6 +1317,7 @@ async function play(source, opts = {}) {
   stopPlayback(true, { skipNative: IS_ANDROID });
   const generation = playGeneration;
   player.source = source;
+  if (IS_ANDROID) androidPlaybackStatus = "connecting";
   refreshStationIndicators();
   player.lastProgress = IS_ANDROID ? 0 : Date.now();
   player.retries = 0;
@@ -1435,6 +1516,7 @@ function showOrbArt(source, picture) {
   player.artwork = picture;
   if (window.aerowaveOrb?.ok) window.aerowaveOrb.setImage(picture);
   updateMediaMetadata();
+  if (IS_ANDROID) renderAndroidMiniPlayer();
   if (source && picture) syncAndroidArtwork(source);
 }
 
@@ -1946,7 +2028,7 @@ let folderPickRequest = 0;
 async function playRandomFromFolder(folder, opts = {}) {
   if (!folder) {
     say("choose a folder first", "bad");
-    return;
+    return false;
   }
   const request = ++folderPickRequest;
   const generation = playGeneration;
@@ -1976,10 +2058,12 @@ async function playRandomFromFolder(folder, opts = {}) {
       },
       opts
     );
+    return true;
   } catch (e) {
     if (stale()) return;
     if (!opts.silentErrors) say(String(e), "bad");
     stopPlayback();
+    return false;
   }
 }
 
@@ -2003,18 +2087,27 @@ function pausePlayback() {
   // Set before the element is touched: the `pause` listener below reads it to
   // tell this apart from the audio being taken away by something else.
   player.paused = true;
+  if (IS_ANDROID) androidPlaybackStatus = "paused";
   if (IS_ANDROID) {
     const generation = player.nativeGeneration;
+    const transport = { generation, action: "pause" };
+    androidTransportPending = transport;
     invalidateAndroidStateRequests();
     androidCommand("pause").then((nativeState) => {
       if (player.nativeGeneration === generation) applyAndroidPlaybackState(nativeState);
     }).catch((error) => {
       if (player.nativeGeneration === generation) {
         player.paused = false;
+        androidPlaybackStatus = "playing";
         markPlaying(true);
         setStatus("Playing", "on");
         say("Could not pause: " + String(error), "bad");
         refreshAndroidPlayback();
+      }
+    }).finally(() => {
+      if (androidTransportPending === transport) {
+        androidTransportPending = null;
+        renderAndroidMiniPlayer();
       }
     });
   } else {
@@ -2044,7 +2137,11 @@ function resumePlayback() {
   }
   player.paused = false;
   if (IS_ANDROID) {
+    androidPlaybackStatus = "buffering";
+    resetAndroidPositionSample();
     const generation = player.nativeGeneration;
+    const transport = { generation, action: "resume" };
+    androidTransportPending = transport;
     invalidateAndroidStateRequests();
     markPlaying(true);
     setStatus("Resuming", "busy");
@@ -2053,10 +2150,16 @@ function resumePlayback() {
     }).catch((error) => {
       if (player.nativeGeneration === generation) {
         player.paused = true;
+        androidPlaybackStatus = "paused";
         markPlaying(false);
         setStatus("Paused", "");
         say("Could not resume: " + String(error), "bad");
         refreshAndroidPlayback();
+      }
+    }).finally(() => {
+      if (androidTransportPending === transport) {
+        androidTransportPending = null;
+        renderAndroidMiniPlayer();
       }
     });
     return;
@@ -2126,13 +2229,75 @@ function wireMediaKeys() {
 }
 
 /** Which tab is in front. */
-const currentPane = () => {
-  if (IS_ANDROID && $("#tab-library").classList.contains("on")) {
-    return $("#tab-browse").classList.contains("on") ? "browse" : "radio";
+const currentPane = () => $$(".tab").find(tab => tab.classList.contains("on"))?.dataset.pane || "";
+
+function androidPlaybackControlReady() {
+  if (!player.source || androidPlayPendingGeneration !== null || androidTransportPending ||
+      androidPlaybackStatus === "connecting") return false;
+  if (androidPlaybackStatus === "paused" || androidPlaybackStatus === "error") return true;
+  // A startForegroundService acknowledgment can precede the service's player.
+  // Only a progressing session is ready to honor Pause; Stop can cancel earlier.
+  return (androidPlaybackStatus === "playing" || androidPlaybackStatus === "buffering") &&
+    androidReadyGeneration === player.nativeGeneration;
+}
+
+function renderAndroidMiniPlayer() {
+  if (!IS_ANDROID) return;
+  const action = androidPlaybackStatus === "error" ? "Retry"
+    : androidPlaybackStatus === "paused" || !player.source ? "Play" : "Pause";
+  $("#btn-play").setAttribute("aria-label", action + " playback");
+  $("#btn-play").title = action + " playback";
+  $("#btn-play").disabled = !!player.source && !androidPlaybackControlReady();
+  $("#btn-stop-android").hidden = !player.source;
+  const bar = $("#mini-player");
+  const editorOpen = ($("#pane-radio").classList.contains("on") &&
+      !$("#station-editor").classList.contains("hidden")) ||
+    ($("#pane-alarms").classList.contains("on") &&
+      !$("#alarm-editor").classList.contains("hidden"));
+  bar.hidden = !player.source || androidPlaybackStatus === "idle" || currentPane() === "player" ||
+    editorOpen || !!ringing;
+  if (bar.hidden) return;
+
+  const title = player.source.title || "Live radio";
+  $("#mini-title").textContent = title;
+  $("#mini-open").setAttribute("aria-label", `Open player for ${title}`);
+  $("#mini-state").textContent = $("#statusline").textContent || "Connecting";
+  const track = player.source.kind === "station" && state.settings.showMetadata === false
+    ? "" : player.trackTitle || "";
+  $("#mini-track").textContent = track;
+  $("#mini-track").hidden = !track;
+
+  const artwork = player.artwork;
+  const image = $("#mini-art-image");
+  if (artwork) {
+    if (image.src !== artwork) image.src = artwork;
+    image.hidden = false;
+  } else {
+    image.removeAttribute("src");
+    image.hidden = true;
   }
-  const tab = $(".tab.on");
-  return tab ? tab.dataset.pane : "";
-};
+  $("#mini-art-fallback").hidden = !!artwork;
+
+  const paused = androidPlaybackStatus === "paused";
+  const error = androidPlaybackStatus === "error";
+  const toggle = $("#mini-toggle");
+  toggle.classList.toggle("is-resumable", paused || error);
+  toggle.disabled = !androidPlaybackControlReady();
+  toggle.setAttribute("aria-label", `${error ? "Retry" : paused ? "Resume" : "Pause"} ${title}`);
+}
+
+function toggleAndroidPlayback() {
+  if (!IS_ANDROID || !player.source) return togglePlay();
+  if (ringing) return;
+  if (!androidPlaybackControlReady()) return;
+  if (androidPlaybackStatus === "error") {
+    say("Trying " + (player.source.title || "this station") + " again");
+    return play(player.source, { volume: player.target });
+  }
+  if (androidPlaybackStatus === "paused") return resumePlayback();
+  if (androidPlaybackStatus === "connecting" && player.nativeGeneration === null) return;
+  pausePlayback();
+}
 
 /**
  * Prev and next step through the list in front of you rather than always
@@ -3476,7 +3641,7 @@ function resetStationFilters() {
 }
 
 function canReorderStations() {
-  return !stationRecentOnly && $("#station-sort").value !== "name" &&
+  return !IS_ANDROID && !stationRecentOnly && $("#station-sort").value !== "name" &&
     visibleStations.length > 1 && !stationMovePending && !setupRestorePending;
 }
 
@@ -3629,11 +3794,11 @@ function renderStations() {
     (s) => (!stationFavoritesOnly || s.favorite) &&
       (!q || s.name.toLowerCase().includes(q) || (s.tag || "").toLowerCase().includes(q))
   );
-  if (!stationRecentOnly && $("#station-sort").value === "name") {
+  if (!stationRecentOnly && (IS_ANDROID || $("#station-sort").value === "name")) {
     visibleStations.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
   }
   const filtered = !!q || stationFavoritesOnly;
-  $("#station-sort").hidden = stationRecentOnly;
+  $("#station-sort").hidden = IS_ANDROID || stationRecentOnly;
   list.setAttribute("aria-busy", String(stationMovePending));
   $("#station-list").setAttribute("aria-label", stationRecentOnly ? "Recently played stations" : "Saved stations");
   $("#station-all-count").textContent = state.stations.length;
@@ -3897,6 +4062,7 @@ function renderAlarms() {
     : focused?.classList.contains("sw") ? ".sw" : ".alarm-card-main";
   list.innerHTML = "";
   const sorted = [...state.alarms].sort((a, b) => a.hour - b.hour || a.minute - b.minute);
+  $("#btn-add-alarm").hidden = IS_ANDROID && !sorted.length;
 
   if (!sorted.length) {
     const li = document.createElement("li");
@@ -3910,7 +4076,7 @@ function renderAlarms() {
     note.textContent = "Wake up to your favourite station or music from a folder. Set a daily routine or a one-time alarm.";
     const add = document.createElement("button");
     add.type = "button";
-    add.className = "gel primary";
+    add.className = "gel primary alarm-empty-create";
     add.textContent = "Create an alarm";
     add.addEventListener("click", () => openAlarmEditor(null));
     li.append(clock, title, note, add);
@@ -4012,7 +4178,9 @@ function renderAlarms() {
         const focusId = saved ? sorted[index + 1]?.id || sorted[index - 1]?.id : alarm.id;
         const focusRow = Array.from(list.children).find(item => item.dataset.id === focusId);
         (focusRow?.querySelector(saved ? ".alarm-card-main" : ".alarm-delete") ||
-          list.querySelector(".alarm-card-main") || $("#btn-add-alarm")).focus({ preventScroll: true });
+          list.querySelector(".alarm-card-main") ||
+          (IS_ANDROID ? list.querySelector(".alarm-empty-create") : null) ||
+          $("#btn-add-alarm")).focus({ preventScroll: true });
       }
       if (saved) say("alarm deleted", "good");
     });
@@ -4525,6 +4693,9 @@ let stationEditorReturnFocus = null;
 
 function openStationEditor(station) {
   if (stationEditorSaving) return;
+  if (IS_ANDROID && androidPlayerFullscreen) {
+    setAndroidPlayerFullscreen(false, { returnToOrigin: false, focusExit: false });
+  }
   cancelStationTest();
   stationEditorSaveFailed = false;
   stationEditorReturnFocus = { element: document.activeElement, stationId: station?.id };
@@ -4539,6 +4710,7 @@ function openStationEditor(station) {
   $("#st-delete").classList.toggle("hidden", !station);
   $("#station-editor").classList.remove("hidden");
   $("#pane-radio").classList.add("editing");
+  if (IS_ANDROID) renderAndroidMiniPlayer();
   if (IS_ANDROID) {
     dismissAndroidKeyboard();
     $("#station-editor-title").focus({ preventScroll: true });
@@ -4554,6 +4726,7 @@ function closeStationEditor() {
   editingStation = null;
   $("#station-editor").classList.add("hidden");
   $("#pane-radio").classList.remove("editing");
+  if (IS_ANDROID) renderAndroidMiniPlayer();
   if (wasOpen && $("#pane-radio").classList.contains("on")) {
     const row = Array.from($("#station-list").children).find((entry) => entry.dataset.id === stationEditorReturnFocus?.stationId);
     const target = row?.querySelector(".station-edit") ||
@@ -4850,6 +5023,9 @@ function closeAlarmNameDialog(save = false, restoreFocus = true) {
 
 function openAlarmEditor(alarm, { copy = false } = {}) {
   if (alarmEditorSaving) return;
+  if (IS_ANDROID && androidPlayerFullscreen) {
+    setAndroidPlayerFullscreen(false, { returnToOrigin: false, focusExit: false });
+  }
   if (!alarm && !clockNow) {
     say("Could not read the system clock. Try again.", "bad");
     tickClock();
@@ -4913,6 +5089,7 @@ function openAlarmEditor(alarm, { copy = false } = {}) {
   $("#al-save").textContent = alarmSaveCaption();
   $("#pane-alarms").classList.add("editing");
   $("#alarm-editor").classList.remove("hidden");
+  if (IS_ANDROID) renderAndroidMiniPlayer();
   $("#alarm-editor .alarm-editor-body").scrollTop = 0;
   if (IS_ANDROID) {
     dismissAndroidKeyboard();
@@ -4960,11 +5137,13 @@ function closeAlarmEditor(savedId = null) {
   alarmCopySourceId = null;
   $("#alarm-editor").classList.add("hidden");
   $("#pane-alarms").classList.remove("editing");
+  if (IS_ANDROID) renderAndroidMiniPlayer();
   if (wasOpen && !ringing) {
     const savedRow = $$("#alarm-list .alarm-card-main").find((button) => button.dataset.alarmId === editedId);
     const copyTrigger = wasCopy && !savedId ? savedRow?.closest(".alarm-card")?.querySelector(".alarm-duplicate") : null;
-    const target = savedId && savedRow ? savedRow : editorReturnFocus?.isConnected ? editorReturnFocus
-      : copyTrigger || savedRow || $("#btn-add-alarm");
+    const emptyCreate = IS_ANDROID ? $("#alarm-list").querySelector(".alarm-empty-create") : null;
+    const target = savedId && savedRow ? savedRow : editorReturnFocus?.isConnected && !editorReturnFocus.hidden ? editorReturnFocus
+      : copyTrigger || savedRow || emptyCreate || $("#btn-add-alarm");
     target.focus({ preventScroll: true });
   }
   editorReturnFocus = null;
@@ -4974,6 +5153,10 @@ function closeAlarmEditor(savedId = null) {
 // in progress keeps its editor open, so Back is still consumed in that case.
 function handleAndroidBack() {
   if (!IS_ANDROID) return false;
+  if (androidPlayerFullscreen) {
+    setAndroidPlayerFullscreen(false, { returnToOrigin: true });
+    return true;
+  }
   if ($("#al-name-dialog").open) {
     closeAlarmNameDialog();
     return true;
@@ -4984,6 +5167,12 @@ function handleAndroidBack() {
   }
   if (!$("#station-editor").classList.contains("hidden")) {
     closeStationEditor();
+    return true;
+  }
+  if (currentPane() === "player" && androidPlayerReturnPane) {
+    const pane = androidPlayerReturnPane;
+    androidPlayerReturnPane = null;
+    androidNavigateToPane?.(pane);
     return true;
   }
   return false;
@@ -5296,7 +5485,11 @@ function wire() {
   }
 
   // transport
-  $("#btn-play").addEventListener("click", togglePlay);
+  $("#btn-play").addEventListener("click", IS_ANDROID ? toggleAndroidPlayback : togglePlay);
+  if (IS_ANDROID) $("#btn-stop-android").addEventListener("click", () => { if (!ringing) stopPlayback(); });
+  if (IS_ANDROID) $("#btn-player-fullscreen").addEventListener("click", () => {
+    setAndroidPlayerFullscreen(!androidPlayerFullscreen, { returnToOrigin: true });
+  });
   $("#btn-prev").addEventListener("click", () => step(-1));
   $("#btn-next").addEventListener("click", () => step(1));
 
@@ -5360,8 +5553,10 @@ function wire() {
   });
   if (IS_ANDROID) $$(".settings-category").forEach((category) => { category.open = false; });
   const tabs = $$(".tab");
-  const stationTabs = IS_ANDROID ? $$(".station-tab") : [];
   const activateTab = (tab) => {
+      if (IS_ANDROID && androidPlayerFullscreen && tab.dataset.pane !== "player") {
+        setAndroidPlayerFullscreen(false, { returnToOrigin: false, focusExit: false });
+      }
       if (IS_ANDROID) {
         dismissAndroidKeyboard();
         tab.focus({ preventScroll: true });
@@ -5371,11 +5566,12 @@ function wire() {
         t.setAttribute("aria-selected", String(t === tab));
         t.tabIndex = t === tab ? 0 : -1;
       });
-      const pane = IS_ANDROID && tab === $("#tab-library")
-        ? $("#tab-browse").classList.contains("on") ? "browse" : "radio"
-        : tab.dataset.pane;
+      const pane = tab.dataset.pane;
       $$(".pane").forEach((p) => p.classList.toggle("on", p.id === "pane-" + pane));
-      if (IS_ANDROID && tab === $("#tab-library")) tab.setAttribute("aria-controls", "pane-" + pane);
+      if (IS_ANDROID) {
+        if (pane !== "player") androidPlayerReturnPane = null;
+        renderAndroidMiniPlayer();
+      }
       if (pane === "alarms") {
         if (IS_ANDROID) refreshAndroidAlarms();
         else {
@@ -5386,15 +5582,17 @@ function wire() {
       if (pane === "browse") browseFirstLook();
       if (!IS_ANDROID && pane === "settings") refreshPowerStatus();
   };
-  const activateStationTab = (tab) => {
-    stationTabs.forEach((item) => {
-      item.classList.toggle("on", item === tab);
-      item.setAttribute("aria-selected", String(item === tab));
-      item.tabIndex = item === tab ? 0 : -1;
+  if (IS_ANDROID) {
+    androidNavigateToPane = (pane) => activateTab($("#tab-" + pane));
+    $("#mini-open").addEventListener("click", () => {
+      androidPlayerReturnPane = currentPane();
+      activateTab($("#tab-player"));
+      setAndroidPlayerFullscreen(true);
     });
-    activateTab($("#tab-library"));
-    tab.focus({ preventScroll: true });
-  };
+    $("#mini-toggle").addEventListener("click", () => {
+      if (player.source) toggleAndroidPlayback();
+    });
+  }
   tabs.forEach((tab, index) => {
     tab.tabIndex = tab.classList.contains("on") ? 0 : -1;
     tab.addEventListener("click", () => activateTab(tab));
@@ -5410,21 +5608,6 @@ function wire() {
       tabs[next].focus({ preventScroll: true });
     });
   });
-  stationTabs.forEach((tab, index) => {
-    tab.tabIndex = tab.classList.contains("on") ? 0 : -1;
-    tab.addEventListener("click", () => activateStationTab(tab));
-    tab.addEventListener("keydown", event => {
-      if (event.altKey || event.ctrlKey || event.metaKey) return;
-      const next = event.key === "Home" ? 0 : event.key === "End" ? stationTabs.length - 1
-        : event.key === "ArrowRight" ? (index + 1) % stationTabs.length
-        : event.key === "ArrowLeft" ? (index + stationTabs.length - 1) % stationTabs.length : null;
-      if (next == null) return;
-      event.preventDefault();
-      event.stopPropagation();
-      activateStationTab(stationTabs[next]);
-    });
-  });
-
   // stations
   $("#station-filter").addEventListener("input", renderStations);
   $("#station-filter").addEventListener("keydown", (event) => {
@@ -5435,7 +5618,12 @@ function wire() {
   });
   $("#station-sort").addEventListener("change", renderStations);
   $("#station-all").addEventListener("click", () => { stationFavoritesOnly = false; stationRecentOnly = false; renderStations(); });
-  $("#station-favorites").addEventListener("click", () => { stationFavoritesOnly = true; stationRecentOnly = false; renderStations(); });
+  $("#station-favorites").addEventListener("click", () => {
+    if (IS_ANDROID) return;
+    stationFavoritesOnly = true;
+    stationRecentOnly = false;
+    renderStations();
+  });
   $("#station-recent").addEventListener("click", () => { stationFavoritesOnly = false; stationRecentOnly = true; renderStations(); });
   wireStationDragging();
   $("#station-reset").addEventListener("click", resetStationFilters);
@@ -5535,13 +5723,11 @@ function wire() {
   });
   const browseFiltersToggle = $("#browse-filters-toggle");
   const browseFilterFields = $("#browse-filter-fields");
-  browseFilterFields.classList.toggle("open", !IS_ANDROID);
-  browseFiltersToggle.setAttribute("aria-expanded", String(!IS_ANDROID));
+  browseFilterFields.classList.add("open");
+  browseFiltersToggle.setAttribute("aria-expanded", "true");
   if (IS_ANDROID) {
-    browseFiltersToggle.addEventListener("click", () => {
-      const open = browseFilterFields.classList.toggle("open");
-      browseFiltersToggle.setAttribute("aria-expanded", String(open));
-    });
+    browseTag = browseTagLabel = "";
+    $("#browse-tag").value = "";
   }
   $("#browse-country").addEventListener("change", (e) => {
     browseCountry = e.target.value;
@@ -5549,6 +5735,7 @@ function wire() {
     browseSearch(false);
   });
   $("#browse-tag").addEventListener("change", (e) => {
+    if (IS_ANDROID) return;
     browseTag = e.target.value;
     browseTagLabel = labelOf(e.target);
     browseSearch(false);
@@ -5562,7 +5749,7 @@ function wire() {
     browseSearch(false);
   });
 
-  // shuffle folder on the radio tab
+  // shuffle folder
   $("#btn-pick-folder").addEventListener("click", async () => {
     const info = await folderCommand("pick_folder").catch(e => { say(String(e), "bad"); return null; });
     if (!info) return;
@@ -5570,7 +5757,17 @@ function wire() {
     saveSettings();
     showFolderCounts(info, "#folder-path");
   });
-  $("#btn-play-folder").addEventListener("click", () => playRandomFromFolder(shuffleFolder()));
+  $("#btn-play-folder").addEventListener("click", async () => {
+    const folder = shuffleFolder();
+    if (IS_ANDROID && androidPlayerFullscreen && !folder) {
+      setAndroidPlayerFullscreen(false, { returnToOrigin: false, focusTarget: $("#btn-pick-folder") });
+    }
+    const startedFullscreen = IS_ANDROID && androidPlayerFullscreen;
+    const started = await playRandomFromFolder(folder);
+    if (startedFullscreen && started === false && androidPlayerFullscreen) {
+      setAndroidPlayerFullscreen(false, { returnToOrigin: false, focusTarget: $("#btn-play-folder") });
+    }
+  });
 
   $("#btn-pick-backup").addEventListener("click", async () => {
     const info = await folderCommand("pick_folder").catch(e => { say(String(e), "bad"); return null; });
@@ -5817,10 +6014,16 @@ function wire() {
     if (e.code === "Space" && (ringing || (!typing && !onControl))) {
       e.preventDefault();
       if (ringing) dismissRing();
+      else if (IS_ANDROID) toggleAndroidPlayback();
       else togglePlay();
     }
     if (e.key === "Escape") {
       if (ringing) return; // an alarm should take a deliberate button press
+      if (IS_ANDROID && androidPlayerFullscreen) {
+        e.preventDefault();
+        setAndroidPlayerFullscreen(false, { returnToOrigin: true });
+        return;
+      }
       if (IS_ANDROID && $("#al-name-dialog").open) {
         e.preventDefault();
         closeAlarmNameDialog();
@@ -5890,6 +6093,7 @@ async function boot() {
   // Subscribe before the initial query so that completion cannot leave it stale.
   if (!IS_ANDROID) await listen("power-status-updated", () => refreshPowerStatus());
   wire();
+  if (IS_ANDROID) queueAndroidPlayerFullscreen(false);
   setInterval(tickClock, 1000);
   if (!IS_ANDROID) {
     setInterval(refreshNextAlarm, 20000);
@@ -5905,6 +6109,7 @@ async function boot() {
 
   if (IS_ANDROID) {
     await refreshAndroidPlayback({ allowRestore: true });
+    renderAndroidMiniPlayer();
     startAndroidStateSync();
     showBuildLabel();
     if (!configLoadError) say(player.source ? "Background playback restored" : "Ready to listen", "good");

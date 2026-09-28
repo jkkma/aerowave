@@ -3,7 +3,7 @@ const test = require("node:test");
 const { createHarness, flush } = require("./frontend-harness.cjs");
 
 const desktopNames = ["radio", "browse", "alarms", "settings"];
-const androidNames = ["player", "library", "alarms", "settings"];
+const androidNames = ["player", "radio", "browse", "alarms", "settings"];
 const paneNames = ["player", "radio", "browse", "alarms", "settings"];
 
 function tabHarness(android = false) {
@@ -28,14 +28,6 @@ function tabHarness(android = false) {
     tab.setAttribute("aria-selected", String(index === 0));
     return tab;
   }));
-  h.queries.set(".station-tab", android ? ["radio", "browse"].map((name, index) => {
-    const tab = h.el(`#tab-${name}`);
-    tab.dataset.pane = name;
-    tab.classList.toggle("on", index === 0);
-    tab.tabIndex = index === 0 ? 0 : -1;
-    tab.setAttribute("aria-selected", String(index === 0));
-    return tab;
-  }) : []);
   h.queries.set(".pane", paneNames.map((name) => {
     const pane = h.el(`#pane-${name}`);
     pane.id = `pane-${name}`;
@@ -55,9 +47,7 @@ function tabHarness(android = false) {
 
 function assertActive(h, name, { focus = true } = {}) {
   const names = h.android ? androidNames : desktopNames;
-  const pane = h.android && name === "library"
-    ? h.el("#tab-browse").classList.contains("on") ? "browse" : "radio"
-    : name;
+  const pane = name;
   const active = h.el(`#tab-${name}`);
   if (focus) assert.equal(h.document.activeElement, active);
   assert.equal(active.classList.contains("on"), true);
@@ -118,57 +108,46 @@ test("Home and End select the first and last tab; modified or vertical arrows do
   assertActive(h, "settings");
 });
 
-test("Android starts in the single Player pane and keeps four bottom destinations", async () => {
+test("Android starts in Player and exposes Stations and Browse directly", async () => {
   const h = tabHarness(true);
   assert.deepEqual(h.queries.get(".tab").map((tab) => tab.dataset.pane), androidNames);
-  assert.deepEqual(h.queries.get(".station-tab").map((tab) => tab.dataset.pane), ["radio", "browse"]);
   assert.equal(h.el("#player-stage").parentElement, h.el("#pane-player"));
-  assert.equal(h.el("#tab-radio").parentElement, h.el("#station-subtabs"));
-  assert.equal(h.el("#tab-radio-label").textContent, "Saved");
+  assert.equal(h.el("#station-music").parentElement, h.el("#pane-player"));
+  assert.deepEqual(h.el("#pane-player").children, [h.el("#player-stage"), h.el("#station-music")]);
+  assert.equal(h.el("#tab-radio").getAttribute("aria-selected"), "false");
   assertActive(h, "player", { focus: false });
 
-  await h.el("#tab-library").dispatch("click");
-  assertActive(h, "library");
-  assert.equal(h.el("#tab-radio").getAttribute("aria-selected"), "true");
+  await h.el("#tab-radio").dispatch("click");
+  assertActive(h, "radio");
   await h.el("#tab-browse").dispatch("click");
-  assertActive(h, "library", { focus: false });
-  assert.equal(h.el("#tab-library").getAttribute("aria-controls"), "pane-browse");
-  assert.equal(h.el("#tab-browse").getAttribute("aria-selected"), "true");
+  assertActive(h, "browse");
   await h.el("#tab-player").dispatch("click");
   assertActive(h, "player");
-  await h.el("#tab-library").dispatch("click");
-  assertActive(h, "library");
-  assert.equal(h.el("#pane-browse").classList.contains("on"), true);
+  await h.el("#tab-radio").dispatch("click");
+  assertActive(h, "radio");
 });
 
-test("Android bottom and Saved/Browse arrows stay within their own tablists", async () => {
+test("Android bottom arrows traverse all five destinations", async () => {
   const h = tabHarness(true);
   h.el("#tab-player").focus();
   await h.el("#tab-player").dispatch("keydown", { key: "ArrowRight" });
-  assertActive(h, "library");
-  await h.el("#tab-library").dispatch("keydown", { key: "ArrowRight" });
+  assertActive(h, "radio");
+  await h.el("#tab-radio").dispatch("keydown", { key: "ArrowRight" });
+  assertActive(h, "browse");
+  await h.el("#tab-browse").dispatch("keydown", { key: "ArrowRight" });
   assertActive(h, "alarms");
   await h.el("#tab-alarms").dispatch("keydown", { key: "ArrowRight" });
   assertActive(h, "settings");
   await h.el("#tab-settings").dispatch("keydown", { key: "ArrowRight" });
   assertActive(h, "player");
-
-  await h.el("#tab-library").dispatch("click");
-  h.el("#tab-radio").focus();
-  await h.el("#tab-radio").dispatch("keydown", { key: "ArrowRight" });
-  assertActive(h, "library", { focus: false });
-  assert.equal(h.document.activeElement, h.el("#tab-browse"));
-  await h.el("#tab-browse").dispatch("keydown", { key: "ArrowRight" });
-  assertActive(h, "library", { focus: false });
-  assert.equal(h.document.activeElement, h.el("#tab-radio"));
 });
 
 test("desktop skips Android-only tabs and leaves Settings categories expanded", async () => {
   const h = tabHarness();
   assert.deepEqual(h.queries.get(".tab").map((tab) => tab.dataset.pane), desktopNames);
   assert.equal(h.el("#tab-player").classList.contains("tab"), false);
-  assert.equal(h.el("#tab-library").classList.contains("tab"), false);
   assert.notEqual(h.el("#player-stage").parentElement, h.el("#pane-player"));
+  assert.notEqual(h.el("#station-music").parentElement, h.el("#pane-player"));
   assert.equal(h.settingsCategories.every((category) => category.open), true);
   h.el("#tab-settings").focus();
   await h.el("#tab-settings").dispatch("keydown", { key: "ArrowRight" });

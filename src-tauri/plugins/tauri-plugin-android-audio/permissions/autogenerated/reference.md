@@ -10,6 +10,7 @@ Allows Aerowave to control its Android background radio player.
 - `allow-stop`
 - `allow-get-state`
 - `allow-set-volume`
+- `allow-set-player-fullscreen`
 - `allow-update-artwork`
 - `allow-set-metadata-enabled`
 - `allow-set-sleep-timer`
@@ -449,6 +450,32 @@ Enables the set_metadata_enabled command without any pre-configured scope.
 <td>
 
 Denies the set_metadata_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-set-player-fullscreen`
+
+</td>
+<td>
+
+Enables the set_player_fullscreen command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-set-player-fullscreen`
+
+</td>
+<td>
+
+Denies the set_player_fullscreen command without any pre-configured scope.
 
 </td>
 </tr>

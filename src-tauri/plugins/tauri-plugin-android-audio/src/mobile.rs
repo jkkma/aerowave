@@ -6,8 +6,9 @@ use tauri::{
 use crate::models::{
     AlarmIdPayload, AlarmSettingsPayload, AlarmState, ArtworkPayload, FolderInfo,
     FolderPathPayload, MetadataEnabledPayload, PlayPayload, PlaybackState, RandomTrackPayload,
-    SaveBackupFilePayload, SkipAlarmPayload, SleepTimerPayload, SleepTimerSnapshot,
-    StreamTitlePayload, SyncAlarmsPayload, TestAlarmPayload, TrackPick, VolumePayload,
+    SaveBackupFilePayload, SetPlayerFullscreenPayload, SkipAlarmPayload, SleepTimerPayload,
+    SleepTimerSnapshot, StreamTitlePayload, SyncAlarmsPayload, TestAlarmPayload, TrackPick,
+    VolumePayload,
 };
 use serde::Serialize;
 
@@ -90,6 +91,13 @@ impl<R: Runtime> AndroidAudio<R> {
     pub fn set_volume(&self, payload: VolumePayload) -> Result<PlaybackState, String> {
         self.0
             .run_mobile_plugin("setVolume", payload)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn set_player_fullscreen(&self, payload: SetPlayerFullscreenPayload) -> Result<(), String> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>("setPlayerFullscreen", payload)
+            .map(|_| ())
             .map_err(|error| error.to_string())
     }
 

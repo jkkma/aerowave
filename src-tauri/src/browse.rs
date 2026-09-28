@@ -15,10 +15,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use aerowave_core::directory::{
-    bitrate_band_by_key, clean_name, directory_failure_forgets_mirror, directory_host_candidates,
-    directory_page_window, exact_tag_filter, first_tag, image_kind, is_country_code, is_hostname,
-    playable_url, select_directory_host, sort_key, stream_key, stream_matches,
-    tally_directory_facets, DirectoryFacetEntry, DirectoryFailure, BITRATE_BANDS, DIRECTORY_CODECS,
+    art_query_urls, bitrate_band_by_key, clean_name, directory_failure_forgets_mirror,
+    directory_host_candidates, directory_page_window, exact_tag_filter, first_tag, image_kind,
+    is_country_code, is_hostname, playable_url, select_directory_host, sort_key, stream_key,
+    stream_matches, tally_directory_facets, DirectoryFacetEntry, DirectoryFailure, BITRATE_BANDS,
+    DIRECTORY_CODECS,
 };
 use aerowave_core::network::public_http_destination_allowed;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -873,16 +874,8 @@ pub async fn art(
 ) -> Result<Option<Art>, String> {
     let requested_url = url.trim();
     let requested_resolved = resolved_url.trim();
-    let mut queries: Vec<String> = Vec::new();
-    for candidate in [requested_url, requested_resolved] {
-        let Some(candidate) = playable_url(candidate, "") else {
-            continue;
-        };
-        if !queries.iter().any(|seen| seen == &candidate) {
-            queries.push(candidate);
-        }
-    }
-    if queries.is_empty() {
+    let queries = art_query_urls(requested_url, requested_resolved);
+    if queries.exact.is_empty() {
         return Ok(None);
     }
 
@@ -891,42 +884,47 @@ pub async fn art(
         .map(|url| url.trim())
         .filter(|url| !url.is_empty())
         .collect();
-    let mut candidates: Vec<String> = Vec::new();
     let mut lookup_failure: Option<String> = None;
-    for query in queries {
-        match art_candidates(&query, requested_url, requested_resolved).await {
-            Ok(found) => candidates.extend(found),
-            Err(error) => {
-                if lookup_failure.is_none() {
-                    lookup_failure = Some(error);
-                }
-            }
-        }
-    }
-
     let mut tried: HashSet<String> = HashSet::new();
     let mut fetch_failure: Option<String> = None;
-    for favicon in candidates {
-        if excluded.contains(favicon.trim()) || tried.contains(&favicon) {
-            continue;
-        }
+    for phase in [&queries.exact, &queries.fallback] {
         if tried.len() >= MAX_ART_TRIES {
             break;
         }
-        tried.insert(favicon.clone());
-        match fetch_logo(&favicon).await {
-            Ok(picture) => {
-                return Ok(Some(Art {
-                    url: favicon,
-                    picture,
-                }));
-            }
-            Err(failure) if failure.retryable => {
-                if fetch_failure.is_none() {
-                    fetch_failure = Some(failure.message);
+        let mut candidates = Vec::new();
+        for query in phase {
+            match art_candidates(query, requested_url, requested_resolved).await {
+                Ok(found) => candidates.extend(found),
+                Err(error) => {
+                    if lookup_failure.is_none() {
+                        lookup_failure = Some(error);
+                    }
                 }
             }
-            Err(_) => {}
+        }
+
+        for favicon in candidates {
+            if excluded.contains(favicon.trim()) || tried.contains(&favicon) {
+                continue;
+            }
+            if tried.len() >= MAX_ART_TRIES {
+                break;
+            }
+            tried.insert(favicon.clone());
+            match fetch_logo(&favicon).await {
+                Ok(picture) => {
+                    return Ok(Some(Art {
+                        url: favicon,
+                        picture,
+                    }));
+                }
+                Err(failure) if failure.retryable => {
+                    if fetch_failure.is_none() {
+                        fetch_failure = Some(failure.message);
+                    }
+                }
+                Err(_) => {}
+            }
         }
     }
 

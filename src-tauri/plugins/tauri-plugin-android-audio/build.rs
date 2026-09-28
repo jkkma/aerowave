@@ -5,6 +5,7 @@ const COMMANDS: &[&str] = &[
     "stop",
     "get_state",
     "set_volume",
+    "set_player_fullscreen",
     "update_artwork",
     "set_metadata_enabled",
     "set_sleep_timer",

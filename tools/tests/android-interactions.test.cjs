@@ -50,7 +50,9 @@ test("Android editors open with a visible title focused, then close the keyboard
   assert.equal(h.el("#station-editor").classList.contains("hidden"), true);
   assert.equal(h.evaluate("state.stations.length"), 1);
 
-  const alarmTrigger = h.el("#btn-add-alarm");
+  h.evaluate("renderAlarms()");
+  const alarmTrigger = h.el("#alarm-list").querySelector(".alarm-empty-create");
+  assert.equal(h.el("#btn-add-alarm").hidden, true);
   alarmTrigger.focus();
   await alarmTrigger.dispatch("click");
   assert.equal(h.document.activeElement, h.el("#al-editor-title"));
@@ -157,7 +159,8 @@ test("Android Back returns from each visible editor to its list without saving a
   assert.equal(h.document.activeElement, stationTrigger);
 
   await h.el("#tab-alarms").dispatch("click");
-  const alarmTrigger = h.el("#btn-add-alarm");
+  const alarmTrigger = h.el("#alarm-list").querySelector(".alarm-empty-create");
+  assert.equal(h.el("#btn-add-alarm").hidden, true);
   alarmTrigger.focus();
   h.evaluate("openAlarmEditor(null)");
   await h.el("#al-name-edit").dispatch("click");
@@ -186,21 +189,21 @@ test("Android Back is consumed while an editor save is pending", async () => {
   assert.equal(h.el("#alarm-editor").classList.contains("hidden"), false);
 });
 
-test("Browse filter disclosure toggles only on Android", async () => {
+test("Browse filters stay open and Android cannot apply its hidden Genre filter", async () => {
   const android = makeHarness(true);
   const toggle = android.el("#browse-filters-toggle");
   const fields = android.el("#browse-filter-fields");
-  assert.equal(fields.classList.contains("open"), false);
-  assert.equal(toggle.getAttribute("aria-expanded"), "false");
-  await toggle.dispatch("click");
   assert.equal(fields.classList.contains("open"), true);
   assert.equal(toggle.getAttribute("aria-expanded"), "true");
   await toggle.dispatch("click");
-  assert.equal(fields.classList.contains("open"), false);
-  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(fields.classList.contains("open"), true);
+  android.el("#browse-tag").value = "jazz";
+  await android.el("#browse-tag").dispatch("change");
+  assert.equal(android.evaluate("browseTag"), "");
 
   const desktop = makeHarness(false);
-  await desktop.el("#browse-filters-toggle").dispatch("click");
   assert.equal(desktop.el("#browse-filter-fields").classList.contains("open"), true);
-  assert.equal(desktop.el("#browse-filters-toggle").getAttribute("aria-expanded"), "true");
+  desktop.el("#browse-tag").value = "jazz";
+  await desktop.el("#browse-tag").dispatch("change");
+  assert.equal(desktop.evaluate("browseTag"), "jazz");
 });
