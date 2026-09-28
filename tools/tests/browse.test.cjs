@@ -32,6 +32,74 @@ function browseHarness(stationReply) {
   } });
 }
 
+test("Browse renders rows before logos resolve and keeps letter fallbacks on missing or failed art", async () => {
+  const png = "data:image/png;base64,aW1hZ2U=";
+  const pending = deferred();
+  const logoUrls = [];
+  const h = createHarness({ invoke(command, args) {
+    if (command !== "station_logo") return undefined;
+    logoUrls.push(args.url);
+    return args.url.endsWith("good.png") ? pending.promise : Promise.reject(new Error("missing logo"));
+  } });
+  h.context.Image = class {
+    naturalWidth = 128;
+    naturalHeight = 128;
+    async decode() {}
+  };
+  const create = h.document.createElement;
+  h.document.createElement = tag => tag === "canvas" ? {
+    getContext: () => ({ drawImage() {} }), toDataURL: () => png,
+  } : create(tag);
+  h.evaluate(`browseResults = [
+    { name: "Good", url: "https://radio.test/good", favicon: "https://art.test/good.png" },
+    { name: "Failed", url: "https://radio.test/failed", favicon: "https://art.test/fail.png" },
+    { name: "Plain", url: "https://radio.test/plain", favicon: "" }
+  ]; renderBrowse()`);
+  const rows = h.el("#browse-list").children;
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.map(row => row.children[0].children[0].textContent), ["GO", "FA", "PL"]);
+  assert.equal(rows[0].children[0].children[1].hidden, true);
+  assert.deepEqual(logoUrls, ["https://art.test/good.png", "https://art.test/fail.png"]);
+
+  pending.resolve(png);
+  await flush();
+  const good = rows[0].children[0];
+  assert.equal(good.children[1].src, png);
+  await good.children[1].dispatch("load");
+  assert.equal(good.children[1].hidden, false);
+  assert.equal(good.children[0].hidden, true);
+  const failed = rows[1].children[0];
+  assert.equal(failed.children[1].hidden, true);
+  assert.equal(failed.children[0].hidden, false);
+  assert.equal(rows[2].children[0].children[1].src, undefined);
+
+  h.evaluate('renderBrowse()');
+  assert.equal(h.el("#browse-list").children[0].children[0].children[1].src, png);
+  assert.deepEqual(logoUrls, ["https://art.test/good.png", "https://art.test/fail.png"]);
+});
+
+test("a new Browse search skips queued logos whose old rows were replaced", async () => {
+  const pending = deferred();
+  const requested = [];
+  const h = createHarness({ invoke(command, args) {
+    if (command !== "station_logo") return undefined;
+    requested.push(args.url);
+    return args.url.endsWith("new.png") ? null : pending.promise;
+  } });
+  h.evaluate(`browseResults = Array.from({ length: 5 }, (_, n) => ({
+    name: "Old " + n, url: "https://radio.test/old/" + n,
+    favicon: "https://art.test/old" + n + ".png"
+  })); renderBrowse()`);
+  assert.equal(requested.length, 4);
+  h.evaluate(`browseResults = [{ name: "New", url: "https://radio.test/new",
+    favicon: "https://art.test/new.png" }]; renderBrowse()`);
+  pending.resolve(null);
+  await flush();
+  assert.equal(requested.includes("https://art.test/old4.png"), false);
+  assert.equal(requested.includes("https://art.test/new.png"), true);
+  assert.equal(h.el("#browse-list").children[0].children[0].children[0].textContent, "NE");
+});
+
 test("More pages the submitted text query rather than an unsubmitted edit", async () => {
   const requests = [];
   const h = browseHarness(({ query }) => {

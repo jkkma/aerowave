@@ -114,8 +114,10 @@ test("Android starts in Player and exposes Stations and Browse directly", async 
   assert.equal(h.el("#player-stage").parentElement, h.el("#pane-player"));
   assert.equal(h.el("#station-music").parentElement, h.el("#pane-player"));
   assert.equal(h.el("#android-quick-access").parentElement, h.el("#pane-player"));
+  assert.equal(h.el("#player-sleep-timer").parentElement, h.el("#pane-player"));
   assert.deepEqual(h.el("#pane-player").children, [
-    h.el("#player-stage"), h.el("#station-music"), h.el("#android-quick-access"),
+    h.el("#android-quick-access"), h.el("#player-stage"),
+    h.el("#station-music"), h.el("#player-sleep-timer"),
   ]);
   assert.equal(h.el("#tab-radio").getAttribute("aria-selected"), "false");
   assertActive(h, "player", { focus: false });
@@ -151,6 +153,7 @@ test("desktop skips Android-only tabs and leaves Settings categories expanded", 
   assert.equal(h.el("#tab-player").classList.contains("tab"), false);
   assert.notEqual(h.el("#player-stage").parentElement, h.el("#pane-player"));
   assert.notEqual(h.el("#station-music").parentElement, h.el("#pane-player"));
+  assert.notEqual(h.el("#player-sleep-timer").parentElement, h.el("#pane-player"));
   assert.equal(h.settingsCategories.every((category) => category.open), true);
   h.el("#tab-settings").focus();
   await h.el("#tab-settings").dispatch("keydown", { key: "ArrowRight" });

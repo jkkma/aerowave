@@ -38,9 +38,10 @@ function dismissAndroidKeyboard() {
 if (IS_ANDROID) {
   $$('[data-tauri-drag-region]').forEach((element) => element.removeAttribute("data-tauri-drag-region"));
   $("#build-label").textContent = "Android";
+  $("#pane-player").append($("#android-quick-access"));
   $("#pane-player").append($("#player-stage"));
   $("#pane-player").append($("#station-music"));
-  $("#pane-player").append($("#android-quick-access"));
+  $("#pane-player").append($("#player-sleep-timer"));
   $("#station-views").append($("#station-recent"), $("#station-all"));
   $("#station-sort").value = "name";
   $("#station-order-hint").hidden = true;
@@ -206,66 +207,10 @@ let androidPlayPendingGeneration = null;
 let androidTransportPending = null;
 let androidPlayerReturnPane = null;
 let androidNavigateToPane = null;
-let androidPlayerFullscreen = false;
-let androidFullscreenRevision = 0;
-let androidFullscreenTail = Promise.resolve();
 
 function androidCommand(command, payload) {
   const name = `${ANDROID_AUDIO_PLUGIN}|${command}`;
   return payload === undefined ? invoke(name) : invoke(name, { payload });
-}
-
-function renderAndroidPlayerFullscreen() {
-  document.body.classList.toggle("player-fullscreen", androidPlayerFullscreen);
-  const button = $("#btn-player-fullscreen");
-  const label = androidPlayerFullscreen ? "Exit fullscreen Player" : "Enter fullscreen Player";
-  button.setAttribute("aria-label", label);
-  button.setAttribute("aria-pressed", String(androidPlayerFullscreen));
-  button.title = label;
-  $("#btn-play-folder").textContent = androidPlayerFullscreen ? "Shuffle your music" : "Shuffle";
-}
-
-// Serialize window inset changes so an older enter cannot outlive a later Back.
-function queueAndroidPlayerFullscreen(enabled, onFailure = () => {}) {
-  const revision = ++androidFullscreenRevision;
-  androidFullscreenTail = androidFullscreenTail.then(async () => {
-    if (revision !== androidFullscreenRevision) return false;
-    try {
-      await androidCommand("set_player_fullscreen", { enabled });
-      return true;
-    } catch (error) {
-      if (revision === androidFullscreenRevision) onFailure(error);
-      return false;
-    }
-  });
-  return androidFullscreenTail;
-}
-
-function setAndroidPlayerFullscreen(enabled, { returnToOrigin = false, focusExit = true, focusTarget = null } = {}) {
-  if (!IS_ANDROID || enabled === androidPlayerFullscreen) return Promise.resolve(false);
-  if (enabled && (ringing || currentPane() !== "player")) return Promise.resolve(false);
-  androidPlayerFullscreen = enabled;
-  renderAndroidPlayerFullscreen();
-  const button = $("#btn-player-fullscreen");
-  if (enabled) button.focus({ preventScroll: true });
-  else {
-    const origin = returnToOrigin ? androidPlayerReturnPane : null;
-    androidPlayerReturnPane = null;
-    if (origin && origin !== "player") androidNavigateToPane?.(origin);
-    else if (focusExit) (focusTarget || button).focus({ preventScroll: true });
-  }
-  return queueAndroidPlayerFullscreen(enabled, error => {
-    if (enabled && androidPlayerFullscreen) {
-      androidPlayerFullscreen = false;
-      renderAndroidPlayerFullscreen();
-      const origin = androidPlayerReturnPane;
-      androidPlayerReturnPane = null;
-      if (origin) androidNavigateToPane?.(origin);
-      else button.focus({ preventScroll: true });
-      queueAndroidPlayerFullscreen(false);
-    }
-    say((enabled ? "Could not enter fullscreen: " : "Could not restore system bars: ") + String(error), "bad", true);
-  });
 }
 
 function invalidateAndroidStateRequests() {
@@ -530,9 +475,6 @@ function applyAndroidAlarmState(snapshot) {
   if (alarmsChanged) renderAlarms();
   if (permissionsChanged) renderAndroidAlarmPermissions();
   const nextRing = snapshot.ringing;
-  if (nextRing && androidPlayerFullscreen) {
-    setAndroidPlayerFullscreen(false, { returnToOrigin: false, focusExit: false });
-  }
   if (!nextRing) {
     if (ringing?.native) {
       ringing = null;
@@ -1502,6 +1444,139 @@ async function decodedOrbArt(picture, maxChars = STATION_ART_MAX_CHARS, subject 
   return canvas.toDataURL("image/png");
 }
 
+const thumbnailArt = new Map();
+const thumbnailMisses = new Map();
+const thumbnailRequests = new Map();
+const thumbnailConsumers = new Map();
+const thumbnailQueue = [];
+const thumbnailLoads = new WeakMap();
+let thumbnailObserver = null;
+let thumbnailActive = 0;
+const THUMBNAIL_CACHE = 24;
+const THUMBNAIL_CONCURRENT = 4;
+const THUMBNAIL_QUEUED = 32;
+
+function pumpThumbnailQueue() {
+  while (thumbnailActive < THUMBNAIL_CONCURRENT && thumbnailQueue.length) {
+    const { logo, resolve } = thumbnailQueue.shift();
+    if (!thumbnailConsumers.get(logo)?.size) {
+      thumbnailRequests.delete(logo);
+      thumbnailConsumers.delete(logo);
+      resolve(null);
+      continue;
+    }
+    thumbnailActive += 1;
+    (async () => {
+      try {
+        const data = await invoke("station_logo", { url: logo });
+        const picture = data ? await decodedOrbArt(data) : null;
+        if (picture) {
+          thumbnailArt.set(logo, picture);
+          while (thumbnailArt.size > THUMBNAIL_CACHE) thumbnailArt.delete(thumbnailArt.keys().next().value);
+          thumbnailMisses.delete(logo);
+        } else thumbnailMisses.set(logo, Date.now() + 60000);
+        resolve(picture);
+      } catch {
+        thumbnailMisses.set(logo, Date.now() + 60000);
+        resolve(null);
+      } finally {
+        while (thumbnailMisses.size > THUMBNAIL_CACHE) thumbnailMisses.delete(thumbnailMisses.keys().next().value);
+        thumbnailRequests.delete(logo);
+        thumbnailConsumers.delete(logo);
+        thumbnailActive -= 1;
+        pumpThumbnailQueue();
+      }
+    })();
+  }
+}
+
+function fetchStationThumbnail(logo, mark) {
+  if (thumbnailArt.has(logo)) return Promise.resolve(thumbnailArt.get(logo));
+  if ((thumbnailMisses.get(logo) || 0) > Date.now()) return Promise.resolve(null);
+  if (thumbnailRequests.has(logo)) {
+    thumbnailConsumers.get(logo).add(mark);
+    return thumbnailRequests.get(logo);
+  }
+  if (thumbnailQueue.length >= THUMBNAIL_QUEUED) return Promise.resolve(null);
+  const request = new Promise(resolve => thumbnailQueue.push({ logo, resolve }));
+  thumbnailConsumers.set(logo, new Set([mark]));
+  thumbnailRequests.set(logo, request);
+  pumpThumbnailQueue();
+  return request;
+}
+
+function releaseStationThumbnails(root) {
+  root.querySelectorAll(".station-thumbnail-mark").forEach(mark => {
+    mark.dataset.thumbnailDisposed = "true";
+    thumbnailConsumers.get(mark._stationThumbnail?.logo)?.delete(mark);
+    thumbnailObserver?.unobserve(mark);
+    thumbnailLoads.delete(mark);
+  });
+}
+
+function observeStationThumbnail(mark, fetch) {
+  if (typeof IntersectionObserver !== "function") { fetch(); return; }
+  thumbnailObserver ||= new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      thumbnailObserver.unobserve(entry.target);
+      const load = thumbnailLoads.get(entry.target);
+      thumbnailLoads.delete(entry.target);
+      load?.();
+    }
+  }, { rootMargin: "150px" });
+  thumbnailLoads.set(mark, fetch);
+  thumbnailObserver.observe(mark);
+}
+
+function stationThumbnail(mark, station, letter) {
+  const url = station.url || "";
+  const logo = station.logo || station.favicon || "";
+  const key = JSON.stringify([url, logo]);
+  mark.classList.add("station-thumbnail-mark");
+  mark.dataset.thumbnailKey = key;
+  const fallback = document.createElement("span");
+  fallback.className = "station-thumbnail-letter";
+  fallback.textContent = letter;
+  fallback.hidden = false;
+  const image = document.createElement("img");
+  image.className = "station-thumbnail";
+  image.alt = "";
+  image.hidden = true;
+  image.addEventListener("load", () => {
+    image.hidden = false;
+    fallback.hidden = true;
+  });
+  image.addEventListener("error", () => {
+    image.hidden = true;
+    fallback.hidden = false;
+    image.removeAttribute("src");
+  });
+  mark.append(fallback, image);
+  const show = picture => {
+    if (!picture || mark.dataset.thumbnailKey !== key || mark.dataset.thumbnailDisposed === "true") return;
+    image.src = picture;
+  };
+  mark._stationThumbnail = { url, logo, show };
+  const current = player.source?.kind === "station" && sameStream(player.source.url, url)
+    && (!logo || logo === (player.source.logo || "")) ? player.artwork : null;
+  const cached = current || orbArt.get(JSON.stringify([url, logo])) || (logo && thumbnailArt.get(logo));
+  if (cached) show(cached);
+  else if (logo) {
+    const fetch = () => fetchStationThumbnail(logo, mark).then(show);
+    observeStationThumbnail(mark, fetch);
+  }
+}
+
+function refreshPlayingStationThumbnails(source, picture) {
+  if (!picture || source?.kind !== "station") return;
+  document.querySelectorAll(".station-thumbnail-mark").forEach(mark => {
+    const thumb = mark._stationThumbnail;
+    if (thumb && sameStream(thumb.url, source.url)
+      && (!thumb.logo || thumb.logo === (source.logo || ""))) thumb.show(picture);
+  });
+}
+
 function syncAndroidArtwork(source) {
   if (!IS_ANDROID || player.source !== source || source?.kind !== "station"
       || player.nativeGeneration === null) return;
@@ -1518,6 +1593,7 @@ function showOrbArt(source, picture) {
   if (window.aerowaveOrb?.ok) window.aerowaveOrb.setImage(picture);
   updateMediaMetadata();
   if (IS_ANDROID) renderAndroidMiniPlayer();
+  refreshPlayingStationThumbnails(source, picture);
   if (source && picture) syncAndroidArtwork(source);
 }
 
@@ -3001,6 +3077,7 @@ function renderBrowse() {
   const focusedRow = focused?.closest(".browse-row");
   const focusedUrl = focusedRow?.dataset.url;
   const focusedAction = focused?.classList.contains("browse-save") ? ".browse-save" : ".browse-listen";
+  releaseStationThumbnails(list);
   list.innerHTML = "";
   list.setAttribute("aria-busy", String(browseBusy));
   $("#browse-count").textContent = browseResults.length
@@ -3036,8 +3113,8 @@ function renderBrowse() {
 
     const mark = document.createElement("span");
     mark.className = "browse-station-mark";
-    mark.textContent = (st.name || "Radio").trim().slice(0, 2).toLocaleUpperCase();
     mark.setAttribute("aria-hidden", "true");
+    stationThumbnail(mark, st, (st.name || "Radio").trim().slice(0, 2).toLocaleUpperCase());
 
     const name = document.createElement("span");
     name.className = "name";
@@ -3620,6 +3697,7 @@ function renderAndroidQuickAccess() {
   androidQuickAccessKey = key;
   const list = $("#android-quick-list");
   const focusedUrl = document.activeElement?.closest(".android-quick-item")?.dataset.url;
+  releaseStationThumbnails(list);
   list.replaceChildren();
   $("#android-quick-access").hidden = false;
   $("#android-quick-empty").hidden = !!entries.length;
@@ -3632,7 +3710,7 @@ function renderAndroidQuickAccess() {
     const mark = document.createElement("span");
     mark.className = "android-quick-mark";
     mark.setAttribute("aria-hidden", "true");
-    mark.textContent = Array.from(station.name || "♫")[0];
+    stationThumbnail(mark, station, Array.from(station.name || "♫")[0]);
     const copy = document.createElement("span");
     copy.className = "android-quick-copy";
     const name = document.createElement("strong");
@@ -4746,9 +4824,6 @@ let stationEditorReturnFocus = null;
 
 function openStationEditor(station) {
   if (stationEditorSaving) return;
-  if (IS_ANDROID && androidPlayerFullscreen) {
-    setAndroidPlayerFullscreen(false, { returnToOrigin: false, focusExit: false });
-  }
   cancelStationTest();
   stationEditorSaveFailed = false;
   stationEditorReturnFocus = { element: document.activeElement, stationId: station?.id };
@@ -5076,9 +5151,6 @@ function closeAlarmNameDialog(save = false, restoreFocus = true) {
 
 function openAlarmEditor(alarm, { copy = false } = {}) {
   if (alarmEditorSaving) return;
-  if (IS_ANDROID && androidPlayerFullscreen) {
-    setAndroidPlayerFullscreen(false, { returnToOrigin: false, focusExit: false });
-  }
   if (!alarm && !clockNow) {
     say("Could not read the system clock. Try again.", "bad");
     tickClock();
@@ -5206,10 +5278,6 @@ function closeAlarmEditor(savedId = null) {
 // in progress keeps its editor open, so Back is still consumed in that case.
 function handleAndroidBack() {
   if (!IS_ANDROID) return false;
-  if (androidPlayerFullscreen) {
-    setAndroidPlayerFullscreen(false, { returnToOrigin: true });
-    return true;
-  }
   if ($("#al-name-dialog").open) {
     closeAlarmNameDialog();
     return true;
@@ -5540,9 +5608,6 @@ function wire() {
   // transport
   $("#btn-play").addEventListener("click", IS_ANDROID ? toggleAndroidPlayback : togglePlay);
   if (IS_ANDROID) $("#btn-stop-android").addEventListener("click", () => { if (!ringing) stopPlayback(); });
-  if (IS_ANDROID) $("#btn-player-fullscreen").addEventListener("click", () => {
-    setAndroidPlayerFullscreen(!androidPlayerFullscreen, { returnToOrigin: true });
-  });
   $("#btn-prev").addEventListener("click", () => step(-1));
   $("#btn-next").addEventListener("click", () => step(1));
 
@@ -5607,9 +5672,6 @@ function wire() {
   if (IS_ANDROID) $$(".settings-category").forEach((category) => { category.open = false; });
   const tabs = $$(".tab");
   const activateTab = (tab) => {
-      if (IS_ANDROID && androidPlayerFullscreen && tab.dataset.pane !== "player") {
-        setAndroidPlayerFullscreen(false, { returnToOrigin: false, focusExit: false });
-      }
       if (IS_ANDROID) {
         dismissAndroidKeyboard();
         tab.focus({ preventScroll: true });
@@ -5640,7 +5702,6 @@ function wire() {
     $("#mini-open").addEventListener("click", () => {
       androidPlayerReturnPane = currentPane();
       activateTab($("#tab-player"));
-      setAndroidPlayerFullscreen(true);
     });
     $("#mini-toggle").addEventListener("click", () => {
       if (player.source) toggleAndroidPlayback();
@@ -5811,15 +5872,7 @@ function wire() {
     showFolderCounts(info, "#folder-path");
   });
   $("#btn-play-folder").addEventListener("click", async () => {
-    const folder = shuffleFolder();
-    if (IS_ANDROID && androidPlayerFullscreen && !folder) {
-      setAndroidPlayerFullscreen(false, { returnToOrigin: false, focusTarget: $("#btn-pick-folder") });
-    }
-    const startedFullscreen = IS_ANDROID && androidPlayerFullscreen;
-    const started = await playRandomFromFolder(folder);
-    if (startedFullscreen && started === false && androidPlayerFullscreen) {
-      setAndroidPlayerFullscreen(false, { returnToOrigin: false, focusTarget: $("#btn-play-folder") });
-    }
+    await playRandomFromFolder(shuffleFolder());
   });
 
   $("#btn-pick-backup").addEventListener("click", async () => {
@@ -6072,9 +6125,9 @@ function wire() {
     }
     if (e.key === "Escape") {
       if (ringing) return; // an alarm should take a deliberate button press
-      if (IS_ANDROID && androidPlayerFullscreen) {
+      if (IS_ANDROID && currentPane() === "player" && androidPlayerReturnPane) {
         e.preventDefault();
-        setAndroidPlayerFullscreen(false, { returnToOrigin: true });
+        handleAndroidBack();
         return;
       }
       if (IS_ANDROID && $("#al-name-dialog").open) {
@@ -6146,7 +6199,6 @@ async function boot() {
   // Subscribe before the initial query so that completion cannot leave it stale.
   if (!IS_ANDROID) await listen("power-status-updated", () => refreshPowerStatus());
   wire();
-  if (IS_ANDROID) queueAndroidPlayerFullscreen(false);
   setInterval(tickClock, 1000);
   if (!IS_ANDROID) {
     setInterval(refreshNextAlarm, 20000);

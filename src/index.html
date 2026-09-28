@@ -40,11 +40,6 @@
     <div class="corner tl"></div><div class="corner tr"></div>
     <div class="corner bl"></div><div class="corner br"></div>
 
-    <button type="button" class="gel android-only player-fullscreen-toggle" id="btn-player-fullscreen" aria-label="Enter fullscreen Player" aria-pressed="false" title="Enter fullscreen Player">
-      <svg class="fullscreen-enter-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>
-      <svg class="fullscreen-exit-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h5V4M20 9h-5V4M20 15h-5v5M4 15h5v5"/></svg>
-    </button>
-
     <div class="orbwrap">
       <div class="orb" id="orb">
         <div class="orb-body"></div>
@@ -81,7 +76,7 @@
       </div>
     </div>
 
-    <div class="sleepbox">
+    <div class="sleepbox" id="player-sleep-timer">
       <div class="sleeprow">
         <span class="hud-mini" id="sleep-caption">Sleep timer</span>
         <div class="chips" id="sleep-chips" role="group" aria-labelledby="sleep-caption">
