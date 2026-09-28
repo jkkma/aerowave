@@ -40,6 +40,7 @@ if (IS_ANDROID) {
   $("#build-label").textContent = "Android";
   $("#pane-player").append($("#player-stage"));
   $("#pane-player").append($("#station-music"));
+  $("#pane-player").append($("#android-quick-access"));
   $("#station-views").append($("#station-recent"), $("#station-all"));
   $("#station-sort").value = "name";
   $("#station-order-hint").hidden = true;
@@ -3591,9 +3592,60 @@ let stationDragClickBlocked = false;
 let historyRecordedSource = null;
 const recentStationSaves = new Set();
 const stationFavoriteSaves = new Set();
+let androidQuickAccessKey = "";
 
 function recentStations() {
   return Array.isArray(state.settings.recentStations) ? state.settings.recentStations : [];
+}
+
+function renderAndroidQuickAccess() {
+  if (!IS_ANDROID) return;
+  const entries = [];
+  const add = (station, label) => {
+    if (!station?.url || entries.some(entry => sameStream(entry.station.url, station.url))) return;
+    entries.push({ station, label });
+  };
+  const recent = recentStations().map(station =>
+    state.stations.find(saved => sameStream(saved.url, station.url)) || station);
+  recent.slice(0, 4).forEach(station => add(station, "Recent"));
+  state.stations.filter(station => station.favorite).forEach(station => {
+    if (entries.length < 6) add(station, "Favourite");
+  });
+  recent.forEach(station => { if (entries.length < 6) add(station, "Recent"); });
+
+  const key = JSON.stringify(entries.map(({ station, label }) => [
+    station.id, station.url, station.name, station.hls, station.logo, station.tag, label,
+  ]));
+  if (key === androidQuickAccessKey) return;
+  androidQuickAccessKey = key;
+  const list = $("#android-quick-list");
+  const focusedUrl = document.activeElement?.closest(".android-quick-item")?.dataset.url;
+  list.replaceChildren();
+  $("#android-quick-access").hidden = false;
+  $("#android-quick-empty").hidden = !!entries.length;
+  for (const { station, label } of entries) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "android-quick-item";
+    button.dataset.url = station.url;
+    button.setAttribute("aria-label", `Play ${station.name}`);
+    const mark = document.createElement("span");
+    mark.className = "android-quick-mark";
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = Array.from(station.name || "♫")[0];
+    const copy = document.createElement("span");
+    copy.className = "android-quick-copy";
+    const name = document.createElement("strong");
+    name.textContent = station.name;
+    const detail = document.createElement("small");
+    detail.textContent = label;
+    copy.append(name, detail);
+    button.append(mark, copy);
+    button.addEventListener("click", () => playStation(station));
+    list.append(button);
+  }
+  if (focusedUrl) (Array.from(list.children).find(button => button.dataset.url === focusedUrl) ||
+    $("#android-quick-title")).focus({ preventScroll: true });
 }
 
 function rememberPlayedStation() {
@@ -3779,6 +3831,7 @@ function refreshStationIndicators() {
 
 function renderStations() {
   clearStationDrag();
+  renderAndroidQuickAccess();
   const q = $("#station-filter").value.trim().toLowerCase();
   const list = $("#station-list");
   const scrollTop = list.scrollTop;

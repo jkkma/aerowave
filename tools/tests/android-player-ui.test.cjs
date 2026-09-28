@@ -27,6 +27,8 @@ function playerHarness(invoke) {
   h.el("#station-editor").classList.add("hidden");
   h.el("#alarm-editor").classList.add("hidden");
   h.el("#mini-player").hidden = true;
+  h.el("#android-quick-access").hidden = true;
+  h.el("#android-quick-empty").hidden = true;
   h.evaluate(`state.stations = [${JSON.stringify({ id: source.stationId, name: source.title,
     url: source.url, hls: true })}]; wire()`);
   return h;
@@ -335,6 +337,58 @@ test("Your music retains the folder pick and shuffle controls after moving into 
   assert.equal(h.calls.filter(({ command }) => command === "plugin:android-audio|pick_folder").length, 1);
   assert.equal(h.calls.filter(({ command }) => command === "plugin:android-audio|random_track").length, 1);
   assert.equal(h.evaluate("player.source.kind"), "folder");
+});
+
+test("Jump back in follows Your music, keeps focused recent cards stable, and plays a selection", async () => {
+  const h = playerHarness((command) => {
+    if (command === "plugin:android-audio|play") return native("buffering");
+  });
+  assert.deepEqual(h.el("#pane-player").children.slice(-3), [
+    h.el("#player-stage"), h.el("#station-music"), h.el("#android-quick-access"),
+  ]);
+  h.evaluate("state.stations = []; state.settings.recentStations = []; renderStations()");
+  assert.equal(h.el("#android-quick-access").hidden, false);
+  assert.equal(h.el("#android-quick-empty").hidden, false);
+  assert.equal(h.el("#android-quick-list").children.length, 0);
+
+  h.evaluate(`state.stations = [{ ...${JSON.stringify(source)}, id: "radio", name: "Radio Paradise", favorite: true },
+    { id: "jazz", name: "Jazz FM", url: "https://radio.test/jazz", favorite: true, hls: true }];
+    state.settings.recentStations = [{ ...state.stations[0] },
+      { id: "duplicate", name: "Old name", url: "http://radio.test/live" }]; renderStations()`);
+  const cards = h.el("#android-quick-list").children;
+  assert.equal(h.el("#android-quick-empty").hidden, true);
+  assert.equal(cards.length, 2);
+  assert.equal(cards[0].getAttribute("aria-label"), "Play Radio Paradise");
+  assert.equal(cards[1].getAttribute("aria-label"), "Play Jazz FM");
+  cards[0].focus();
+  h.evaluate("renderStations()");
+  assert.equal(h.el("#android-quick-list").children[0], cards[0]);
+  assert.equal(h.document.activeElement, cards[0]);
+  await cards[1].dispatch("click");
+  await flush();
+  assert.equal(h.evaluate("player.source.stationId"), "jazz");
+  assert.equal(h.calls.filter(({ command }) => command === "plugin:android-audio|play").length, 1);
+});
+
+test("Jump back in refreshes a focused card when saved playback metadata changes", async () => {
+  const h = playerHarness((command) => {
+    if (command === "plugin:android-audio|play") return native("buffering");
+  });
+  h.evaluate(`state.stations = [{ id: "radio", name: "Radio Paradise", url: "https://radio.test/live",
+    hls: false, logo: "https://radio.test/old.png", tag: "Old", favorite: true }];
+    state.settings.recentStations = [{ ...state.stations[0] }]; renderStations()`);
+  const oldCard = h.el("#android-quick-list").children[0];
+  oldCard.focus();
+  h.evaluate(`state.stations = [{ ...state.stations[0], hls: true,
+    logo: "https://radio.test/new.png", tag: "New" }]; renderStations()`);
+  const newCard = h.el("#android-quick-list").children[0];
+  assert.notEqual(newCard, oldCard);
+  assert.equal(h.document.activeElement, newCard);
+  await newCard.dispatch("click");
+  await flush();
+  assert.equal(h.evaluate("player.source.hls"), true);
+  assert.equal(h.evaluate("player.source.logo"), "https://radio.test/new.png");
+  assert.equal(h.evaluate("player.source.tag"), "New");
 });
 
 test("Android Stations places Recent before All and keeps All sorted without reordering", async () => {

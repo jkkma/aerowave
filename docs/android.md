@@ -10,9 +10,11 @@ bottom navigation. While listening, a compact player stays above that row so
 you can pause or resume without leaving the station list. It shows station
 artwork with a white background behind transparent logos. Tap its station name
 to open the fullscreen Player; Android Back returns to the page you came from.
-The regular Player has a separate Stop control and the **Your music** folder
-controls. Stations puts **Recent** first and **All** second, with All sorted
-alphabetically. An empty Alarms page offers one **Create an alarm** button;
+The regular Player shares fullscreen's open layout and larger orb. Below the
+audio controls are the sleep timer, **Your music** folder controls and a
+**Jump back in** section for returning to stations. Stations puts **Recent**
+first and **All** second, with All sorted alphabetically. An empty Alarms page
+offers one **Create an alarm** button;
 the top **Add alarm** button appears when alarms are present.
 
 Player also has a fullscreen button. Fullscreen keeps the orb, now-playing
