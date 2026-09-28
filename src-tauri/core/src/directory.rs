@@ -280,6 +280,57 @@ pub fn stream_key(url: &str) -> String {
     bare.trim_end_matches('/').to_string()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct ArtQueryUrls {
+    pub exact: Vec<String>,
+    pub fallback: Vec<String>,
+}
+
+/// Query the submitted and resolved URLs as saved before trying their other
+/// HTTP scheme. The directory's by-URL search is literal even though these
+/// two schemes identify the same stream for artwork matching.
+pub fn art_query_urls(url: &str, resolved_url: &str) -> ArtQueryUrls {
+    let mut exact = Vec::new();
+    for candidate in [url.trim(), resolved_url.trim()] {
+        let Some((scheme, _)) = candidate.split_once("://") else {
+            continue;
+        };
+        let Ok(parsed) = url::Url::parse(candidate) else {
+            continue;
+        };
+        if !matches!(parsed.scheme(), "http" | "https")
+            || !scheme.eq_ignore_ascii_case(parsed.scheme())
+            || parsed.host_str().is_none()
+            || candidate.chars().any(char::is_control)
+        {
+            continue;
+        }
+        if !exact.iter().any(|seen| seen == candidate) {
+            exact.push(candidate.to_string());
+        }
+    }
+
+    let mut fallback = Vec::new();
+    for candidate in &exact {
+        let Some((scheme, rest)) = candidate.split_once("://") else {
+            continue;
+        };
+        let other_scheme = if scheme.eq_ignore_ascii_case("https") {
+            "http"
+        } else {
+            "https"
+        };
+        let alternative = format!("{other_scheme}://{rest}");
+        if !exact.iter().any(|seen| seen == &alternative)
+            && !fallback.iter().any(|seen| seen == &alternative)
+        {
+            fallback.push(alternative);
+        }
+    }
+
+    ArtQueryUrls { exact, fallback }
+}
+
 /// The directory fields one facet tally needs from a submitted station.
 pub struct DirectoryFacetEntry<'a> {
     pub url: &'a str,
@@ -554,6 +605,52 @@ mod tests {
             stream_key("http://stream.live.vc.bbcmedia.co.uk/bbc_world_service"),
             stream_key("https://stream.live.vc.bbcmedia.co.uk/bbc_world_service")
         );
+    }
+
+    #[test]
+    fn artwork_queries_try_both_exact_urls_before_their_other_schemes() {
+        let queries = art_query_urls(
+            " https://radio.example:8443/Path/Live.mp3?token=A%2Fb&n=1 ",
+            "http://cdn.example:8000/Stream?quality=192",
+        );
+        assert_eq!(
+            queries.exact,
+            [
+                "https://radio.example:8443/Path/Live.mp3?token=A%2Fb&n=1",
+                "http://cdn.example:8000/Stream?quality=192",
+            ]
+        );
+        assert_eq!(
+            queries.fallback,
+            [
+                "http://radio.example:8443/Path/Live.mp3?token=A%2Fb&n=1",
+                "https://cdn.example:8000/Stream?quality=192",
+            ]
+        );
+        for (exact, fallback) in queries.exact.iter().zip(&queries.fallback) {
+            assert_eq!(stream_key(exact), stream_key(fallback));
+            assert!(stream_matches(fallback, "", exact, ""));
+        }
+    }
+
+    #[test]
+    fn artwork_queries_dedupe_submitted_resolved_and_already_exact_schemes() {
+        let duplicate = art_query_urls("https://radio.example/live", " https://radio.example/live ");
+        assert_eq!(duplicate.exact, ["https://radio.example/live"]);
+        assert_eq!(duplicate.fallback, ["http://radio.example/live"]);
+
+        let both_schemes = art_query_urls("https://radio.example/live", "http://radio.example/live");
+        assert_eq!(both_schemes.exact, ["https://radio.example/live", "http://radio.example/live"]);
+        assert!(both_schemes.fallback.is_empty());
+    }
+
+    #[test]
+    fn artwork_queries_reject_invalid_and_non_http_addresses() {
+        let queries = art_query_urls("file:///local/live", "https://radio.example/live");
+        assert_eq!(queries.exact, ["https://radio.example/live"]);
+        assert_eq!(queries.fallback, ["http://radio.example/live"]);
+        assert!(art_query_urls("https://", "rtsp://radio.example/live").exact.is_empty());
+        assert!(art_query_urls("http:/radio.example/live", "").exact.is_empty());
     }
 
     #[test]

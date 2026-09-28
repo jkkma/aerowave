@@ -40,6 +40,11 @@
     <div class="corner tl"></div><div class="corner tr"></div>
     <div class="corner bl"></div><div class="corner br"></div>
 
+    <button type="button" class="gel android-only player-fullscreen-toggle" id="btn-player-fullscreen" aria-label="Enter fullscreen Player" aria-pressed="false" title="Enter fullscreen Player">
+      <svg class="fullscreen-enter-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>
+      <svg class="fullscreen-exit-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h5V4M20 9h-5V4M20 15h-5v5M4 15h5v5"/></svg>
+    </button>
+
     <div class="orbwrap">
       <div class="orb" id="orb">
         <div class="orb-body"></div>
@@ -62,9 +67,12 @@
       <button class="gel big" id="btn-play" title="Play / stop (Space)" aria-label="Play / stop">
         <svg class="ic-play" viewBox="0 0 24 24"><path d="M8 5l12 7-12 7z"/></svg>
         <svg class="ic-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+        <svg class="ic-pause android-only" viewBox="0 0 24 24"><path d="M7 5h4v14H7zM14 5h4v14h-4z"/></svg>
       </button>
       <button class="gel" id="btn-prev" title="Previous station" aria-label="Previous station"><svg viewBox="0 0 24 24"><path d="M6 6h2.5v12H6zM18.5 6l-8.5 6 8.5 6z"/></svg></button>
       <button class="gel" id="btn-next" title="Next station" aria-label="Next station"><svg viewBox="0 0 24 24"><path d="M15.5 6h2.5v12h-2.5zM5.5 6l8.5 6-8.5 6z"/></svg></button>
+
+      <button class="gel android-only" id="btn-stop-android" type="button" aria-label="Stop playback" hidden>Stop</button>
 
       <div class="volwrap">
         <svg class="volic" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 010 7"/></svg>
@@ -106,14 +114,11 @@
 
     <nav class="tabs" role="tablist" aria-label="Main navigation">
       <button class="android-only" id="tab-player" data-pane="player" role="tab" aria-selected="false" aria-controls="pane-player" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="m10 8 6 4-6 4z"/></svg><span>Player</span></button>
-      <button class="android-only" id="tab-library" data-pane="library" role="tab" aria-selected="false" aria-controls="pane-radio" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10h16v10H4zM8 10V6l8-3v7M8 15h8M16 15h2"/></svg><span>Stations</span></button>
       <button class="tab on" id="tab-radio" data-pane="radio" role="tab" aria-selected="true" aria-controls="pane-radio"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10h16v10H4zM8 10V6l8-3v7M8 15h8M16 15h2"/></svg><span id="tab-radio-label">Stations</span></button>
       <button class="tab" id="tab-browse" data-pane="browse" role="tab" aria-selected="false" aria-controls="pane-browse" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m15.5 15.5 5 5"/></svg><span>Browse</span></button>
       <button class="tab" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 17h14l-2-3V9a5 5 0 0 0-10 0v5zM10 20h4M4 5 2 7M20 5l2 2"/></svg><span>Alarms</span></button>
       <button class="tab" id="tab-settings" data-pane="settings" role="tab" aria-selected="false" aria-controls="pane-settings" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 2h4l.5 2.2 1.8.8 2-.9 2.8 2.8-.9 2 .8 1.8L23 11v4l-2.2.5-.8 1.8.9 2-2.8 2.8-2-.9-1.8.8L14 24h-4l-.5-2.2-1.8-.8-2 .9-2.8-2.8.9-2-.8-1.8L1 15v-4l2.2-.5.8-1.8-.9-2L5.9 3.9l2 .9 1.8-.8z" transform="translate(0 -1) scale(.96)"/><circle cx="12" cy="12" r="3"/></svg><span>Settings</span></button>
     </nav>
-    <nav class="station-subtabs" id="station-subtabs" role="tablist" aria-label="Stations views"></nav>
-
     <!-- ---------------------------- player --------------------------- -->
     <div class="pane" id="pane-player" role="tabpanel" aria-labelledby="tab-player"></div>
 
@@ -132,7 +137,7 @@
           <input type="search" id="station-filter" class="field" placeholder="Search by name or tag" aria-label="Search stations">
         </label>
         <div class="station-toolbar">
-          <div class="station-views" role="group" aria-label="Show stations">
+          <div class="station-views" id="station-views" role="group" aria-label="Show stations">
             <button type="button" id="station-all" class="station-view on" aria-pressed="true">All <span id="station-all-count">0</span></button>
             <button type="button" id="station-favorites" class="station-view" aria-pressed="false"><span aria-hidden="true">★</span> Favourites <span id="station-favorites-count">0</span></button>
             <button type="button" id="station-recent" class="station-view" aria-pressed="false">Recent</button>
@@ -171,7 +176,7 @@
         </div>
       </form>
 
-      <div class="folderbox station-music">
+      <div class="folderbox station-music" id="station-music">
         <div class="station-music-info">
           <div class="hud-mini">Your music</div>
           <p class="folderpath" id="folder-path">No folder chosen</p>
@@ -538,6 +543,16 @@
         <p>Quitting stops playback and alarms.</p>
         <button class="gel danger" id="btn-quit">Quit Aerowave</button>
       </div>
+    </div>
+    <div class="android-mini-player android-only" id="mini-player" hidden>
+      <button type="button" class="mini-open" id="mini-open" aria-controls="pane-player" aria-label="Open player">
+        <span class="mini-art" aria-hidden="true"><img id="mini-art-image" alt="" hidden><span id="mini-art-fallback">♫</span></span>
+        <span class="mini-copy"><strong id="mini-title"></strong><span class="mini-subline"><span id="mini-state"></span><span id="mini-track"></span></span></span>
+      </button>
+      <button type="button" class="mini-toggle" id="mini-toggle" aria-label="Pause playback">
+        <svg class="mini-play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>
+        <svg class="mini-pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM14 5h4v14h-4z"/></svg>
+      </button>
     </div>
   </section>
 </main>

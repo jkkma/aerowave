@@ -58,6 +58,11 @@ pub struct VolumePayload {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SetPlayerFullscreenPayload {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SleepTimerPayload {
     pub minutes: u32,
 }

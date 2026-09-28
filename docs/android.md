@@ -5,6 +5,23 @@ settings and Rust stream resolver. A Tauri plugin runs Media3 in a foreground
 media service so playback does not depend on the page staying visible.
 The interface adapts to touch and portrait screens.
 
+Player, Stations, Browse, Alarms and Settings are directly available in the
+bottom navigation. While listening, a compact player stays above that row so
+you can pause or resume without leaving the station list. It shows station
+artwork with a white background behind transparent logos. Tap its station name
+to open the fullscreen Player; Android Back returns to the page you came from.
+The regular Player has a separate Stop control and the **Your music** folder
+controls. Stations puts **Recent** first and **All** second, with All sorted
+alphabetically. An empty Alarms page offers one **Create an alarm** button;
+the top **Add alarm** button appears when alarms are present.
+
+Player also has a fullscreen button. Fullscreen keeps the orb, now-playing
+details, audio controls and **Shuffle your music**, with an exit button to
+restore the regular view.
+
+Browse keeps Country visible on its own row, with Format and Bitrate side by
+side below it.
+
 Android 8.0 (API 26) is the minimum configured version. The initial build target
 is ARM64. Other architectures and Android versions need separate device tests.
 

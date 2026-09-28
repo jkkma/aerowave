@@ -13,9 +13,9 @@ use mobile::AndroidAudio;
 pub use models::{
     AlarmDefinition, AlarmIdPayload, AlarmSettingsPayload, AlarmSource, AlarmState, AlarmStation,
     ArtworkPayload, FolderInfo, FolderPathPayload, MetadataEnabledPayload, PlayPayload,
-    PlaybackState, RandomTrackPayload, SaveBackupFilePayload, SkipAlarmPayload, SleepTimer,
-    SleepTimerPayload, SleepTimerSnapshot, SyncAlarmsPayload, TestAlarmPayload, TrackPick,
-    VolumePayload,
+    PlaybackState, RandomTrackPayload, SaveBackupFilePayload, SetPlayerFullscreenPayload,
+    SkipAlarmPayload, SleepTimer, SleepTimerPayload, SleepTimerSnapshot, SyncAlarmsPayload,
+    TestAlarmPayload, TrackPick, VolumePayload,
 };
 
 use tauri::{
@@ -54,6 +54,14 @@ fn set_volume<R: Runtime>(
     payload: VolumePayload,
 ) -> Result<PlaybackState, String> {
     app.state::<AndroidAudio<R>>().set_volume(payload)
+}
+
+#[tauri::command]
+fn set_player_fullscreen<R: Runtime>(
+    app: AppHandle<R>,
+    payload: SetPlayerFullscreenPayload,
+) -> Result<(), String> {
+    app.state::<AndroidAudio<R>>().set_player_fullscreen(payload)
 }
 
 #[tauri::command]
@@ -226,6 +234,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             stop,
             get_state,
             set_volume,
+            set_player_fullscreen,
             update_artwork,
             set_metadata_enabled,
             set_sleep_timer,
