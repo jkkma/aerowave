@@ -2,15 +2,20 @@ package com.aerowave.radio
 
 import android.os.Bundle
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
 import android.webkit.WebView
 import android.graphics.Color
 import android.view.KeyEvent
+import android.view.View
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
 import kotlin.math.roundToInt
 import com.aerowave.audio.AlarmInputGate
 import com.aerowave.audio.AlarmPlaybackService
@@ -18,6 +23,70 @@ import com.aerowave.audio.AlarmPlaybackService
 class MainActivity : TauriActivity() {
   private var appWebView: WebView? = null
   private val alarmKeys = AlarmInputGate()
+  private val backHandler = Handler(Looper.getMainLooper())
+  private var backRequestId = 0
+  private var backPending = false
+  private var backTimeout: Runnable? = null
+  private val editorBackCallback = object : OnBackPressedCallback(true) {
+    override fun handleOnBackPressed() {
+      val content = findViewById<View>(android.R.id.content)
+      if (ViewCompat.getRootWindowInsets(content)?.isVisible(WindowInsetsCompat.Type.ime()) == true) {
+        WindowInsetsControllerCompat(window, content).hide(WindowInsetsCompat.Type.ime())
+        return
+      }
+
+      val webView = appWebView
+      if (webView == null) {
+        continueDefaultBack()
+        return
+      }
+      // WebView evaluates asynchronously. A second press must not start a second
+      // default Back while the first result is still pending.
+      if (backPending) return
+      backPending = true
+      val requestId = ++backRequestId
+      val timeout = Runnable {
+        if (requestId != backRequestId || !backPending) return@Runnable
+        clearPendingBack()
+        if (canCompleteBack()) continueDefaultBack()
+      }
+      backTimeout = timeout
+      backHandler.postDelayed(timeout, 2000)
+      try {
+        webView.evaluateJavascript(
+          "(function(){try{return typeof window.__aerowaveHandleAndroidBack === 'function' && window.__aerowaveHandleAndroidBack() === true;}catch(e){return false;}})()",
+        ) { result ->
+          if (requestId != backRequestId || !backPending) return@evaluateJavascript
+          clearPendingBack()
+          if (result != "true" && canCompleteBack()) continueDefaultBack()
+        }
+      } catch (_: RuntimeException) {
+        if (requestId == backRequestId && backPending) {
+          clearPendingBack()
+          if (canCompleteBack()) continueDefaultBack()
+        }
+      }
+    }
+  }
+
+  private fun clearPendingBack() {
+    backTimeout?.let(backHandler::removeCallbacks)
+    backTimeout = null
+    backPending = false
+    ++backRequestId
+  }
+
+  private fun canCompleteBack(): Boolean =
+    !isFinishing && !isDestroyed && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+
+  private fun continueDefaultBack() {
+    editorBackCallback.isEnabled = false
+    try {
+      onBackPressedDispatcher.onBackPressed()
+    } finally {
+      editorBackCallback.isEnabled = true
+    }
+  }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
@@ -39,6 +108,7 @@ class MainActivity : TauriActivity() {
       isAppearanceLightNavigationBars = false
     }
     ViewCompat.requestApplyInsets(content)
+    onBackPressedDispatcher.addCallback(this, editorBackCallback)
   }
 
   override fun onWebViewCreate(webView: WebView) {
@@ -78,8 +148,15 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onPause() {
+    clearPendingBack()
     alarmKeys.bind(null)
     super.onPause()
+  }
+
+  override fun onDestroy() {
+    clearPendingBack()
+    appWebView = null
+    super.onDestroy()
   }
 
   override fun onConfigurationChanged(newConfig: Configuration) {

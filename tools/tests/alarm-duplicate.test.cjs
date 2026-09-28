@@ -299,7 +299,20 @@ test("a delayed older desktop read cannot replace a newer alarm refresh", async 
   assert.equal(h.evaluate("state.alarms[0].enabled"), false);
 });
 
-test("Android saves a copied draft through revision-checked alarm sync", async () => {
+test("Android omits Duplicate while desktop keeps it", () => {
+  const disabled = alarm({ enabled: false });
+  const android = editorHarness({ navigator: androidNavigator });
+  android.context.disabledAlarm = disabled;
+  android.evaluate("state.alarms=[disabledAlarm]; renderAlarms()");
+  assert.equal(duplicateButton(android, "original"), null);
+
+  const desktop = editorHarness();
+  desktop.context.disabledAlarm = disabled;
+  desktop.evaluate("state.alarms=[disabledAlarm]; renderAlarms()");
+  assert.ok(duplicateButton(desktop, "original"));
+});
+
+test("saving an existing OFF Android alarm turns on the same alarm through revision-checked sync", async () => {
   let revision = 7;
   let canonical = [alarm({ enabled: false, days: [] })];
   const h = editorHarness({ navigator: androidNavigator, invoke: (command, args) => {
@@ -314,21 +327,54 @@ test("Android saves a copied draft through revision-checked alarm sync", async (
   } });
   h.context.androidFixture = androidSnapshot(revision, canonical);
   h.evaluate("applyAndroidAlarmState(androidFixture); renderAlarms()");
-  const before = savedAlarmSnapshot(h, "original");
-  await duplicateButton(h, "original").dispatch("click");
-  const copyId = draft(h).id;
+  await row(h, "original").querySelector(".alarm-card-main").dispatch("click");
+  assert.equal(h.el("#al-save").textContent, "Save & turn on");
+  assert.equal(draft(h).enabled, true);
   await h.el("#alarm-editor").dispatch("submit");
 
   const sync = h.calls.find((call) => call.command.endsWith("|sync_alarms"));
   assert.ok(sync);
   const payload = JSON.parse(JSON.stringify(sync.args.payload));
   assert.equal(payload.expectedRevision, 7);
-  assert.equal(payload.alarms.length, 2);
-  const copied = payload.alarms.find((item) => item.id === copyId);
-  assert.ok(copied);
-  assert.equal(copied.enabled, false);
-  assert.deepEqual(copied.days, []);
-  assert.equal(copied.skipDate, undefined);
-  assert.equal(h.evaluate("state.alarms.length"), 2);
-  assert.equal(savedAlarmSnapshot(h, "original"), before);
+  assert.equal(payload.alarms.length, 1);
+  assert.equal(payload.alarms[0].id, "original");
+  assert.equal(payload.alarms[0].enabled, true);
+  assert.deepEqual(payload.alarms[0].days, []);
+  assert.equal(h.evaluate("state.alarms.length"), 1);
+  assert.equal(h.evaluate("state.alarms[0].enabled"), true);
+});
+
+test("failed Android save keeps an OFF alarm OFF and its editor open for retry", async () => {
+  let revision = 9;
+  let canonical = [alarm({ enabled: false })];
+  const pending = deferred();
+  let fail = true;
+  const h = editorHarness({ navigator: androidNavigator, invoke: (command, args) => {
+    if (command.endsWith("|sync_alarms")) {
+      if (fail) return pending.promise;
+      assert.equal(args.payload.expectedRevision, revision);
+      canonical = args.payload.alarms;
+      return androidSnapshot(++revision, canonical);
+    }
+    if (command.endsWith("|get_alarm_state")) return androidSnapshot(revision, canonical);
+  } });
+  h.context.androidFixture = androidSnapshot(revision, canonical);
+  h.evaluate("applyAndroidAlarmState(androidFixture); renderAlarms()");
+  await row(h, "original").querySelector(".alarm-card-main").dispatch("click");
+  const saving = h.el("#alarm-editor").dispatch("submit");
+  await flush();
+  assert.equal(h.evaluate("state.alarms[0].enabled"), false);
+  assert.equal(h.el("#alarm-editor").classList.contains("hidden"), false);
+  assert.equal(h.evaluate("window.__aerowaveHandleAndroidBack()"), true);
+  assert.equal(h.el("#alarm-editor").classList.contains("hidden"), false);
+  pending.reject(new Error("storage unavailable"));
+  await saving;
+  assert.equal(h.evaluate("state.alarms[0].enabled"), false);
+  assert.equal(h.el("#alarm-editor").classList.contains("hidden"), false);
+  assert.equal(h.el("#al-save").textContent, "Save & turn on");
+
+  fail = false;
+  await h.el("#alarm-editor").dispatch("submit");
+  assert.equal(h.evaluate("state.alarms[0].enabled"), true);
+  assert.equal(h.evaluate("state.alarms.length"), 1);
 });
