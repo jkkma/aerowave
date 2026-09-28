@@ -239,12 +239,12 @@ test("Your music retains the folder pick and shuffle controls after moving into 
   assert.equal(h.evaluate("player.source.kind"), "folder");
 });
 
-test("Jump back in leads Player, keeps focused recent cards stable, and plays a selection", async () => {
+test("Jump back in follows audio controls, keeps focused recent cards stable, and plays a selection", async () => {
   const h = playerHarness((command) => {
     if (command === "plugin:android-audio|play") return native("buffering");
   });
   assert.deepEqual(h.el("#pane-player").children, [
-    h.el("#android-quick-access"), h.el("#player-stage"),
+    h.el("#player-stage"), h.el("#android-quick-access"),
     h.el("#station-music"), h.el("#player-sleep-timer"),
   ]);
   h.evaluate("state.stations = []; state.settings.recentStations = []; renderStations()");

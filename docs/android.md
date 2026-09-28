@@ -10,10 +10,11 @@ navigation. While listening, a compact player stays above that row so
 you can pause or resume without leaving the station list. It shows station
 artwork with a white background behind transparent logos. Tap its station name
 to open Player; Android Back returns to the page you came from.
-Player starts with **Jump back in**, whose station shortcuts show artwork with
+Player starts with the large orb, now-playing details and audio controls.
+**Jump back in** follows, with station shortcuts that show artwork with
 a white background behind transparent logos and a letter when artwork is
-unavailable. The large orb, now-playing details and audio controls follow, then
-**Your music** folder controls, with the sleep timer at the bottom.
+unavailable. **Your music** folder controls come next, with the sleep timer at
+the bottom.
 
 Stations puts **Recent** first and **All** second, with All sorted
 alphabetically. An empty Alarms page offers one **Create an alarm** button;
