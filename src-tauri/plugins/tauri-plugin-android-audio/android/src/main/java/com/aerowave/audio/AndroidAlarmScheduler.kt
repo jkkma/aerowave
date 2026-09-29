@@ -8,9 +8,11 @@ import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
+import android.util.Log
 
 internal object AndroidAlarmScheduler {
   const val ACTION_FIRE = "com.aerowave.audio.action.FIRE_ALARM"
+  const val ACTION_PREPARE = "com.aerowave.audio.action.PREPARE_ALARM"
   private const val EXTRA_ALARM_ID = "alarmId"
   private const val EXTRA_OCCURRENCE_ID = "occurrenceId"
   private const val EXTRA_EXPECTED_AT = "expectedAt"
@@ -26,7 +28,11 @@ internal object AndroidAlarmScheduler {
     val before = AlarmStateStore.snapshot(context)
     // A malformed durable record is evidence, not an empty schedule. Keep the
     // raw SharedPreferences entry untouched until an explicit alarm save.
-    if (!before.initialized && before.error != null) return before
+    if (!before.initialized && before.error != null) {
+      cancelPreparation(context)
+      AlarmPlaybackService.revalidatePreparation(context)
+      return before
+    }
     cancelKnown(context, before)
     val now = System.currentTimeMillis()
     val nowElapsed = SystemClock.elapsedRealtime()
@@ -59,6 +65,7 @@ internal object AndroidAlarmScheduler {
       )
     }
     if (exact) schedulePersisted(context, changed)
+    AlarmPlaybackService.revalidatePreparation(context)
     return changed
   }
 
@@ -171,31 +178,41 @@ internal object AndroidAlarmScheduler {
     if (canScheduleExact(context) &&
       changed.snoozes[ring.alarm.id]?.occurrenceId == occurrence.occurrenceId
     ) schedule(context, occurrence)
+    schedulePreparation(context, changed)
+    AlarmPlaybackService.revalidatePreparation(context)
     return changed
   }
 
-  fun dismiss(context: Context, occurrenceId: String): PersistedAlarmState =
-    AlarmStateStore.update(context) { old ->
+  fun dismiss(context: Context, occurrenceId: String): PersistedAlarmState {
+    val changed = AlarmStateStore.update(context) { old ->
       if (old.ringing?.occurrenceId != occurrenceId) old else old.copy(
         revision = old.revision + 1,
         ringing = null,
         error = null,
       )
     }
+    schedulePreparation(context, changed)
+    return changed
+  }
 
   fun cancelAlarm(context: Context, alarmId: String) {
     cancel(context, alarmId, false)
     cancel(context, alarmId, true)
+    schedulePreparation(context, AlarmStateStore.snapshot(context))
+    AlarmPlaybackService.revalidatePreparation(context)
   }
 
   /** Change only the regular clock; a pending snooze belongs to the current ring. */
   fun replaceRegular(context: Context, alarmId: String) {
     cancel(context, alarmId, false)
     AlarmStateStore.snapshot(context).scheduled[alarmId]?.let { schedule(context, it) }
+    schedulePreparation(context, AlarmStateStore.snapshot(context))
+    AlarmPlaybackService.revalidatePreparation(context)
   }
 
   private fun schedulePersisted(context: Context, state: PersistedAlarmState) {
     (state.scheduled.values + state.snoozes.values).forEach { schedule(context, it) }
+    schedulePreparation(context, state)
   }
 
   private fun currentBootCount(context: Context): Int? = runCatching {
@@ -204,6 +221,7 @@ internal object AndroidAlarmScheduler {
   }.getOrNull()
 
   private fun cancelKnown(context: Context, state: PersistedAlarmState) {
+    cancelPreparation(context)
     (state.scheduled.keys + state.snoozes.keys + state.alarms.map { it.id }).toSet().forEach {
       cancel(context, it, false)
       cancel(context, it, true)
@@ -221,6 +239,52 @@ internal object AndroidAlarmScheduler {
     )
     context.getSystemService(AlarmManager::class.java).setAlarmClock(
       AlarmManager.AlarmClockInfo(occurrence.atMs, show), operation,
+    )
+  }
+
+  /** Preparation is best effort; its failure must not change the exact due-time AlarmClock. */
+  private fun schedulePreparation(context: Context, state: PersistedAlarmState) {
+    cancelPreparation(context)
+    if (!canScheduleExact(context)) return
+    val nowMs = System.currentTimeMillis()
+    val candidate = AlarmPreparation.next(state, nowMs) ?: return
+    val operation = preparationPendingIntent(
+      context, candidate, PendingIntent.FLAG_UPDATE_CURRENT,
+    ) ?: return
+    try {
+      context.getSystemService(AlarmManager::class.java).setExactAndAllowWhileIdle(
+        AlarmManager.RTC_WAKEUP,
+        AlarmPreparation.scheduledAt(candidate, nowMs),
+        operation,
+      )
+    } catch (error: RuntimeException) {
+      Log.w("AerowaveAlarmPrepare", "Station preparation could not be scheduled", error)
+    }
+  }
+
+  private fun cancelPreparation(context: Context) {
+    val operation = preparationPendingIntent(context, null, PendingIntent.FLAG_NO_CREATE) ?: return
+    context.getSystemService(AlarmManager::class.java).cancel(operation)
+    operation.cancel()
+  }
+
+  private fun preparationPendingIntent(
+    context: Context,
+    candidate: AlarmPreparation.Candidate?,
+    lookupFlag: Int,
+  ): PendingIntent? {
+    val intent = Intent(context, AlarmReceiver::class.java)
+      .setAction(ACTION_PREPARE)
+      .setData(Uri.Builder().scheme("aerowave").authority("alarm")
+        .appendPath("prepare").build())
+    if (candidate != null) intent
+      .putExtra(EXTRA_ALARM_ID, candidate.alarmId)
+      .putExtra(EXTRA_OCCURRENCE_ID, candidate.occurrenceId)
+      .putExtra(EXTRA_EXPECTED_AT, candidate.atMs)
+      .putExtra(EXTRA_SNOOZED, candidate.snoozed)
+    return PendingIntent.getBroadcast(
+      context, -70_002, intent,
+      lookupFlag or PendingIntent.FLAG_IMMUTABLE,
     )
   }
 

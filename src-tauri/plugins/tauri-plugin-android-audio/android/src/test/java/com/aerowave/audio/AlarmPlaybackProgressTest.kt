@@ -56,4 +56,16 @@ class AlarmPlaybackProgressTest {
     elapsedMs += 10_000
     assertNull(progress.failureReason(15_000, true, true, true))
   }
+
+  @Test
+  fun adoptedDecoderStartsRingingWatchdogAtItsCurrentPosition() {
+    progress.start(pausedForFocus = false, initialPositionMs = 60_000)
+    elapsedMs += 11_000
+    assertNull(progress.failureReason(60_000, true, true, true))
+    elapsedMs += 1_000
+    assertEquals(
+      "The alarm source connected but did not produce audio",
+      progress.failureReason(60_000, true, true, true),
+    )
+  }
 }

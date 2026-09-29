@@ -51,6 +51,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   private var sourceKind = "tone"
   private var sourceIsHls = false
   private var sourceFailure: String? = null
+  private var diagnostics: AlarmStartupDiagnostics? = null
   private val sourceProgress = AlarmPlaybackProgress(SystemClock::elapsedRealtime)
   private val fadeProgress = AlarmFadeProgress(SystemClock::elapsedRealtime)
   private var focusPaused = false
@@ -59,8 +60,19 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   private var fallbackStarted = false
   private var userAgent = "Aerowave/0.0.0"
   private lateinit var ringWakeLock: PowerManager.WakeLock
+  private lateinit var preparationWakeLock: PowerManager.WakeLock
   private val folderExecutor = Executors.newSingleThreadExecutor()
+  private val preparationExecutor = Executors.newSingleThreadExecutor()
   private var sourceResolutionToken = 0L
+  private var preparation: AlarmPreparation.Candidate? = null
+  private var preparationUri: String? = null
+  private var preparationIsHls = false
+  private var preparationResolutionToken = 0L
+  private var preparationAttempts = 0
+  private var preparationRetryPending = false
+  private var preparationStartedElapsedMs = 0L
+  private var preparationRetainedFromSnooze = false
+  private val preparationProgress = AlarmPrewarmProgress(SystemClock::elapsedRealtime)
   private lateinit var audioManager: AudioManager
   private var audioFocusRequest: AudioFocusRequest? = null
   private var focusMultiplier = 1f
@@ -120,11 +132,18 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   private val progressWatchdog = object : Runnable {
     override fun run() {
       if (ring == null) return
+      val positionMs = player.currentPosition
+      val isPlaying = player.isPlaying
+      val playWhenReady = player.playWhenReady
       val failure = sourceProgress.failureReason(
-        player.currentPosition,
-        player.isPlaying,
-        player.playWhenReady,
+        positionMs,
+        isPlaying,
+        playWhenReady,
         sourceKind == "station",
+      )
+      diagnostics?.watchdog(
+        positionMs, player.bufferedPosition, isPlaying, playWhenReady,
+        player.isLoading, focusPaused, failure,
       )
       if (failure != null) {
         handleSourceFailure(failure)
@@ -133,26 +152,77 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       handler.postDelayed(this, WATCHDOG_TICK_MS)
     }
   }
+  private val preparationWatchdog = object : Runnable {
+    override fun run() {
+      val candidate = preparation ?: return
+      val nowMs = System.currentTimeMillis()
+      // A wall-clock change must not leave muted playback and its network wake
+      // lock running beyond one preparation window.
+      if (SystemClock.elapsedRealtime() - preparationStartedElapsedMs > MAX_PREPARATION_WAKE_MS) {
+        clearPreparation(stopPlayer = true, stopService = true)
+        return
+      }
+      // Claim and service delivery are separate operations. Keep the prepared
+      // decoder muted briefly across that boundary instead of discarding it.
+      if (nowMs >= candidate.atMs) {
+        if (!AlarmPreparation.eligibleDuringClaim(this@AlarmPlaybackService, candidate)) {
+          clearPreparation(stopPlayer = true, stopService = true)
+        } else {
+          handler.postDelayed(this, WATCHDOG_TICK_MS)
+        }
+        return
+      }
+      if (!AlarmPreparation.stillCurrent(this@AlarmPlaybackService, candidate)) {
+        clearPreparation(stopPlayer = true, stopService = true)
+        return
+      }
+      preparationProgress.sample(player.currentPosition, player.isPlaying)
+      handler.postDelayed(this, WATCHDOG_TICK_MS)
+    }
+  }
+  private val preparationRetry = Runnable {
+    preparationRetryPending = false
+    preparation?.let { candidate ->
+      if (AlarmPreparation.stillCurrent(this, candidate)) startPreparationAttempt(candidate)
+      else clearPreparation(stopPlayer = true, stopService = true)
+    }
+  }
 
   override fun onCreate() {
     super.onCreate()
     instance = this
+    diagnostics = if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+      AlarmStartupDiagnostics(this)
+    } else null
     audioManager = getSystemService(AudioManager::class.java)
     sensors = getSystemService(SensorManager::class.java)
     ringWakeLock = getSystemService(PowerManager::class.java)
       .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:active-alarm")
+      .apply { setReferenceCounted(false) }
+    preparationWakeLock = getSystemService(PowerManager::class.java)
+      .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:preparing-alarm")
       .apply { setReferenceCounted(false) }
     createChannel()
     val version = try {
       packageManager.getPackageInfo(packageName, 0).versionName ?: "0.0.0"
     } catch (_: Exception) { "0.0.0" }
     userAgent = "Aerowave/$version"
-    val networkFactory = OkHttpDataSource.Factory(NetworkGuard.client(false, userAgent))
+    val guardedClient = NetworkGuard.client(false, userAgent)
+    val networkClient = diagnostics?.withHttpEvents(guardedClient) ?: guardedClient
+    val networkFactory = OkHttpDataSource.Factory(networkClient)
       .setUserAgent(userAgent)
       .setDefaultRequestProperties(mapOf("Icy-MetaData" to "1"))
     // DefaultDataSource keeps SAF content URIs local while all HTTP still
     // passes through the same public-network guard used by radio playback.
-    val dataSourceFactory = DefaultDataSource.Factory(this, networkFactory)
+    val dataSourceFactory = DefaultDataSource.Factory(
+      this, diagnostics?.withTransferEvents(networkFactory) ?: networkFactory,
+    )
+    val extractors = diagnostics?.let { trace ->
+      ChainedOpusExtractorsFactory(
+        onExtractorProbe = trace::extractorProbe,
+        onAacAlignment = trace::aacAlignment,
+      )
+    } ?: ChainedOpusExtractorsFactory()
     val audioAttributes = AudioAttributes.Builder()
       .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
       // Media usage follows Android's active media route, including Bluetooth,
@@ -161,7 +231,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       .build()
     player = ExoPlayer.Builder(this)
       .setMediaSourceFactory(
-        DefaultMediaSourceFactory(this, ChainedOpusExtractorsFactory())
+        DefaultMediaSourceFactory(this, extractors)
           .setDataSourceFactory(dataSourceFactory),
       )
       // The service owns a transient request so focus remains tied to the full
@@ -174,11 +244,23 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       .also {
         it.setWakeMode(C.WAKE_MODE_NETWORK)
         it.addListener(this)
+        diagnostics?.let { trace -> it.addAnalyticsListener(trace.analyticsListener()) }
       }
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     when (intent?.action) {
+      ACTION_PREPARE -> {
+        // A late preparation broadcast may arrive after FIRE has claimed the
+        // alarm. A live or durable ring keeps its restart path authoritative.
+        val activeRing = ring ?: AlarmStateStore.snapshot(this).ringing
+        if (activeRing != null) {
+          if (ring == null) startRing(activeRing.occurrenceId)
+          return START_STICKY
+        }
+        intent?.let { startPreparation(it, startId) }
+        return START_NOT_STICKY
+      }
       ACTION_RING -> startRing(intent.getStringExtra(EXTRA_OCCURRENCE_ID))
       ACTION_SNOOZE -> finishRing(intent.getStringExtra(EXTRA_OCCURRENCE_ID), true, false)
       ACTION_DISMISS -> finishRing(intent.getStringExtra(EXTRA_OCCURRENCE_ID), false, false)
@@ -189,28 +271,174 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
 
   override fun onBind(intent: Intent?): IBinder? = null
 
+  private fun startPreparation(intent: Intent, startId: Int) {
+    if (ring != null) return
+    val alarmId = intent.getStringExtra(EXTRA_ALARM_ID) ?: return
+    val occurrenceId = intent.getStringExtra(EXTRA_OCCURRENCE_ID) ?: return
+    val expectedAtMs = intent.getLongExtra(EXTRA_AT_MS, -1L)
+    val snoozed = intent.getBooleanExtra(EXTRA_SNOOZED, false)
+    val candidate = AlarmPreparation.candidate(
+      this, alarmId, occurrenceId, expectedAtMs, snoozed,
+    ) ?: run {
+      if (preparation == null) stopSelf(startId)
+      return
+    }
+    if (preparation == candidate) return
+    if (preparation?.let { it.atMs <= candidate.atMs && AlarmPreparation.stillCurrent(this, it) } == true) {
+      return
+    }
+    clearPreparation(stopPlayer = true, stopService = false)
+    preparation = candidate
+    preparationAttempts = 0
+    preparationStartedElapsedMs = SystemClock.elapsedRealtime()
+    preparationRetainedFromSnooze = false
+    player.volume = 0f
+    if (!preparationWakeLock.isHeld) preparationWakeLock.acquire(MAX_PREPARATION_WAKE_MS)
+    startForeground(PREPARATION_NOTIFICATION_ID, preparationNotification(candidate))
+    diagnostics?.beginPreparation(candidate.occurrenceId)
+    startPreparationAttempt(candidate)
+    handler.post(preparationWatchdog)
+  }
+
+  private fun startPreparationAttempt(candidate: AlarmPreparation.Candidate) {
+    if (preparation != candidate || !AlarmPreparation.stillCurrent(this, candidate)) return
+    preparationAttempts++
+    preparationRetryPending = false
+    val token = ++preparationResolutionToken
+    val held = candidate.heldUri
+    if (!held.isNullOrBlank()) {
+      playPreparedUri(candidate, held, candidate.heldIsHls)
+      return
+    }
+    preparationExecutor.execute {
+      val result = runCatching { AlarmStreamResolver.resolve(candidate.stationUrl, userAgent) }
+      handler.post {
+        if (token != preparationResolutionToken || preparation != candidate || ring != null) return@post
+        if (!AlarmPreparation.stillCurrent(this, candidate)) {
+          clearPreparation(stopPlayer = true, stopService = true)
+          return@post
+        }
+        result.fold(
+          onSuccess = { playPreparedUri(candidate, it.url, it.isHls) },
+          onFailure = { retryPreparation("resolve_failed") },
+        )
+      }
+    }
+  }
+
+  private fun playPreparedUri(candidate: AlarmPreparation.Candidate, uri: String, isHls: Boolean) {
+    if (preparation != candidate || ring != null) return
+    preparationUri = uri
+    preparationIsHls = isHls
+    preparationProgress.reset()
+    sourceKind = "station"
+    sourceIsHls = isHls
+    currentUri = uri
+    diagnostics?.sourceStart("station", uri, isHls)
+    player.volume = 0f
+    player.repeatMode = Player.REPEAT_MODE_OFF
+    val item = MediaItem.Builder()
+      .setUri(uri)
+      .setMediaId(uri)
+      .setMediaMetadata(MediaMetadata.Builder().setTitle(candidate.stationName).build())
+      .apply { if (isHls) setMimeType(MimeTypes.APPLICATION_M3U8) }
+      .build()
+    player.setMediaItem(item)
+    player.prepare()
+    player.play()
+  }
+
+  private fun retryPreparation(reason: String) {
+    val candidate = preparation ?: return
+    if (preparationRetryPending || preparationUri == null && reason != "resolve_failed") return
+    diagnostics?.event("prewarm_retry", "reason=$reason attempt=$preparationAttempts")
+    preparationUri = null
+    preparationResolutionToken++
+    player.volume = 0f
+    player.stop()
+    player.clearMediaItems()
+    preparationProgress.reset()
+    val delayMs = preparationAttempts * PREPARATION_RETRY_STEP_MS
+    if (preparationAttempts >= MAX_PREPARATION_ATTEMPTS ||
+      System.currentTimeMillis() + delayMs + AlarmPreparation.MIN_USEFUL_LEAD_MS >= candidate.atMs) return
+    preparationRetryPending = true
+    handler.postDelayed(preparationRetry, delayMs)
+  }
+
+  private fun clearPreparation(stopPlayer: Boolean, stopService: Boolean) {
+    if (preparation == null) return
+    preparation = null
+    preparationUri = null
+    preparationResolutionToken++
+    preparationRetryPending = false
+    preparationStartedElapsedMs = 0L
+    preparationRetainedFromSnooze = false
+    handler.removeCallbacks(preparationWatchdog)
+    handler.removeCallbacks(preparationRetry)
+    preparationProgress.reset()
+    if (preparationWakeLock.isHeld) preparationWakeLock.release()
+    if (stopPlayer) {
+      player.volume = 0f
+      player.stop()
+      player.clearMediaItems()
+      currentUri = null
+    }
+    if (stopService && ring == null) {
+      stopForeground(STOP_FOREGROUND_REMOVE)
+      NotificationManagerCompat.from(this).cancel(PREPARATION_NOTIFICATION_ID)
+      stopSelf()
+    }
+  }
+
+  private fun preparedUriFor(current: RingingRecord): String? {
+    val candidate = preparation ?: return null
+    val uri = preparationUri ?: return null
+    if (!AlarmPreparation.matchesClaim(this, candidate, current)) return null
+    preparationProgress.sample(player.currentPosition, player.isPlaying)
+    if (!preparationProgress.isReady(player.isPlaying) || !hasPlayableAudioTrack(player.currentTracks)) {
+      return null
+    }
+    return uri
+  }
+
   private fun startRing(expectedOccurrence: String?) {
     val current = AlarmStateStore.snapshot(this).ringing
     if (current == null || (expectedOccurrence != null && current.occurrenceId != expectedOccurrence)) {
       clearPending(expectedOccurrence)
-      stopSelf()
+      if (preparation == null) stopSelf()
       return
     }
+    if (ring?.occurrenceId == current.occurrenceId) {
+      clearPending(current.occurrenceId)
+      return
+    }
+    val preparedUri = preparedUriFor(current)
+    val preparedIsHls = preparationIsHls
+    val preparedTitle = preparation?.stationName
+    val retainedPreparation = preparationRetainedFromSnooze
+    clearPreparation(stopPlayer = preparedUri == null, stopService = false)
     clearPending(current.occurrenceId)
     stopSystemTone()
     stopShakeListening()
     ring = current
+    diagnostics?.startRing(
+      current.occurrenceId, current.trigger, focusGranted,
+      preserveActive = preparedUri != null,
+    )
     sourceResolutionToken++
     fallbackStarted = false
-    sourceKind = current.sourceKind
-    sourceIsHls = current.sourceIsHls
-    activeFolder = current.sourceFolder
-    currentUri = current.sourceUri
-    sourceFailure = current.note
+    sourceKind = if (preparedUri == null) current.sourceKind else "station"
+    sourceIsHls = if (preparedUri == null) current.sourceIsHls else preparedIsHls
+    activeFolder = if (preparedUri == null) current.sourceFolder else null
+    currentUri = preparedUri ?: current.sourceUri
+    sourceFailure = if (preparedUri == null) current.note else null
     desiredVolume = current.alarm.volume
     fadeProgress.start(current.alarm.fadeSecs)
-    player.volume = currentOutputVolume()
-    startForeground(NOTIFICATION_ID, notification(current))
+    // The decoder may already be running without focus; keep it strictly
+    // silent until the due-time claim obtains focus.
+    player.volume = 0f
+    postInitialRingingNotification(current, preparedUri, preparedTitle, preparedIsHls)
+    NotificationManagerCompat.from(this).cancel(PREPARATION_NOTIFICATION_ID)
     PlaybackService.interruptForAlarm(current.occurrenceId)
     val holdMs = if (current.alarm.autoStopMins > 0) {
       current.alarm.autoStopMins * 60_000L + 60_000L
@@ -229,7 +457,16 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       handler.postDelayed(autoStop, (due - SystemClock.elapsedRealtime()).coerceAtLeast(0))
       scheduleNativeAutoStop(current, due)
     }
-    resolvePrimary(current)
+    if (preparedUri == null) {
+      resolvePrimary(current)
+    } else {
+      if (retainedPreparation) diagnostics?.sourceStart("station", preparedUri, preparedIsHls)
+      diagnostics?.event("prewarm_adopted", "positionMs=${player.currentPosition}")
+      sourceProgress.start(focusPaused, player.currentPosition)
+      handler.post(progressWatchdog)
+      if (!focusGranted || focusPaused) player.pause()
+      else player.volume = currentOutputVolume()
+    }
   }
 
   private fun resolvePrimary(current: RingingRecord) {
@@ -266,15 +503,18 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   private fun resolveStation(station: NativeStation) {
     val occurrence = ring?.occurrenceId ?: return
     val token = ++sourceResolutionToken
+    val startedMs = diagnostics?.resolveStart(station.url)
     folderExecutor.execute {
       val result = runCatching { AlarmStreamResolver.resolve(station.url, userAgent) }
       handler.post {
         if (token != sourceResolutionToken || ring?.occurrenceId != occurrence) return@post
         result.fold(
           onSuccess = { resolved ->
+            if (startedMs != null) diagnostics?.resolveResult(startedMs, resolved.url, resolved.isHls, null)
             playUri(resolved.url, station.name, null, "station", null, resolved.isHls)
           },
           onFailure = { error ->
+            if (startedMs != null) diagnostics?.resolveResult(startedMs, null, null, error)
             tryBackup(error.message ?: "The selected station is unavailable")
           },
         )
@@ -310,6 +550,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
 
   private fun tryBackup(reason: String) {
     val folder = AlarmStateStore.snapshot(this).backupFolder
+    diagnostics?.event("backup_route", "folderConfigured=${!folder.isNullOrBlank()}")
     if (folder.isNullOrBlank()) playTone(reason) else playFolder(folder, null, reason)
   }
 
@@ -347,6 +588,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
         .getOrNull() ?: continue
       systemTone = output
       currentUri = uri.toString()
+      diagnostics?.sourceStart("tone", uri.toString(), false)
       toneWatchdogMisses = 0
       if (setSystemToneVolume(currentOutputVolume()) &&
         (!focusGranted || focusPaused || startSystemTonePlayback())) {
@@ -425,6 +667,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     sourceKind = kind
     sourceIsHls = isHls
     sourceFailure = note
+    diagnostics?.sourceStart(kind, uri, isHls)
     player.volume = currentOutputVolume()
     player.repeatMode = if (kind == "folder" || kind == "tone") Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
     sourceProgress.start(focusPaused)
@@ -456,6 +699,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     uri: String? = currentUri,
     folder: String? = activeFolder,
     isHls: Boolean = sourceIsHls,
+    postNotification: Boolean = true,
   ) {
     val occurrence = ring?.occurrenceId ?: return
     val changed = AlarmStateStore.update(this) { old ->
@@ -473,12 +717,39 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       )
     }
     ring = changed.ringing
-    ring?.let {
+    ring?.takeIf { postNotification }?.let {
       NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification(it))
     }
   }
 
+  internal fun postInitialRingingNotification(
+    current: RingingRecord,
+    preparedUri: String?,
+    preparedTitle: String?,
+    preparedIsHls: Boolean,
+  ) {
+    ring = current
+    if (preparedUri != null) {
+      // The first full-screen notification must already describe the adopted
+      // station. Reposting it immediately can launch the same activity twice.
+      updateRingingSource(
+        "station", preparedTitle ?: current.title ?: "Alarm", null,
+        preparedUri, null, preparedIsHls, postNotification = false,
+      )
+    }
+    startForeground(NOTIFICATION_ID, notification(ring ?: current))
+  }
+
   override fun onPlaybackStateChanged(playbackState: Int) {
+    diagnostics?.playerState(playbackState, player.isLoading, player.isPlaying)
+    if (preparation != null && ring == null) {
+      if (playbackState == Player.STATE_READY && !player.currentTracks.isEmpty &&
+        !hasPlayableAudioTrack(player.currentTracks)) retryPreparation("no_audio_track")
+      else if (playbackState == Player.STATE_ENDED && preparationUri != null) {
+        retryPreparation("station_ended")
+      }
+      return
+    }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && sourceKind == "tone") return
     if (playbackState == Player.STATE_READY && rejectSourceWithoutAudio()) return
     if (playbackState != Player.STATE_ENDED) return
@@ -491,6 +762,12 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   }
 
   override fun onPlayerError(error: PlaybackException) {
+    diagnostics?.mediaError("player_error", error, "code=${error.errorCodeName}")
+    if (preparation != null && ring == null) {
+      Log.w("AerowaveAlarmPlayback", "Muted station preparation failed", error)
+      retryPreparation("player_error")
+      return
+    }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && sourceKind == "tone") return
     Log.e("AerowaveAlarmPlayback", "Playback failed for $sourceKind source", error)
     val reason = when (sourceKind) {
@@ -504,7 +781,21 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   }
 
   override fun onTracksChanged(tracks: Tracks) {
+    diagnostics?.tracks(tracks)
+    if (preparation != null && ring == null) {
+      if (player.playbackState == Player.STATE_READY && !tracks.isEmpty &&
+        !hasPlayableAudioTrack(tracks)) retryPreparation("no_audio_track")
+      return
+    }
     rejectSourceWithoutAudio()
+  }
+
+  override fun onIsLoadingChanged(isLoading: Boolean) {
+    diagnostics?.playerLoading(isLoading)
+  }
+
+  override fun onIsPlayingChanged(isPlaying: Boolean) {
+    diagnostics?.playerPlaying(isPlaying, player.currentPosition)
   }
 
   private fun rejectSourceWithoutAudio(): Boolean {
@@ -512,18 +803,20 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     if (ring == null || player.playbackState != Player.STATE_READY) return false
     val tracks = player.currentTracks
     if (tracks.isEmpty) return false
-    val selectedAudio = tracks.groups.any { group ->
+    if (hasPlayableAudioTrack(tracks)) return false
+    handleSourceFailure("The selected alarm source has no playable audio track")
+    return true
+  }
+
+  private fun hasPlayableAudioTrack(tracks: Tracks): Boolean = tracks.groups.any { group ->
       group.type == C.TRACK_TYPE_AUDIO &&
         (0 until group.length).any { index ->
           group.isTrackSelected(index) && group.isTrackSupported(index)
         }
     }
-    if (selectedAudio) return false
-    handleSourceFailure("The selected alarm source has no playable audio track")
-    return true
-  }
 
   private fun handleSourceFailure(reason: String) {
+    diagnostics?.failureDecision(reason, fallbackStarted, sourceKind)
     handler.removeCallbacks(progressWatchdog)
     fadeProgress.pause()
     player.stop()
@@ -585,13 +878,23 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   ): PersistedAlarmState? {
     val current = ring ?: AlarmStateStore.snapshot(this).ringing ?: return null
     if (occurrenceId != null && occurrenceId != current.occurrenceId) return null
+    diagnostics?.finishRing(if (snooze) "snooze" else if (auto) "auto_dismiss" else "dismiss")
     stopShakeListening()
     handler.removeCallbacks(fadeTick)
     handler.removeCallbacks(autoStop)
+    handler.removeCallbacks(progressWatchdog)
     sourceResolutionToken++
+    val retainedUri = currentUri?.takeIf {
+      snooze && current.trigger != "test" && sourceKind == "station" &&
+        player.isPlaying && hasPlayableAudioTrack(player.currentTracks)
+    }
+    // Mute before releasing focus or changing any persisted alarm state.
+    player.volume = 0f
     stopSystemTone()
-    player.stop()
-    player.clearMediaItems()
+    if (retainedUri == null) {
+      player.stop()
+      player.clearMediaItems()
+    }
     abandonAlarmFocus()
     cancelNativeAutoStop(current)
     if (ringWakeLock.isHeld) ringWakeLock.release()
@@ -606,8 +909,33 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     PlaybackService.finishAlarmInterruption(this, current.occurrenceId, resume = auto)
     clearPending(current.occurrenceId)
     ring = null
-    stopForeground(STOP_FOREGROUND_REMOVE)
-    stopSelf()
+    val next = if (retainedUri == null) null else {
+      AlarmPreparation.next(changed, System.currentTimeMillis())
+        ?.takeIf { it.alarmId == current.alarm.id && it.snoozed &&
+          it.heldUri == retainedUri && it.atMs - System.currentTimeMillis() <= 70_000L }
+    }
+    if (next != null && AlarmPreparation.stillCurrent(this, next)) {
+      preparation = next
+      preparationUri = retainedUri
+      preparationIsHls = sourceIsHls
+      preparationAttempts = 1
+      preparationStartedElapsedMs = SystemClock.elapsedRealtime()
+      preparationRetainedFromSnooze = true
+      preparationProgress.reset(player.currentPosition)
+      if (!preparationWakeLock.isHeld) preparationWakeLock.acquire(MAX_PREPARATION_WAKE_MS)
+      startForeground(PREPARATION_NOTIFICATION_ID, preparationNotification(next))
+      NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID)
+      diagnostics?.beginPreparation(next.occurrenceId)
+      diagnostics?.event("prewarm_retained", "positionMs=${player.currentPosition}")
+      handler.post(preparationWatchdog)
+    } else {
+      if (retainedUri != null) {
+        player.stop()
+        player.clearMediaItems()
+      }
+      stopForeground(STOP_FOREGROUND_REMOVE)
+      stopSelf()
+    }
     return changed
   }
 
@@ -625,8 +953,31 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       setSound(null, audio)
       lockscreenVisibility = Notification.VISIBILITY_PUBLIC
     }
-    getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    val preparationChannel = NotificationChannel(
+      PREPARATION_CHANNEL_ID, "Alarm preparation", NotificationManager.IMPORTANCE_LOW,
+    ).apply {
+      description = "Aerowave prepares an upcoming station alarm"
+      enableVibration(false)
+      setSound(null, null)
+      setShowBadge(false)
+      lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+    }
+    getSystemService(NotificationManager::class.java)
+      .createNotificationChannels(listOf(channel, preparationChannel))
   }
+
+  private fun preparationNotification(candidate: AlarmPreparation.Candidate): Notification =
+    NotificationCompat.Builder(this, PREPARATION_CHANNEL_ID)
+      .setSmallIcon(applicationInfo.icon)
+      .setContentTitle("Preparing alarm")
+      .setContentText(candidate.stationName)
+      .setCategory(NotificationCompat.CATEGORY_SERVICE)
+      .setPriority(NotificationCompat.PRIORITY_LOW)
+      .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+      .setOngoing(true)
+      .setSilent(true)
+      .setOnlyAlertOnce(true)
+      .build()
 
   private fun notification(current: RingingRecord): Notification {
     val launch = PendingIntent.getActivity(
@@ -659,6 +1010,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
     handler.post {
       if (ring == null) return@post
+      diagnostics?.event("focus_change", "code=$change")
       when (change) {
         AudioManager.AUDIOFOCUS_GAIN -> {
           focusPaused = false
@@ -737,6 +1089,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       AudioManager.AUDIOFOCUS_REQUEST_DELAYED -> "Waiting for Android audio focus"
       else -> "Android denied audio focus; the alarm notification is still active"
     }
+    diagnostics?.event("focus_request", "result=$result granted=$focusGranted paused=$focusPaused")
   }
 
   private fun abandonAlarmFocus() {
@@ -747,6 +1100,10 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       @Suppress("DEPRECATION")
       audioManager.abandonAudioFocus(focusListener)
     }
+    focusGranted = false
+    focusPaused = false
+    focusError = null
+    focusMultiplier = 1f
   }
 
   private fun scheduleNativeAutoStop(current: RingingRecord, atElapsedMs: Long) {
@@ -769,29 +1126,42 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   }
 
   override fun onDestroy() {
+    diagnostics?.serviceDestroy()
     handler.removeCallbacksAndMessages(null)
     stopSystemTone()
     stopShakeListening()
     sourceResolutionToken++
+    preparationResolutionToken++
     player.removeListener(this)
     player.release()
     abandonAlarmFocus()
     if (ringWakeLock.isHeld) ringWakeLock.release()
+    if (preparationWakeLock.isHeld) preparationWakeLock.release()
     folderExecutor.shutdownNow()
+    preparationExecutor.shutdownNow()
     instance = null
     super.onDestroy()
   }
 
   companion object {
+    const val ACTION_PREPARE = "com.aerowave.audio.action.PREPARE_ALARM"
     const val ACTION_RING = "com.aerowave.audio.action.RING"
     const val ACTION_SNOOZE = "com.aerowave.audio.action.SNOOZE_ALARM"
     const val ACTION_DISMISS = "com.aerowave.audio.action.DISMISS_ALARM"
     private const val EXTRA_OCCURRENCE_ID = "occurrenceId"
+    private const val EXTRA_ALARM_ID = "alarmId"
+    private const val EXTRA_AT_MS = "atMs"
+    private const val EXTRA_SNOOZED = "snoozed"
     private const val CHANNEL_ID = "aerowave_alarms_v1"
+    private const val PREPARATION_CHANNEL_ID = "aerowave_alarm_preparation_v1"
     internal const val NOTIFICATION_ID = 71_001
+    private const val PREPARATION_NOTIFICATION_ID = 71_002
     private const val FADE_TICK_MS = 250L
     private const val WATCHDOG_TICK_MS = 1_000L
     private const val MAX_RING_WAKE_MS = 2 * 60 * 60 * 1000L
+    private const val MAX_PREPARATION_WAKE_MS = 75_000L
+    private const val PREPARATION_RETRY_STEP_MS = 3_000L
+    private const val MAX_PREPARATION_ATTEMPTS = 3
 
     @Volatile private var instance: AlarmPlaybackService? = null
     @Volatile private var pendingOccurrenceId: String? = null
@@ -829,6 +1199,34 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     fun intentFor(context: Context, action: String, occurrenceId: String): Intent =
       Intent(context, AlarmPlaybackService::class.java).setAction(action)
         .putExtra(EXTRA_OCCURRENCE_ID, occurrenceId)
+
+    fun prepareIntentFor(
+      context: Context,
+      alarmId: String,
+      occurrenceId: String,
+      expectedAtMs: Long,
+      snoozed: Boolean,
+    ): Intent = Intent(context, AlarmPlaybackService::class.java)
+      .setAction(ACTION_PREPARE)
+      .putExtra(EXTRA_ALARM_ID, alarmId)
+      .putExtra(EXTRA_OCCURRENCE_ID, occurrenceId)
+      .putExtra(EXTRA_AT_MS, expectedAtMs)
+      .putExtra(EXTRA_SNOOZED, snoozed)
+
+    internal fun revalidatePreparation(context: Context) {
+      val service = instance ?: return
+      service.handler.post {
+        val candidate = service.preparation ?: return@post
+        val valid = if (System.currentTimeMillis() >= candidate.atMs) {
+          AlarmPreparation.eligibleDuringClaim(context, candidate)
+        } else {
+          AlarmPreparation.stillCurrent(context, candidate)
+        }
+        if (!valid) {
+          service.clearPreparation(stopPlayer = true, stopService = true)
+        }
+      }
+    }
 
     fun setVolume(volume: Float): Boolean {
       val service = instance ?: return false

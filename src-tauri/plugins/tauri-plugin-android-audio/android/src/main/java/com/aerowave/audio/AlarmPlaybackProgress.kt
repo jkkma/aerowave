@@ -10,11 +10,11 @@ internal class AlarmPlaybackProgress(
   private var decodedProgress = false
   private var focusPaused = false
 
-  fun start(pausedForFocus: Boolean) {
+  fun start(pausedForFocus: Boolean, initialPositionMs: Long = 0L) {
     val now = elapsedRealtimeMs()
     sourceStartedMs = now
     lastProgressMs = now
-    lastPositionMs = 0
+    lastPositionMs = initialPositionMs.coerceAtLeast(0)
     decodedProgress = false
     focusPaused = pausedForFocus
   }
