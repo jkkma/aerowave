@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const { createHarness, deferred, flush } = require("./frontend-harness.cjs");
 
@@ -7,7 +9,9 @@ const snapshot = (revision, ringing = null, extra = {}) => ({
   initialized: true, revision, alarms: [], next: null, ringing,
   permissions: {
     exact: "granted", notifications: "granted", alarmChannel: "high", fullScreen: "granted",
-    batteryOptimized: true, manufacturer: "Google", brand: "Pixel",
+    batteryOptimized: true, manufacturer: "Google", brand: "Pixel", alarmScreenOverlay: "denied",
+    dnd: { active: false, access: "denied", alarmBypass: false, fullScreenSuppressed: false,
+      alarmsAllowed: true, mediaAllowed: true },
   },
   error: null, ...extra,
 });
@@ -147,6 +151,162 @@ test("a new alarm channel is pending rather than reported as blocked", () => {
   assert.equal(h.el("#android-channel-status").textContent, "Not created yet");
   assert.equal(h.el("#android-channel-status").classList.contains("attention"), false);
   assert.match(h.el("#android-alarm-status").textContent, /Run a test alarm/);
+});
+
+test("Do Not Disturb off does not ask for policy access", () => {
+  const h = createHarness({ navigator });
+  h.context.fixture = snapshot(3);
+  h.evaluate("applyAndroidAlarmState(fixture)");
+  assert.equal(h.el("#android-dnd-status").textContent, "Off");
+  assert.equal(h.el("#android-dnd-status").classList.contains("attention"), false);
+  assert.doesNotMatch(h.el("#android-dnd-help").textContent, /grant|access/i);
+  assert.doesNotMatch(h.el("#android-alarm-status").textContent, /Do Not Disturb/);
+});
+
+test("Do Not Disturb warns about a hidden alarm screen even when alarm sound is allowed", () => {
+  const h = createHarness({ navigator });
+  h.context.fixture = snapshot(3, null, { permissions: { ...snapshot(3).permissions,
+    dnd: { active: true, access: "denied", alarmBypass: false, fullScreenSuppressed: true,
+      alarmsAllowed: true, mediaAllowed: true },
+  } });
+  h.evaluate("applyAndroidAlarmState(fixture)");
+  assert.equal(h.el("#android-dnd-status").classList.contains("attention"), true);
+  assert.match(h.el("#android-dnd-help").textContent, /hide the ringing screen even when alarm sound is allowed/);
+  assert.match(h.el("#android-alarm-status").textContent, /Test a scheduled alarm with the screen off/);
+  assert.doesNotMatch(h.el("#android-alarm-status").textContent, /Needs attention/);
+  assert.equal(h.el("#android-alarm-status").classList.contains("warn"), true);
+});
+
+test("Do Not Disturb media and alert restrictions are shown separately", () => {
+  const h = createHarness({ navigator });
+  h.context.fixture = snapshot(3, null, { permissions: { ...snapshot(3).permissions,
+    dnd: { active: true, access: "denied", alarmBypass: false, fullScreenSuppressed: false,
+      alarmsAllowed: false, mediaAllowed: false },
+  } });
+  h.evaluate("applyAndroidAlarmState(fixture)");
+  assert.match(h.el("#android-dnd-help").textContent, /blocks media sound/);
+  assert.match(h.el("#android-dnd-help").textContent, /Alarm alerts are not allowed/);
+  assert.match(h.el("#android-alarm-status").textContent, /Do Not Disturb media sound/);
+  assert.match(h.el("#android-alarm-status").textContent, /Do Not Disturb alarm alerts/);
+});
+
+test("active Do Not Disturb stays a screen-off check on Xiaomi with allowed sound", () => {
+  const h = createHarness({ navigator });
+  h.context.fixture = snapshot(3, null, { permissions: { ...snapshot(3).permissions,
+    manufacturer: "Xiaomi", brand: "POCO",
+    dnd: { active: true, access: "denied", alarmBypass: false, fullScreenSuppressed: false,
+      alarmsAllowed: true, mediaAllowed: true },
+  } });
+  h.evaluate("applyAndroidAlarmState(fixture)");
+  assert.equal(h.el("#android-dnd-status").textContent, "On · check alarm screen");
+  assert.match(h.el("#android-dnd-help").textContent, /background windows/);
+  assert.match(h.el("#android-dnd-help").textContent, /scheduled alarm with the screen off/);
+  assert.equal(h.el("#android-alarm-status").classList.contains("warn"), true);
+  assert.doesNotMatch(h.el("#android-alarm-status").textContent, /looks ready/);
+});
+
+test("Xiaomi needs alarm screen access only while Do Not Disturb is active", () => {
+  const h = createHarness({ navigator });
+  const permissions = { ...snapshot(3).permissions, manufacturer: "Xiaomi", brand: "POCO" };
+  h.context.fixture = snapshot(3, null, { permissions });
+  h.evaluate("applyAndroidAlarmState(fixture)");
+  assert.equal(h.el("#android-alarm-screen-row").hidden, false);
+  assert.equal(h.el("#android-alarm-screen-status").textContent, "Needs access");
+  assert.equal(h.el("#android-alarm-screen-status").classList.contains("attention"), false);
+  assert.match(h.el("#android-alarm-screen-help").textContent, /Optional while Do Not Disturb is off/);
+  assert.doesNotMatch(h.el("#android-alarm-status").textContent, /Display over other apps/);
+
+  h.context.fixture = snapshot(4, null, { permissions: { ...permissions, dnd: {
+    active: true, access: "denied", alarmBypass: false, fullScreenSuppressed: false,
+    alarmsAllowed: true, mediaAllowed: true,
+  } } });
+  h.evaluate("applyAndroidAlarmState(fixture)");
+  assert.equal(h.el("#android-alarm-screen-status").textContent, "Needs access");
+  assert.equal(h.el("#android-alarm-screen-status").classList.contains("attention"), true);
+  assert.match(h.el("#android-alarm-screen-help").textContent, /Display over other apps/);
+  assert.match(h.el("#android-alarm-status").textContent, /Needs attention: Display over other apps for the alarm screen/);
+});
+
+test("granted Xiaomi alarm screen access still needs a real DND screen-off test", () => {
+  const h = createHarness({ navigator });
+  h.context.fixture = snapshot(3, null, { permissions: { ...snapshot(3).permissions,
+    manufacturer: "Xiaomi", brand: "Redmi", alarmScreenOverlay: "granted",
+    dnd: { active: true, access: "denied", alarmBypass: false, fullScreenSuppressed: false,
+      alarmsAllowed: true, mediaAllowed: true },
+  } });
+  h.evaluate("applyAndroidAlarmState(fixture)");
+  assert.equal(h.el("#android-alarm-screen-row").hidden, false);
+  assert.equal(h.el("#android-alarm-screen-status").textContent, "Allowed");
+  assert.equal(h.el("#android-alarm-screen-status").classList.contains("ready"), true);
+  assert.match(h.el("#android-alarm-status").textContent, /Test a scheduled alarm with the screen off/);
+  assert.doesNotMatch(h.el("#android-alarm-status").textContent, /Needs attention/);
+});
+
+test("unknown Xiaomi alarm screen access stays unknown", () => {
+  const h = createHarness({ navigator });
+  h.context.fixture = snapshot(3, null, { permissions: { ...snapshot(3).permissions,
+    manufacturer: "Xiaomi", alarmScreenOverlay: "unknown",
+  } });
+  h.evaluate("applyAndroidAlarmState(fixture)");
+  assert.equal(h.el("#android-alarm-screen-row").hidden, false);
+  assert.equal(h.el("#android-alarm-screen-status").textContent, "Unknown");
+  assert.equal(h.el("#android-alarm-screen-status").classList.contains("ready"), false);
+  assert.match(h.el("#android-alarm-status").textContent, /could not be checked/);
+});
+
+test("other Android brands do not show or require Xiaomi alarm screen access", () => {
+  const h = createHarness({ navigator });
+  h.context.fixture = snapshot(3, null, { permissions: { ...snapshot(3).permissions,
+    alarmScreenOverlay: "denied",
+    dnd: { active: true, access: "denied", alarmBypass: false, fullScreenSuppressed: false,
+      alarmsAllowed: true, mediaAllowed: true },
+  } });
+  h.evaluate("applyAndroidAlarmState(fixture)");
+  assert.equal(h.el("#android-alarm-screen-row").hidden, true);
+  assert.doesNotMatch(h.el("#android-alarm-status").textContent, /Display over other apps/);
+});
+
+test("unknown Do Not Disturb data is never shown as ready", () => {
+  const h = createHarness({ navigator });
+  h.context.fixture = snapshot(3, null, { permissions: { ...snapshot(3).permissions, dnd: {
+    active: true, access: "unknown", alarmBypass: null, fullScreenSuppressed: null,
+    alarmsAllowed: null, mediaAllowed: null,
+  } } });
+  h.evaluate("applyAndroidAlarmState(fixture)");
+  assert.equal(h.el("#android-dnd-status").textContent, "On · partly unknown");
+  assert.match(h.el("#android-dnd-help").textContent, /could not be checked/);
+  assert.match(h.el("#android-alarm-status").textContent, /could not be checked/);
+  assert.equal(h.el("#android-alarm-status").classList.contains("warn"), true);
+  h.context.fixture = snapshot(4, null, { permissions: { ...snapshot(3).permissions, dnd: {
+    active: null, access: "unknown", alarmBypass: null, fullScreenSuppressed: null,
+    alarmsAllowed: null, mediaAllowed: null,
+  } } });
+  h.evaluate("applyAndroidAlarmState(fixture)");
+  assert.equal(h.el("#android-dnd-status").textContent, "Could not check");
+  assert.equal(h.el("#android-dnd-status").classList.contains("ready"), false);
+});
+
+test("Alarm alerts, Do Not Disturb and alarm screen buttons open their own settings pages", async () => {
+  const html = fs.readFileSync(path.join(__dirname, "../../src/index.html"), "utf8");
+  const settingFor = title => {
+    const row = html.match(new RegExp(`<li class="android-permission-row"[^>]*>(?:(?!</li>)[\\s\\S])*?<strong>${title}</strong>(?:(?!</li>)[\\s\\S])*?</li>`))?.[0];
+    assert.ok(row, `${title} row exists`);
+    return row.match(/data-android-setting="([^"]+)"/)?.[1];
+  };
+  const h = createHarness({ navigator });
+  const channel = h.el("#channel-settings-button");
+  channel.dataset.androidSetting = settingFor("Alarm alerts");
+  const dnd = h.el("#dnd-settings-button");
+  dnd.dataset.androidSetting = settingFor("Do Not Disturb");
+  const alarmScreen = h.el("#alarm-screen-settings-button");
+  alarmScreen.dataset.androidSetting = settingFor("Alarm screen during Do Not Disturb");
+  h.queries.set("[data-android-setting]", [channel, dnd, alarmScreen]);
+  h.evaluate("wire()");
+  await channel.dispatch("click");
+  await dnd.dispatch("click");
+  await alarmScreen.dispatch("click");
+  assert.deepEqual(h.calls.filter(c => c.command.endsWith("|open_alarm_settings"))
+    .map(c => c.args.payload.setting), ["alarmChannel", "dndSettings", "alarmScreen"]);
 });
 
 test("Xiaomi restrictions stay manual when Android has no separate full-screen switch", () => {

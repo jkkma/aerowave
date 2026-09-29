@@ -132,13 +132,22 @@ gives the decoder a fresh startup or stall interval, so time spent interrupted
 does not cause a healthy station to switch to backup audio.
 
 **Settings > Permissions** shows Alarms & reminders, app notifications, the
-Alarms notification category, full-screen alarm access, and battery restrictions,
-with a settings shortcut for each. **Check again** refreshes those checks;
-returning from Android settings also updates them. Phone-specific restrictions
-are labeled as manual checks because Android's public permission APIs cannot
-verify every manufacturer's switches. Keep the phone powered on: force-stopping
-the application prevents delivery until it is opened again. OEM battery controls
-require testing on each phone.
+Alarms notification category, Do Not Disturb, full-screen alarm access, and
+battery restrictions, with shortcuts to their Android settings. The Alarm alerts
+shortcut opens that notification category directly. **Check again** refreshes
+the checks; returning from Android settings also updates them. An active Do Not
+Disturb mode remains a screen-off test even when alarm alerts and media sound
+appear allowed. On Xiaomi/Redmi/POCO, the separate **Alarm screen during Do Not
+Disturb** row checks Android's **Display over other apps** access. This is
+optional while Do Not Disturb is off, and needed for the guarded alarm screen
+request when it is on. If Android opens an app list, select Aerowave. Unknown
+access remains unknown rather than ready.
+Aerowave does not need permission to change Do Not Disturb policy for this
+fallback and does not draw overlay windows.
+Phone-specific restrictions are labeled as manual checks because Android's
+public permission APIs cannot verify every manufacturer's switches. Keep the
+phone powered on: force-stopping the application prevents delivery until it is
+opened again. OEM battery controls require testing on each phone.
 
 Ringing alarms use a native screen with Dismiss and Snooze controls. It requests
 screen wake, appears over the lock screen, and keeps the display on while visible.
@@ -156,11 +165,18 @@ can also activate the motion-strength detector; handling sensitivity must be
 checked on the phone.
 
 Android's full-screen notification permission does not cover every manufacturer's
-restrictions. On Xiaomi/POCO, open Aerowave's app info, then **Other permissions**,
+restrictions. On Xiaomi/Redmi/POCO, open Aerowave's app info, then **Other permissions**,
 and allow **Show on Lock screen** and **Open new windows while running in the
-background**. Schedule an alarm with the phone locked and display off to verify
-the result. When the phone is already in use, Android may show the alarm as a
-heads-up notification; tap it to open the alarm screen. See Android's
+background**. Do Not Disturb on these phones can withhold a full-screen alarm
+notification even when alarm sound is allowed. With **Display over other apps**
+access granted, Aerowave also requests its native alarm screen directly for a
+scheduled ring with Do Not Disturb active and the screen off. This permission
+provides an exception for the background launch; Android or phone-specific
+restrictions can still prevent the screen from appearing.
+Schedule an alarm with the phone locked and display off to verify the result,
+including sound through the intended output. When the phone is already in use,
+Android may show the alarm as a heads-up notification; tap it to open the alarm
+screen. See Android's
 [time-sensitive notification guidance](https://developer.android.com/develop/ui/views/notifications/time-sensitive)
 and [full-screen permission rules](https://source.android.com/docs/core/permissions/fsi-limits).
 

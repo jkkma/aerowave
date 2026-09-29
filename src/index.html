@@ -505,7 +505,17 @@
             <li class="android-permission-row">
               <div class="android-permission-heading"><strong>Alarm alerts</strong><span id="android-channel-status" class="android-permission-state">Checking…</span></div>
               <p id="android-channel-help">The Alarms notification channel needs high priority to appear over other apps.</p>
-              <button class="gel" type="button" data-android-setting="notifications">Open notification settings</button>
+              <button class="gel" type="button" data-android-setting="alarmChannel">Open alarm alerts</button>
+            </li>
+            <li class="android-permission-row">
+              <div class="android-permission-heading"><strong>Do Not Disturb</strong><span id="android-dnd-status" class="android-permission-state">Checking…</span></div>
+              <p id="android-dnd-help">Check whether Do Not Disturb allows alarm alerts, media sound, and the ringing screen.</p>
+              <button class="gel" type="button" data-android-setting="dndSettings">Open Do Not Disturb settings</button>
+            </li>
+            <li class="android-permission-row" id="android-alarm-screen-row" hidden>
+              <div class="android-permission-heading"><strong>Alarm screen during Do Not Disturb</strong><span id="android-alarm-screen-status" class="android-permission-state">Checking…</span></div>
+              <p id="android-alarm-screen-help">On Xiaomi/Redmi/POCO, Android's Display over other apps access lets Aerowave request the alarm screen for a scheduled ring with Do Not Disturb on and the screen off.</p>
+              <button class="gel" type="button" data-android-setting="alarmScreen">Open alarm screen access</button>
             </li>
             <li class="android-permission-row">
               <div class="android-permission-heading"><strong>Full-screen alarm access</strong><span id="android-fullscreen-status" class="android-permission-state">Checking…</span></div>
