@@ -258,6 +258,38 @@ pub struct AlarmPermissions {
     pub manufacturer: String,
     #[serde(default)]
     pub brand: String,
+    #[serde(default)]
+    pub dnd: AlarmDndPermissions,
+    #[serde(default = "unknown_permission")]
+    pub alarm_screen_overlay: String,
+}
+
+fn unknown_permission() -> String {
+    "unknown".into()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AlarmDndPermissions {
+    pub active: Option<bool>,
+    pub access: String,
+    pub alarm_bypass: Option<bool>,
+    pub full_screen_suppressed: Option<bool>,
+    pub alarms_allowed: Option<bool>,
+    pub media_allowed: Option<bool>,
+}
+
+impl Default for AlarmDndPermissions {
+    fn default() -> Self {
+        Self {
+            active: None,
+            access: "unknown".into(),
+            alarm_bypass: None,
+            full_screen_suppressed: None,
+            alarms_allowed: None,
+            media_allowed: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

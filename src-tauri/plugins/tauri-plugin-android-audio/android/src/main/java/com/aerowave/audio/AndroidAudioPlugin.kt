@@ -560,24 +560,8 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
   fun openAlarmSettings(invoke: Invoke) {
     try {
       val setting = invoke.parseArgs(AlarmSettingsArgs::class.java).setting
-      val appInfo = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-        Uri.parse("package:${activity.packageName}"))
-      val intent = when (setting) {
-        "exact" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-          Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
-            Uri.parse("package:${activity.packageName}"))
-        } else appInfo
-        "notifications" -> Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-          .putExtra(Settings.EXTRA_APP_PACKAGE, activity.packageName)
-        "battery" -> Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-          Uri.parse("package:${activity.packageName}"))
-        "fullscreen" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-          Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
-            Uri.parse("package:${activity.packageName}"))
-        } else appInfo
-        "appInfo" -> appInfo
-        else -> throw IllegalArgumentException("Unknown alarm setting")
-      }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      val appInfo = alarmSettingsIntent(activity, "appInfo")
+      val intent = alarmSettingsIntent(activity, setting)
       try {
         activity.startActivity(intent)
       } catch (error: ActivityNotFoundException) {
@@ -758,8 +742,43 @@ private fun alarmPermissions(context: Context): JSObject = JSObject().apply {
     context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent() -> "granted"
     else -> "denied"
   })
+  put("dnd", AlarmDnd.snapshot(context))
+  put("alarmScreenOverlay", alarmScreenOverlayAccess(context))
   val power = context.getSystemService(PowerManager::class.java)
   put("batteryOptimized", !power.isIgnoringBatteryOptimizations(context.packageName))
   put("manufacturer", Build.MANUFACTURER)
   put("brand", Build.BRAND)
+}
+
+internal fun alarmScreenOverlayAccess(context: Context): String = try {
+  if (Settings.canDrawOverlays(context)) "granted" else "denied"
+} catch (_: Exception) {
+  "unknown"
+}
+
+internal fun alarmSettingsIntent(context: Context, setting: String): Intent {
+  val appInfo = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+    Uri.parse("package:${context.packageName}"))
+  return when (setting) {
+    "exact" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+        Uri.parse("package:${context.packageName}"))
+    } else appInfo
+    "notifications" -> Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+      .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+    "battery" -> Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+      Uri.parse("package:${context.packageName}"))
+    "fullscreen" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+      Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+        Uri.parse("package:${context.packageName}"))
+    } else appInfo
+    "dndSettings" -> Intent(Settings.ACTION_ZEN_MODE_PRIORITY_SETTINGS)
+    "alarmScreen" -> Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+      Uri.parse("package:${context.packageName}"))
+    "alarmChannel" -> Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+      .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+      .putExtra(Settings.EXTRA_CHANNEL_ID, AlarmPlaybackService.CHANNEL_ID)
+    "appInfo" -> appInfo
+    else -> throw IllegalArgumentException("Unknown alarm setting")
+  }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 }

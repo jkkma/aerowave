@@ -397,6 +397,42 @@ off; no test ring or snooze remained pending. These checks establish renderer,
 volume-command and screen behavior. Audible fade perception, a credential-locked
 screen and overnight reliability remain unverified.
 
+## Do Not Disturb alarm screen on MIUI — 2026-09-28
+
+The POCO X3 Pro on Android 13 / MIUI 14 suppressed the alarm's full-screen
+notification while Do Not Disturb was active, despite high-priority alarm
+notifications and the existing Xiaomi lock-screen/background-window permissions.
+An initial direct activity request was also denied by Android's background
+activity restrictions; ringing alone did not wake the display.
+
+The corrected ARM64 development build based on 0.15.3 installed over the
+existing app with the same signing certificate. Its installed APK matched
+SHA-256 `5FB261A5B1B2FA9BE9DF5C62043EBEFADE030B5197207056EFFCE0BEF9659211`.
+Android's **Display over other apps** access was enabled through system
+settings. Aerowave uses that access to request its existing alarm activity;
+it does not create an overlay window or change Do Not Disturb policy.
+
+With Do Not Disturb still enabled and the app process absent before the deadline,
+a scheduled local-folder alarm at 22:50 (UTC−03) started ringing at 22:50:01.226.
+Android explicitly allowed the background activity because the overlay access
+was granted, woke the display from asleep at 22:50:01.252, and resumed the native
+alarm screen. A screenshot showed reachable Dismiss and Snooze controls.
+
+Tapping Snooze scheduled a one-minute occurrence. With the display asleep again,
+it rang at 22:51:49.045 and woke the screen at 22:51:49.066. The native screen
+appeared again; tapping Dismiss cleared ringing and the pending snooze. The
+temporary alarm was then removed. Readback confirmed that the original app
+state and alarm definitions matched their pre-test snapshots, with no pending
+alarm or ringing state. Do Not Disturb remained enabled throughout.
+
+The updated permission row displayed **Allowed** after returning from Android
+settings and was checked with real device scrolling and screenshots. Validation
+also passed 392 frontend tests, eight targeted Android JVM tests, 212 Rust core
+tests and two Android permission bridge tests, plus version, IPC and vendor
+checks. These short screen-wake checks do not establish audible output,
+credential-locked behavior, overnight delivery or behavior on other Android
+versions and manufacturers.
+
 ## Qualification still open
 
 The Android scope is not complete or release-qualified. The remaining gates

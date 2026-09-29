@@ -28,7 +28,16 @@ fn permission_snapshot_survives_the_production_bridge_model() {
         "fullScreen": "notRequired",
         "batteryOptimized": true,
         "manufacturer": "Xiaomi",
-        "brand": "POCO"
+        "brand": "POCO",
+        "alarmScreenOverlay": "granted",
+        "dnd": {
+            "active": true,
+            "access": "denied",
+            "alarmBypass": false,
+            "fullScreenSuppressed": true,
+            "alarmsAllowed": true,
+            "mediaAllowed": true
+        }
     }));
 
     let bridged: AlarmState = serde_json::from_value(native.clone()).unwrap();
@@ -53,4 +62,11 @@ fn older_permission_snapshot_keeps_unavailable_checks_unknown() {
     assert_eq!(permissions["brand"], "");
     assert_eq!(permissions["exact"], "granted");
     assert_eq!(permissions["notifications"], "granted");
+    assert_eq!(permissions["alarmScreenOverlay"], "unknown");
+    assert_eq!(permissions["dnd"]["access"], "unknown");
+    for field in [
+        "active", "alarmBypass", "fullScreenSuppressed", "alarmsAllowed", "mediaAllowed",
+    ] {
+        assert!(permissions["dnd"][field].is_null(), "{field}");
+    }
 }

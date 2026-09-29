@@ -516,6 +516,16 @@ function renderAndroidAlarmPermissions() {
   const snapshot = androidAlarmSnapshot;
   if (!snapshot) return;
   const permissions = snapshot.permissions || {};
+  const maker = `${permissions.manufacturer || ""} ${permissions.brand || ""}`;
+  const isXiaomi = /xiaomi|redmi|poco/i.test(maker);
+  const overlayAccess = permissions.alarmScreenOverlay;
+  const overlayUnknown = isXiaomi && overlayAccess !== "granted" && overlayAccess !== "denied";
+  const dnd = permissions.dnd || {};
+  const dndOn = dnd.active === true;
+  const dndUnknown = typeof dnd.active !== "boolean" || (dndOn &&
+    dnd.access !== "granted" && dnd.access !== "denied") || (dndOn &&
+    [dnd.alarmBypass, dnd.fullScreenSuppressed, dnd.alarmsAllowed, dnd.mediaAllowed]
+      .some(value => typeof value !== "boolean"));
   const show = (name, label, detail, tone = "") => {
     const status = $(`#android-${name}-status`);
     status.textContent = label;
@@ -556,6 +566,43 @@ function renderAndroidAlarmPermissions() {
     show("channel", "Could not check", "Check the Alarms notification category after an alarm has rung.");
   }
 
+  if (dnd.active === false) {
+    show("dnd", "Off", "Do Not Disturb is off. If you use it for sleep, review its alarm and media sound exceptions before relying on an alarm.", "ready");
+  } else if (dndOn) {
+    const details = [];
+    if (dnd.fullScreenSuppressed === true) {
+      details.push("Do Not Disturb may hide the ringing screen even when alarm sound is allowed.");
+    }
+    if (dnd.mediaAllowed === false) {
+      details.push("Do Not Disturb blocks media sound, which Aerowave uses for alarm audio.");
+    }
+    if (dnd.alarmsAllowed === false && dnd.alarmBypass !== true) {
+      details.push("Alarm alerts are not allowed through Do Not Disturb.");
+    }
+    if (dndUnknown) details.push("Some Do Not Disturb settings could not be checked.");
+    details.push(isXiaomi
+      ? "On Xiaomi/Redmi/POCO, check Alarm screen access below and allow background windows in App info → Other permissions. Test a scheduled alarm with the screen off."
+      : "Review Do Not Disturb settings, then test a scheduled alarm with the screen off.");
+    show("dnd", dndUnknown ? "On · partly unknown" : "On · check alarm screen",
+      details.join(" "), "attention");
+  } else {
+    show("dnd", "Could not check", "Open Do Not Disturb settings to check alarm and media sound exceptions. Test a scheduled alarm with the screen off.");
+  }
+
+  $("#android-alarm-screen-row").hidden = !isXiaomi;
+  if (isXiaomi) {
+    if (overlayAccess === "granted") {
+      show("alarm-screen", "Allowed", "Display over other apps is on. Aerowave can request the alarm screen for a scheduled ring with Do Not Disturb on and the screen off. Test it on this phone.", "ready");
+    } else if (overlayAccess === "denied") {
+      show("alarm-screen", "Needs access", dndOn
+        ? "Allow Display over other apps so Aerowave can request the alarm screen while Do Not Disturb is on and the screen is off. If Android lists apps, select Aerowave. No overlay window is drawn."
+        : "Optional while Do Not Disturb is off. Allow Display over other apps before using DND with screen-off alarms. If Android lists apps, select Aerowave. No overlay window is drawn.",
+      dndOn ? "attention" : "");
+    } else {
+      show("alarm-screen", "Unknown", "Could not check Display over other apps access. Open alarm screen access to review it; if Android lists apps, select Aerowave.");
+    }
+  }
+
   if (permissions.fullScreen === "denied") {
     show("fullscreen", "Off", "Allow full-screen alarms to open the ringing screen from the lock screen.", "attention");
   } else if (permissions.fullScreen === "granted") {
@@ -576,9 +623,8 @@ function renderAndroidAlarmPermissions() {
     show("battery", "Could not check", "Open battery settings to review background restrictions.");
   }
 
-  const maker = `${permissions.manufacturer || ""} ${permissions.brand || ""}`;
-  $("#android-phone-help").textContent = /xiaomi|redmi|poco/i.test(maker)
-    ? "On Xiaomi/POCO, open App info → Other permissions. Allow Show on Lock screen and Open new windows while running in the background. Aerowave cannot read these switches."
+  $("#android-phone-help").textContent = isXiaomi
+    ? "On Xiaomi/Redmi/POCO, open App info → Other permissions. Allow Show on Lock screen and Open new windows while running in the background. Aerowave cannot read these switches."
     : "Some phones add lock-screen, background start, or auto-start limits. Review App info and battery settings; Aerowave cannot read these phone-specific switches.";
 
   const required = [];
@@ -586,19 +632,24 @@ function renderAndroidAlarmPermissions() {
   if (permissions.notifications === "denied") required.push("notifications");
   if (permissions.alarmChannel === "blocked" || permissions.alarmChannel === "quiet") required.push("Alarm alerts");
   if (permissions.fullScreen === "denied") required.push("full-screen access");
+  if (isXiaomi && dndOn && overlayAccess === "denied") required.push("Display over other apps for the alarm screen");
+  if (dndOn && dnd.mediaAllowed === false) required.push("Do Not Disturb media sound");
+  if (dndOn && dnd.alarmsAllowed === false && dnd.alarmBypass !== true) required.push("Do Not Disturb alarm alerts");
   const incomplete = !permissions.exact || !permissions.notifications || !permissions.alarmChannel ||
-    !permissions.fullScreen || typeof permissions.batteryOptimized !== "boolean";
+    !permissions.fullScreen || typeof permissions.batteryOptimized !== "boolean" || dndUnknown || overlayUnknown;
   const summary = required.length ? "Needs attention: " + required.join(", ") + "."
     : incomplete ? "Some Android settings could not be checked. Review the rows below."
+    : dndOn ? "Do Not Disturb is on. Test a scheduled alarm with the screen off to check the ringing screen and sound."
     : permissions.alarmChannel === "notCreated"
       ? "Core alarm access looks ready. Run a test alarm to create its alert category, then check again."
     : permissions.batteryOptimized === true
       ? "Android alarm access looks ready. Review battery use and phone-specific settings, then test with the screen off."
       : "Android alarm access looks ready. Check phone-specific settings and test with the screen off.";
   $("#android-alarm-status").textContent = snapshot.error || summary;
-  $("#android-alarm-status").classList.toggle("warn", !!snapshot.error || !!required.length || incomplete);
+  $("#android-alarm-status").classList.toggle("warn", !!snapshot.error || !!required.length || incomplete || dndOn);
   $("#android-alarm-hint").textContent = snapshot.error || (required.length
     ? "Review Android permissions in Settings before relying on alarms."
+    : dndOn ? "Review Do Not Disturb settings, then test a scheduled alarm with the screen off."
     : "Check phone-specific settings in Settings, then test an alarm with the screen off.");
 }
 

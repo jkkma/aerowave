@@ -9,6 +9,7 @@ import android.app.AlarmManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -27,6 +28,7 @@ import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -45,6 +47,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   private val handler = Handler(Looper.getMainLooper())
   private lateinit var player: ExoPlayer
   private var ring: RingingRecord? = null
+  private var directLaunchRequestedForOccurrence: String? = null
   private var desiredVolume = 0.8f
   private var activeFolder: String? = null
   private var currentUri: String? = null
@@ -738,6 +741,45 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       )
     }
     startForeground(NOTIFICATION_ID, notification(ring ?: current))
+    requestDndAlarmScreenIfNeeded(ring ?: current)
+  }
+
+  private fun requestDndAlarmScreenIfNeeded(current: RingingRecord) {
+    val occurrence = current.occurrenceId
+    if (directLaunchRequestedForOccurrence == occurrence ||
+      ring?.occurrenceId != occurrence ||
+      AlarmStateStore.snapshot(this).ringing?.occurrenceId != occurrence) return
+    val eligible = runCatching {
+      AlarmDnd.shouldRequestAlarmScreen(
+        Build.MANUFACTURER, Build.BRAND, current.trigger,
+        AlarmDnd.active(this),
+        getSystemService(PowerManager::class.java).isInteractive,
+        NotificationManagerCompat.from(this).areNotificationsEnabled() &&
+          (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) ==
+              PackageManager.PERMISSION_GRANTED),
+        alarmChannelImportance(this),
+        canUseFullScreenIntent(),
+        alarmScreenOverlayAccess(this) == "granted",
+      )
+    }.getOrElse { error ->
+      Log.w("AerowaveAlarmUi", "DND alarm screen eligibility unavailable", error)
+      false
+    }
+    if (!eligible) return
+    if (ring?.occurrenceId != occurrence ||
+      AlarmStateStore.snapshot(this).ringing?.occurrenceId != occurrence) return
+    // MIUI can suppress the full-screen notification solely because DND is on.
+    // A user-granted overlay capability permits background activity starts on
+    // this Android version; no overlay window is created. Android still decides
+    // whether the requested alarm activity actually becomes visible.
+    directLaunchRequestedForOccurrence = occurrence
+    try {
+      startActivity(AlarmActivity.intentFor(this, occurrence))
+      Log.i("AerowaveAlarmUi", "DND alarm screen launch requested; visibility unverified occurrence=$occurrence")
+    } catch (error: Exception) {
+      Log.w("AerowaveAlarmUi", "DND alarm screen launch rejected occurrence=$occurrence", error)
+    }
   }
 
   override fun onPlaybackStateChanged(playbackState: Int) {
@@ -1152,7 +1194,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     private const val EXTRA_ALARM_ID = "alarmId"
     private const val EXTRA_AT_MS = "atMs"
     private const val EXTRA_SNOOZED = "snoozed"
-    private const val CHANNEL_ID = "aerowave_alarms_v1"
+    internal const val CHANNEL_ID = "aerowave_alarms_v1"
     private const val PREPARATION_CHANNEL_ID = "aerowave_alarm_preparation_v1"
     internal const val NOTIFICATION_ID = 71_001
     private const val PREPARATION_NOTIFICATION_ID = 71_002
