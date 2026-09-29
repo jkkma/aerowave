@@ -1,5 +1,6 @@
 package com.aerowave.audio
 
+import android.os.SystemClock
 import androidx.media3.extractor.Extractor
 import androidx.media3.extractor.ExtractorInput
 import androidx.media3.extractor.ForwardingExtractor
@@ -7,7 +8,10 @@ import androidx.media3.extractor.PositionHolder
 import java.io.EOFException
 
 /** Starts a live ADTS stream at a verified frame boundary after Media3 has sniffed it. */
-internal class AacStartAlignedExtractor(delegate: Extractor) : ForwardingExtractor(delegate) {
+internal class AacStartAlignedExtractor(
+  delegate: Extractor,
+  private val onAlignmentEvent: ((String, Int?, Long, String?) -> Unit)? = null,
+) : ForwardingExtractor(delegate) {
   private var alignedInput: ExtractorInput? = null
 
   override fun read(input: ExtractorInput, seekPosition: PositionHolder): Int {
@@ -15,9 +19,17 @@ internal class AacStartAlignedExtractor(delegate: Extractor) : ForwardingExtract
     // A live connection can begin inside an earlier frame whose tail resembles a header.
     if (input !== alignedInput) {
       if (input.position == 0L) {
-        val startOffset = firstValidatedFrame(input) ?: 0
-        input.resetPeekPosition()
-        if (startOffset > 0) input.skipFully(startOffset)
+        val startedMs = if (onAlignmentEvent != null) SystemClock.elapsedRealtime() else 0L
+        report("start", null, 0, null)
+        try {
+          val validatedOffset = firstValidatedFrame(input)
+          input.resetPeekPosition()
+          if (validatedOffset != null && validatedOffset > 0) input.skipFully(validatedOffset)
+          report("end", validatedOffset, elapsedSince(startedMs), null)
+        } catch (error: Exception) {
+          report("error", null, elapsedSince(startedMs), error.javaClass.simpleName)
+          throw error
+        }
       }
       alignedInput = input
     }
@@ -27,6 +39,14 @@ internal class AacStartAlignedExtractor(delegate: Extractor) : ForwardingExtract
   override fun seek(position: Long, timeUs: Long) {
     super.seek(position, timeUs)
     alignedInput = null
+  }
+
+  private fun elapsedSince(startedMs: Long): Long =
+    if (onAlignmentEvent == null) 0 else SystemClock.elapsedRealtime() - startedMs
+
+  private fun report(stage: String, offset: Int?, durationMs: Long, error: String?) {
+    // A diagnostic callback must never become an alarm playback failure.
+    runCatching { onAlignmentEvent?.invoke(stage, offset, durationMs, error) }
   }
 
   private fun firstValidatedFrame(input: ExtractorInput): Int? {

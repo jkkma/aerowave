@@ -462,6 +462,14 @@ unchanged. See the [Android build and testing guide](docs/android.md) for device
 evidence and limitations, and [Android releases](docs/android-release.md) for
 protected signing keys and optimized APKs.
 
+Station alarms begin silent preparation up to one minute before they are due,
+without taking audio focus or waking the screen. At the scheduled time, an
+already advancing stream supplies the normal fade-in. If preparation was
+unavailable or did not produce playable audio, the alarm starts its usual
+station, backup-music and system-tone fallback sequence. The exact alarm remains
+independent of preparation; edits and clock changes invalidate stale preparation.
+A one-minute station snooze can keep the decoded stream running muted.
+
 Android snoozes keep their remaining duration when the clock is corrected.
 After a reboot, their saved clock time provides recovery. A one-time alarm
 deferred behind another ring is consumed when it rings or expires, so it does

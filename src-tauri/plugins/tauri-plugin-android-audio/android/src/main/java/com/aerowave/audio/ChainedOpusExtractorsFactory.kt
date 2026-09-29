@@ -1,6 +1,7 @@
 package com.aerowave.audio
 
 import android.net.Uri
+import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.DataReader
@@ -10,6 +11,7 @@ import androidx.media3.common.util.ParsableByteArray
 import androidx.media3.container.OpusUtil
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.Extractor
+import androidx.media3.extractor.ExtractorInput
 import androidx.media3.extractor.ExtractorOutput
 import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.extractor.ForwardingExtractor
@@ -30,6 +32,8 @@ import java.io.EOFException
 internal class ChainedOpusExtractorsFactory(
   delegate: ExtractorsFactory = DefaultExtractorsFactory(),
   private val onStreamMetadata: (OpusStreamMetadata) -> Unit = {},
+  private val onExtractorProbe: ((String, String, String, Long) -> Unit)? = null,
+  private val onAacAlignment: ((String, Int?, Long, String?) -> Unit)? = null,
 ) : ForwardingExtractorsFactory(delegate) {
   override fun createExtractors(): Array<Extractor> = wrap(super.createExtractors(), alignLiveAac = false)
 
@@ -42,12 +46,15 @@ internal class ChainedOpusExtractorsFactory(
   )
 
   private fun wrap(extractors: Array<Extractor>, alignLiveAac: Boolean): Array<Extractor> =
-    extractors.map {
-      when {
-        it is OggExtractor -> ChainedOpusExtractor(it, onStreamMetadata)
-        alignLiveAac && it is AdtsExtractor -> AacStartAlignedExtractor(it)
-        else -> it
+    extractors.mapIndexed { index, extractor ->
+      val wrapped = when {
+        extractor is OggExtractor -> ChainedOpusExtractor(extractor, onStreamMetadata)
+        alignLiveAac && extractor is AdtsExtractor -> AacStartAlignedExtractor(extractor, onAacAlignment)
+        else -> extractor
       }
+      onExtractorProbe?.let { callback ->
+        SniffDiagnosticExtractor(wrapped, "$index:${extractor.javaClass.simpleName}", callback)
+      } ?: wrapped
     }.toTypedArray()
 
   private fun isLiveAacp(uri: Uri, responseHeaders: Map<String, List<String>>): Boolean =
@@ -57,6 +64,30 @@ internal class ChainedOpusExtractorsFactory(
           it.substringBefore(';').trim().equals("audio/aacp", true)
         }
       }
+}
+
+private class SniffDiagnosticExtractor(
+  delegate: Extractor,
+  private val candidate: String,
+  private val onProbe: (String, String, String, Long) -> Unit,
+) : ForwardingExtractor(delegate) {
+  override fun sniff(input: ExtractorInput): Boolean {
+    val startedMs = SystemClock.elapsedRealtime()
+    report("start", "pending", 0)
+    return try {
+      val accepted = super.sniff(input)
+      report("end", accepted.toString(), SystemClock.elapsedRealtime() - startedMs)
+      accepted
+    } catch (error: Exception) {
+      report("error", error.javaClass.simpleName, SystemClock.elapsedRealtime() - startedMs)
+      throw error
+    }
+  }
+
+  private fun report(stage: String, result: String, durationMs: Long) {
+    // Diagnostics must not change Media3's choice or error path.
+    runCatching { onProbe(candidate, stage, result, durationMs) }
+  }
 }
 
 private class ChainedOpusExtractor(

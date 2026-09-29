@@ -3,10 +3,33 @@ package com.aerowave.audio
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import androidx.core.content.ContextCompat
 
 class AlarmReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
+    if (intent.action == AndroidAlarmScheduler.ACTION_PREPARE) {
+      val id = AndroidAlarmScheduler.readAlarmId(intent) ?: return
+      val occurrenceId = AndroidAlarmScheduler.readOccurrenceId(intent) ?: return
+      val expectedAt = AndroidAlarmScheduler.readExpectedAt(intent)
+      val snoozed = AndroidAlarmScheduler.readSnoozed(intent)
+      val candidate = runCatching {
+        AlarmPreparation.candidate(context, id, occurrenceId, expectedAt, snoozed)
+      }.getOrNull() ?: return
+      // The service rechecks after launch; a refused warm-up never alters the AlarmClock.
+      try {
+        ContextCompat.startForegroundService(
+          context,
+          AlarmPlaybackService.prepareIntentFor(
+            context, candidate.alarmId, candidate.occurrenceId, candidate.atMs, candidate.snoozed,
+          ),
+        )
+      } catch (error: RuntimeException) {
+        Log.w("AerowaveAlarmPrepare", "Station preparation could not start", error)
+      }
+      return
+    }
+
     if (intent.action == AndroidAlarmScheduler.ACTION_FIRE) {
       val id = AndroidAlarmScheduler.readAlarmId(intent) ?: return
       val occurrenceId = AndroidAlarmScheduler.readOccurrenceId(intent) ?: return

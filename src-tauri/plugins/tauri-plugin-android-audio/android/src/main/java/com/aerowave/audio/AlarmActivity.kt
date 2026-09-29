@@ -3,6 +3,7 @@ package com.aerowave.audio
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.net.Uri
@@ -11,6 +12,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
@@ -52,17 +54,22 @@ class AlarmActivity : Activity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    debugLifecycle("onCreate", "restored=${savedInstanceState != null}")
+    boundOccurrence = null
+    inputGate.bind(null)
+    actionPending = false
     window.statusBarColor = BACKGROUND
     window.navigationBarColor = BACKGROUND
     window.decorView.systemUiVisibility = 0
     val content = buildContent()
     setContentView(content)
     ViewCompat.requestApplyInsets(content)
-    refreshRing()
+    refreshRing(allowLaunchRecovery = true)
   }
 
   override fun onResume() {
     super.onResume()
+    debugLifecycle("onResume")
     visible = true
     refreshRing()
     handler.removeCallbacks(checkRing)
@@ -70,6 +77,7 @@ class AlarmActivity : Activity() {
   }
 
   override fun onPause() {
+    debugLifecycle("onPause")
     visible = false
     handler.removeCallbacks(checkRing)
     setAlarmWindowFlags(false)
@@ -78,6 +86,7 @@ class AlarmActivity : Activity() {
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
+    debugLifecycle("onNewIntent")
     setIntent(intent)
     boundOccurrence = null
     inputGate.bind(null)
@@ -86,6 +95,7 @@ class AlarmActivity : Activity() {
   }
 
   override fun onDestroy() {
+    debugLifecycle("onDestroy", "finishing=$isFinishing")
     handler.removeCallbacks(checkRing)
     setAlarmWindowFlags(false)
     super.onDestroy()
@@ -111,14 +121,25 @@ class AlarmActivity : Activity() {
     return true
   }
 
-  private fun refreshRing() {
-    val occurrence = intent?.getStringExtra(EXTRA_OCCURRENCE_ID)
+  private fun refreshRing(allowLaunchRecovery: Boolean = false) {
+    var occurrence = intent?.getStringExtra(EXTRA_OCCURRENCE_ID)
     val ring = AlarmStateStore.snapshot(this).ringing
-    if (occurrence == null || ring?.occurrenceId != occurrence || !isCurrentRing(occurrence)) {
+    val liveOccurrence = AlarmPlaybackService.liveOccurrenceId(this)
+    if (allowLaunchRecovery && ring != null && liveOccurrence == ring.occurrenceId &&
+      occurrence != ring.occurrenceId) {
+      // Android can recreate an old alarm task with its saved intent before
+      // delivering the new full-screen intent. Bind to the live claimed ring.
+      debugLifecycle("recoverLaunch", "staleIntent=true")
+      occurrence = ring.occurrenceId
+      setIntent(intentFor(this, occurrence))
+    }
+    if (occurrence == null || ring?.occurrenceId != occurrence || liveOccurrence != occurrence) {
+      debugLifecycle("guardClose", "hasIntent=${occurrence != null} storedMatch=${ring?.occurrenceId == occurrence} liveMatch=${liveOccurrence == occurrence}")
       closeAlarmScreen()
       return
     }
     if (boundOccurrence != occurrence) {
+      debugLifecycle("bindRing")
       boundOccurrence = occurrence
       inputGate.bind(occurrence)
     }
@@ -141,6 +162,12 @@ class AlarmActivity : Activity() {
 
   private fun isCurrentRing(occurrence: String): Boolean =
     AlarmPlaybackService.liveOccurrenceId(this) == occurrence
+
+  private fun debugLifecycle(event: String, detail: String = "") {
+    if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+      Log.d("AerowaveAlarmActivity", "$event $detail")
+    }
+  }
 
   private fun performAction(occurrence: String, snooze: Boolean) {
     val current = AlarmStateStore.snapshot(this).ringing
