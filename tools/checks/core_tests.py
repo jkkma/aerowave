@@ -72,7 +72,7 @@ def main(argv=None):
 
     try:
         result = run_process(
-            [cargo, "test", "-p", "aerowave-core"],
+            [cargo, "test", "--locked", "-p", "aerowave-core"],
             cwd=ROOT / "src-tauri",
             env=env,
             timeout=170,

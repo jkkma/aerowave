@@ -56,7 +56,7 @@ station will not play, starting from `relaycheck` rather than from the code.
 | `src-tauri/src/relay.rs` | The loopback relay ordinary stations play through |
 | `src-tauri/src/hls.rs` | HLS over a Tauri custom protocol — deliberately not the relay |
 | `src-tauri/core/` | Pure logic, no GUI deps — **the only place Rust tests can run** |
-| `tools/checks/` | Version, IPC, core-test and vendor helpers with their Python tests; all run manually. |
+| `tools/checks/` | Version, IPC, core-test and vendor helpers with their Python tests; `npm test` runs the aggregate locally and CI mirrors it. |
 | `.codex/agents/` | Read-only playback and core-testability reviewers; inherit the session model |
 | `.agents/skills/` | Release and station-triage workflows |
 

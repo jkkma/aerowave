@@ -9,6 +9,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use aerowave_core::one_shot::{self, Arm, Completions, Receipts};
+
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -30,8 +32,8 @@ pub struct Station {
 }
 
 /// Where an alarm gets its sound from. When a station will not play, the
-/// backup folder in `Settings` stands in for it - there is no synthesised
-/// fallback tone.
+/// backup folder in `Settings` stands in for it before the native emergency
+/// tone is needed.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum AlarmSource {
@@ -53,6 +55,10 @@ impl Default for AlarmSource {
 #[serde(rename_all = "camelCase")]
 pub struct Alarm {
     pub id: String,
+    /// Backend-owned version of this arm. A consumed one-shot and a stale
+    /// editor cannot share a version and silently re-enable each other.
+    #[serde(default)]
+    pub arming_revision: String,
     #[serde(default)]
     pub label: String,
     pub hour: u32,
@@ -221,17 +227,50 @@ pub fn portable_data_dir() -> Option<PathBuf> {
     None
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageStatus {
+    pub error: Option<String>,
+    pub writes_blocked: bool,
+    pub pending_completions: bool,
+    pub restart_safe: bool,
+}
+
+#[derive(Default)]
+struct StoreHealth {
+    recovery_error: Option<String>,
+    receipts_required: bool,
+    completion_error: Option<String>,
+}
+
 pub struct Store {
     path: PathBuf,
-    /// Set when a config file existed but could not be used. Without it a
-    /// reset is indistinguishable from a first run, and on an alarm clock
-    /// that means every alarm quietly ceases to exist.
-    pub load_error: Option<String>,
-    /// Serializes every data mutation and config write. The shared temp file
-    /// would be corrupted by interleaved writes, and a direct mutation of
-    /// `data` would invalidate a candidate while it is being persisted.
+    health: Mutex<StoreHealth>,
+    completions: Mutex<Completions>,
+    /// Serializes every filesystem mutation. Completion claims are deliberately
+    /// memory-only so disk latency cannot postpone the alarm's sound.
     write_lock: Mutex<()>,
     pub data: Mutex<AppData>,
+}
+
+impl Alarm {
+    fn arm(&self) -> Arm {
+        Arm { alarm_id: self.id.clone(), revision: self.arming_revision.clone() }
+    }
+}
+
+/// Called on alarm-editor saves only. Other settings writes must retain the
+/// current arm, and the frontend is never allowed to invent its own version.
+pub fn prepare_alarm_revisions(current: &[Alarm], proposed: &mut [Alarm]) -> Result<(), String> {
+    for alarm in proposed {
+        if let Some(old) = current.iter().find(|old| old.id == alarm.id) {
+            one_shot::check_revision(&alarm.arming_revision, &old.arming_revision)
+                .map_err(str::to_string)?;
+            if alarm == old { continue; }
+        }
+        alarm.arming_revision = format!("{:032x}", rand::random::<u128>());
+    }
+    Ok(())
 }
 
 impl Store {
@@ -241,63 +280,152 @@ impl Store {
             .unwrap_or_else(|| PathBuf::from("."));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("aerowave.json");
-
-        let (data, load_error) = match fs::read_to_string(&path) {
-            // No file is the normal first run, and says nothing.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (AppData::default(), None),
-
-            // There but unreadable: it may be perfectly good and merely locked
-            // this once, so leave it exactly where it is and say so.
-            Err(e) => (
-                AppData::default(),
-                Some(format!(
-                    "Could not read {} ({e}). Showing defaults - your settings have not been \
-                     overwritten, but they will be as soon as anything is changed.",
-                    path.display()
-                )),
-            ),
-
-            Ok(raw) => match serde_json::from_str::<AppData>(&raw) {
-                Ok(d) => (d, None),
-                // Unparseable. Move it aside now, before the first settings
-                // change writes the defaults straight over it.
-                Err(e) => {
-                    let kept = dir.join(format!(
-                        "aerowave.bad-{}.json",
-                        Local::now().format("%Y%m%d-%H%M%S")
-                    ));
-                    let note = match fs::rename(&path, &kept) {
-                        Ok(()) => format!(
-                            "{} could not be parsed ({e}). It was kept as {} and the app \
-                             started from defaults.",
-                            path.display(),
-                            kept.display()
-                        ),
-                        Err(rename_err) => format!(
-                            "{} could not be parsed ({e}) and could not be set aside \
-                             ({rename_err}). The app started from defaults.",
-                            path.display()
-                        ),
-                    };
-                    (AppData::default(), Some(note))
-                }
-            },
-        };
-
-        if let Some(note) = &load_error {
-            eprintln!("aerowave: {note}");
-        }
-
+        let (data, completions, recovery_error, receipts_required) = Self::read_files(&path, true, true);
+        if let Some(note) = &recovery_error { eprintln!("aerowave: {note}"); }
         Store {
             path,
-            load_error,
+            health: Mutex::new(StoreHealth { recovery_error, receipts_required, completion_error: None }),
+            completions: Mutex::new(completions),
             write_lock: Mutex::new(()),
             data: Mutex::new(data),
         }
     }
 
-    pub fn snapshot(&self) -> AppData {
-        self.data.lock().unwrap().clone()
+    fn receipts_path(path: &std::path::Path) -> PathBuf {
+        path.with_file_name("aerowave.one-shot-receipts.json")
+    }
+
+    fn read_files(path: &std::path::Path, allow_missing: bool, allow_missing_receipts: bool) -> (AppData, Completions, Option<String>, bool) {
+        let (mut data, mut error) = match aerowave_core::persistence::load_json(fs::read(path), allow_missing) {
+            Ok(data) => (data, None),
+            Err(error) => (AppData::default(), Some(format!(
+                "Could not load {} ({error}). Showing defaults; the original file is untouched and settings writes are blocked.", path.display()
+            ))),
+        };
+        let receipt_path = Self::receipts_path(path);
+        let mut receipts_required = !allow_missing_receipts;
+        let completions = match aerowave_core::persistence::load_json::<Receipts>(fs::read(&receipt_path), allow_missing_receipts) {
+            Ok(receipts) => Completions::from_receipts(receipts),
+            Err(receipt_error) => {
+                receipts_required = true;
+                // Unknown receipts must not turn yesterday's consumed one-shot
+                // into today's alarm. Repeating alarms remain available.
+                for alarm in &mut data.alarms {
+                    if alarm.days.is_empty() { alarm.enabled = false; }
+                }
+                let note = format!("Could not load {} ({receipt_error}). One-shot alarms and settings writes are blocked until recovery; the original file is untouched.", receipt_path.display());
+                error = Some(error.map_or_else(|| note.clone(), |old| format!("{old} {note}")));
+                Completions::default()
+            }
+        };
+        (data, completions, error, receipts_required)
+    }
+
+    fn apply_receipts(data: &mut AppData, receipts: &Receipts) {
+        for alarm in &mut data.alarms {
+            if alarm.days.is_empty() && receipts.contains(&alarm.arm()) {
+                alarm.enabled = false;
+                alarm.arming_revision = one_shot::consumed_revision(&alarm.arming_revision);
+            }
+        }
+    }
+
+    fn snapshot_and_receipts(&self) -> (AppData, Receipts) {
+        let mut data = self.data.lock().unwrap().clone();
+        let receipts = self.completions.lock().unwrap().receipts();
+        Self::apply_receipts(&mut data, &receipts);
+        (data, receipts)
+    }
+
+    pub fn snapshot(&self) -> AppData { self.snapshot_and_receipts().0 }
+
+    pub fn load_error(&self) -> Option<String> { self.health.lock().unwrap().recovery_error.clone() }
+
+    pub fn storage_status(&self) -> StorageStatus {
+        let completions = self.completions.lock().unwrap();
+        let pending_completions = completions.has_pending();
+        let restart_safe = !completions.has_volatile();
+        drop(completions);
+        let health = self.health.lock().unwrap();
+        let error = health.recovery_error.clone().or_else(|| health.completion_error.clone());
+        StorageStatus { error, writes_blocked: health.recovery_error.is_some(), pending_completions, restart_safe }
+    }
+
+    fn ensure_writable(&self) -> Result<(), String> {
+        aerowave_core::persistence::require_writable(self.health.lock().unwrap().recovery_error.as_deref())
+    }
+
+    /// A recovery retry must read valid files before it changes any live data.
+    /// The caller serializes this with the clock and verifies no active ring.
+    pub fn retry_load_with<C>(&self, commit: C) -> Result<AppData, String>
+    where C: FnOnce(&mut AppData, AppData),
+    {
+        let _writing = self.write_lock.lock().unwrap();
+        if self.load_error().is_none() { return Ok(self.snapshot()); }
+        let allow_missing_receipts = !self.health.lock().unwrap().receipts_required;
+        let (data, completions, error, receipts_required) = Self::read_files(&self.path, false, allow_missing_receipts);
+        if let Some(error) = error {
+            let mut health = self.health.lock().unwrap();
+            health.recovery_error = Some(error.clone());
+            health.receipts_required = receipts_required;
+            return Err(error);
+        }
+        let mut current = self.data.lock().unwrap();
+        let mut live_completions = self.completions.lock().unwrap();
+        live_completions.merge_durable_receipts(completions.receipts());
+        let pending = live_completions.has_pending();
+        drop(live_completions);
+        commit(&mut current, data);
+        let mut health = self.health.lock().unwrap();
+        health.recovery_error = None;
+        health.receipts_required = false;
+        if !pending { health.completion_error = None; }
+        drop(health);
+        drop(current);
+        Ok(self.snapshot())
+    }
+
+    pub fn scheduled_enabled(&self, alarm: &Alarm) -> bool {
+        alarm.enabled && (!alarm.days.is_empty() || !self.completions.lock().unwrap().contains(&alarm.arm()))
+    }
+
+    pub fn claim_one_shot(&self, alarm: &Alarm) {
+        self.completions.lock().unwrap().claim(alarm.arm());
+        self.health.lock().unwrap().completion_error = Some(
+            "Saving one-shot completion. It will not repeat in this session; keep Aerowave open until the completion is saved.".into());
+    }
+
+    pub fn has_pending_completions(&self) -> bool { self.completions.lock().unwrap().has_pending() }
+
+    fn completed_save(&self, receipts: &Receipts) {
+        let mut completions = self.completions.lock().unwrap();
+        completions.persisted(receipts, false, true);
+        if !completions.has_pending() { self.health.lock().unwrap().completion_error = None; }
+    }
+
+    /// Either successful write prevents a repeat after a normal restart. If
+    /// both fail, the in-memory receipt still protects this session and remains
+    /// queued for retry; storage failure cannot honestly promise more.
+    pub fn retry_completions(&self) -> Result<bool, String> {
+        let _writing = self.write_lock.lock().unwrap();
+        if !self.has_pending_completions() { return Ok(false); }
+        self.ensure_writable()?;
+        let (candidate, receipts) = self.snapshot_and_receipts();
+        let receipt_result = serde_json::to_vec_pretty(&receipts).map_err(|error| error.to_string())
+            .and_then(|bytes| self.write_atomic(&Self::receipts_path(&self.path), &bytes));
+        let settings_result = self.write_snapshot(&candidate);
+        if settings_result.is_ok() { *self.data.lock().unwrap() = candidate; }
+        let mut completions = self.completions.lock().unwrap();
+        completions.persisted(&receipts, receipt_result.is_ok(), settings_result.is_ok());
+        let error = settings_result.err().map(|error| {
+            if completions.has_volatile() {
+                format!("Could not save one-shot completion ({error}; receipt: {}). It will not repeat in this session, but may ring again after restarting. Keep Aerowave open while saving retries.", receipt_result.err().unwrap_or_default())
+            } else {
+                format!("The one-shot completion is saved separately and will not repeat after restart, but the settings update failed ({error}). Saving will retry.")
+            }
+        });
+        self.health.lock().unwrap().completion_error = error.clone();
+        error.map_or(Ok(true), Err)
     }
 
     /// Where the settings file actually ended up, for the UI to show.
@@ -308,13 +436,17 @@ impl Store {
     pub fn save(&self) -> Result<(), String> {
         // One writer at a time, all the way through the rename.
         let _writing = self.write_lock.lock().unwrap();
-        let data = self.snapshot();
-        self.write_snapshot(&data)
+        self.ensure_writable()?;
+        let (data, receipts) = self.snapshot_and_receipts();
+        self.write_snapshot(&data)?;
+        *self.data.lock().unwrap() = data;
+        self.completed_save(&receipts);
+        Ok(())
     }
 
     fn write_snapshot(&self, data: &AppData) -> Result<(), String> {
-        let tmp = self.stage_snapshot(data)?;
-        self.commit_staged(&tmp)
+        let bytes = serde_json::to_vec_pretty(data).map_err(|error| error.to_string())?;
+        self.write_atomic(&self.path, &bytes)
     }
 
     fn stage_snapshot(&self, data: &AppData) -> Result<PathBuf, String> {
@@ -328,7 +460,54 @@ impl Store {
     }
 
     fn commit_staged(&self, tmp: &std::path::Path) -> Result<(), String> {
-        fs::rename(tmp, &self.path).map_err(|e| format!("rename config: {e}"))
+        aerowave_core::persistence::replace_synced(
+            || Ok(()),
+            |_| fs::rename(tmp, &self.path).map_err(|error| format!("rename config: {error}")),
+            || self.sync_directory(),
+        ).map_err(|failure| self.write_failure(&self.path, failure))
+    }
+
+    fn write_failure(&self, path: &std::path::Path, failure: aerowave_core::persistence::ReplaceError<String>) -> String {
+        use aerowave_core::persistence::ReplaceError;
+        match failure {
+            ReplaceError::BeforeRename(error) => error,
+            ReplaceError::AfterRename(error) => {
+                let note = format!("The save to {} may already have applied: rename succeeded, but directory sync failed ({error}).", path.display());
+                if path == self.path {
+                    let note = format!("{note} Further settings writes are blocked. Retry reading saved settings before making another change.");
+                    self.health.lock().unwrap().recovery_error = Some(note.clone());
+                    note
+                } else {
+                    // Receipt uncertainty must not prevent the independent
+                    // settings write from completing this one-shot safely.
+                    note
+                }
+            }
+        }
+    }
+
+    fn sync_directory(&self) -> Result<(), String> {
+        #[cfg(unix)]
+        if let Some(directory) = self.path.parent() {
+            fs::File::open(directory).and_then(|file| file.sync_all())
+                .map_err(|error| format!("sync settings directory: {error}"))?;
+        }
+        Ok(())
+    }
+
+    fn write_atomic(&self, path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+        let tmp = path.with_extension("json.tmp");
+        aerowave_core::persistence::replace_synced(
+            || {
+                let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(&tmp)
+                    .map_err(|error| format!("open {}: {error}", tmp.display()))?;
+                file.write_all(bytes).and_then(|_| file.sync_all())
+                    .map_err(|error| format!("write {}: {error}", tmp.display()))?;
+                Ok::<_, String>(())
+            },
+            |_| fs::rename(&tmp, path).map_err(|error| format!("rename {}: {error}", path.display())),
+            || self.sync_directory(),
+        ).map_err(|failure| self.write_failure(path, failure))
     }
 
     /// A failed Add must not enter memory and hitch a ride on the next save.
@@ -359,7 +538,8 @@ impl Store {
         C: FnOnce(&mut AppData, AppData),
     {
         let _writing = self.write_lock.lock().unwrap();
-        let mut staged = self.snapshot();
+        self.ensure_writable()?;
+        let (mut staged, receipts) = self.snapshot_and_receipts();
         change(&mut staged)?;
         aerowave_core::persistence::update_with(
             &mut staged,
@@ -367,9 +547,15 @@ impl Store {
             |candidate| self.write_snapshot(candidate),
             |_, candidate| {
                 let mut data = self.data.lock().unwrap();
+                // Automatic consumption is not a user's enabled-to-disabled
+                // edit. Publish the effective previous state to callbacks so
+                // an unrelated alarm save cannot cancel a legitimate snooze.
+                Self::apply_receipts(&mut data, &self.completions.lock().unwrap().receipts());
                 commit(&mut data, candidate);
             },
-        )
+        )?;
+        self.completed_save(&receipts);
+        Ok(())
     }
 
     /// Restore under the writer lock. Keep the previous full state beside the
@@ -388,6 +574,10 @@ impl Store {
         C: FnOnce(&mut AppData, AppData),
     {
         let _writing = self.write_lock.lock().unwrap();
+        let was_blocked = self.load_error().is_some();
+        // A restore is an explicit recovery action, but may not destroy the
+        // unreadable/invalid originals that normal saves are protecting.
+        if was_blocked { self.preserve_blocked_originals()?; }
         let current = self.snapshot();
         let mut recovery = current.clone();
         if let Some(alarms) = recovery_alarms { recovery.alarms = alarms; }
@@ -402,6 +592,11 @@ impl Store {
             recovery_path.display()
         ))?;
 
+        for alarm in &mut imported.alarms {
+            alarm.enabled = false;
+            alarm.skip_date = None;
+            alarm.arming_revision = format!("{:032x}", rand::random::<u128>());
+        }
         imported.settings.start_with_windows = current.settings.start_with_windows;
         imported.settings.wake_for_alarms = current.settings.wake_for_alarms;
         imported.settings.sleep_timer_action = current.settings.sleep_timer_action;
@@ -416,7 +611,54 @@ impl Store {
         ))?;
         let mut data = self.data.lock().unwrap();
         commit(&mut data, imported);
-        Ok((data.clone(), recovery_path))
+        let result = data.clone();
+        drop(data);
+        // Imported alarms have fresh revisions and are disabled. If repairing
+        // a broken receipt file now fails, those alarms still cannot ring.
+        if was_blocked {
+            if let Err(error) = self.write_atomic(&Self::receipts_path(&self.path), b"[]") {
+                let error = format!("The backup settings were restored with alarms off, but the completion receipt file could not be repaired ({error}). Original files were preserved. Retry the restore.");
+                let mut health = self.health.lock().unwrap();
+                health.recovery_error = Some(error.clone());
+                health.receipts_required = true;
+                return Err(error);
+            }
+        }
+        *self.completions.lock().unwrap() = Completions::default();
+        *self.health.lock().unwrap() = StoreHealth::default();
+        Ok((result, recovery_path))
+    }
+
+    fn preserve_blocked_originals(&self) -> Result<(), String> {
+        for original in [self.path.clone(), Self::receipts_path(&self.path)] {
+            match fs::symlink_metadata(&original) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("Cannot preserve {}: {error}. Restore stopped.", original.display())),
+                Ok(_) => {}
+            }
+            aerowave_core::persistence::preserve_original(
+                || fs::read(&original).map_err(|error| format!("Cannot read and preserve {}: {error}. Restore stopped.", original.display())),
+                |bytes| {
+                    let name = original.file_stem().unwrap_or_default().to_string_lossy();
+                    let stamp = Local::now().format("%Y%m%d-%H%M%S");
+                    for suffix in 0..100 {
+                        let kept = original.with_file_name(format!("{name}.before-recovery-{stamp}-{suffix}.json"));
+                        match OpenOptions::new().write(true).create_new(true).open(&kept) {
+                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                            Err(error) => return Err(format!("Cannot preserve {}: {error}. Restore stopped.", kept.display())),
+                            Ok(mut file) => {
+                                file.write_all(bytes).and_then(|_| file.sync_all())
+                                    .map_err(|error| format!("Cannot sync original copy {}: {error}. Restore stopped.", kept.display()))?;
+                                self.sync_directory()?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err("Cannot choose a unique original recovery filename. Restore stopped.".into())
+                },
+            )?;
+        }
+        Ok(())
     }
 
     fn write_recovery(&self, content: &str) -> Result<PathBuf, String> {

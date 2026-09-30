@@ -201,6 +201,7 @@ function createHarness(options = {}) {
     setTimeout: (fn, ms) => setTimer(fn, ms, false), clearTimeout: (id) => timers.delete(id),
     setInterval: (fn, ms) => setTimer(fn, ms, true), clearInterval: (id) => timers.delete(id),
   });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../../src/alarm-readiness.js"), "utf8"), context, { filename: "alarm-readiness.js" });
   const source = fs.readFileSync(path.join(__dirname, "../../src/app.js"), "utf8");
   const bootAt = source.lastIndexOf("\nboot().catch(");
   if (bootAt < 0) throw new Error("Could not locate application boot entry point");

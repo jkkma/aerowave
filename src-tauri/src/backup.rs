@@ -222,5 +222,6 @@ pub fn restore_backup(app: AppHandle, state: State<AppState>, content: String) -
     scheduler::refresh(&app);
     let _ = app.emit("alarms-updated", ());
     let _ = app.emit("settings-updated", ());
+    let _ = app.emit("storage-status-updated", state.store.storage_status());
     Ok(restored)
 }
