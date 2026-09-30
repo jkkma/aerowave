@@ -2112,3 +2112,15 @@ body.android:has(.pane.on.editing) { grid-template-rows: minmax(0, 1fr); }
   .android:has(.editor :is(input, textarea, select):focus) .station-editor-body,
   .android:has(.editor :is(input, textarea, select):focus) .alarm-editor-body { padding-top: 8px; }
 }
+
+/* Readiness results are descriptive snapshots, never an all-clear badge. */
+.readiness-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.readiness-actions .lbl { flex: 1; min-width: 170px; }
+.readiness-actions .field { width: 100%; min-width: 0; }
+.readiness-list { list-style: none; padding: 0; margin: 10px 0 0; }
+.readiness-row { padding: 8px 0; border-top: 1px solid rgba(160, 225, 240, .16); overflow-wrap: anywhere; }
+.readiness-row strong { color: var(--foam); font-size: 12px; }
+.readiness-row p { margin: 4px 0 0; color: #bddce6; font-size: 12px; line-height: 1.5; }
+.readiness-row.attention strong { color: var(--amber-hi); }
+.alarm-paneheader { flex-wrap: wrap; }
+.alarm-paneheader h2 { margin-right: auto; }

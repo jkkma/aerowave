@@ -328,6 +328,24 @@ pub struct RingingAlarm {
     pub note: Option<String>,
 }
 
+/// Available output devices are an inventory, not an active-player route.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AlarmAudioReadiness {
+    pub media_volume: Option<i32>,
+    pub media_volume_max: Option<i32>,
+    pub media_muted: Option<bool>,
+    pub outputs: Option<Vec<AlarmAudioOutput>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AlarmAudioOutput {
+    pub name: Option<String>,
+    pub kind: Option<String>,
+    pub bluetooth: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlarmState {
@@ -339,5 +357,7 @@ pub struct AlarmState {
     pub next: Option<NextAlarm>,
     pub ringing: Option<RingingAlarm>,
     pub permissions: AlarmPermissions,
+    #[serde(default)]
+    pub audio: Option<AlarmAudioReadiness>,
     pub error: Option<String>,
 }

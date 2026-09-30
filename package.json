@@ -1,13 +1,17 @@
 {
   "name": "aerowave",
-  "version": "0.15.3",
+  "version": "0.16.0",
   "description": "Internet radio player and alarm clock with a Frutiger Aero face",
   "license": "MIT",
   "private": true,
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "npm run test:frontend && npm run check:repository && npm run test:core",
+    "test:frontend": "node --test \"tools/tests/*.test.cjs\"",
+    "test:core": "python -B tools/checks/core_tests.py",
+    "check:repository": "python -B tools/checks/check_repository.py"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4"

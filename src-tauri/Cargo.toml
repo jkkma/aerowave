@@ -3,7 +3,7 @@ members = ["core"]
 
 [package]
 name = "aerowave"
-version = "0.15.3"
+version = "0.16.0"
 description = "Internet radio player and alarm clock"
 authors = ["jkkma"]
 edition = "2021"
@@ -54,6 +54,8 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+# Synthesized emergency alarms need only native output, never a media decoder.
+rodio = { version = "=0.20.1", default-features = false }
 
 [target.'cfg(target_os = "android")'.dependencies]
 tauri-plugin-android-audio = { path = "plugins/tauri-plugin-android-audio" }

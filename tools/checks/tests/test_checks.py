@@ -3,11 +3,14 @@
 import contextlib
 import io
 import pathlib
+import struct
 import subprocess
 import sys
 import time
 import unittest
-from unittest.mock import patch
+import warnings
+import zipfile
+from unittest.mock import Mock, patch
 
 CHECKS = pathlib.Path(__file__).resolve().parents[1]
 ROOT = CHECKS.parents[1]
@@ -15,8 +18,10 @@ sys.path.insert(0, str(CHECKS))
 
 import check_seam
 import check_version
+import check_repository
 import core_tests
 import guard_vendor
+import release_windows
 from paths import resolve_paths
 from process_tree import run_process
 
@@ -72,7 +77,7 @@ class CoreTests(unittest.TestCase):
             ])
             self.assertEqual((code, output, errors), (0, "tests passed\n", ""))
             run.assert_called_once()
-            self.assertEqual(run.call_args.args[0], ["cargo", "test", "-p", "aerowave-core"])
+            self.assertEqual(run.call_args.args[0], ["cargo", "test", "--locked", "-p", "aerowave-core"])
 
     def test_manifest_and_moved_away_file_trigger_tests(self):
         for name in ("Cargo.toml", "src/removed.rs"):
@@ -183,6 +188,172 @@ class CommandIntegrationTests(unittest.TestCase):
                                         cwd=ROOT / "docs", stdin=subprocess.DEVNULL,
                                         text=True, capture_output=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class RepositoryChecksTests(unittest.TestCase):
+    def test_collects_committed_staged_unstaged_and_untracked_paths(self):
+        outputs = [b"a" * 40 + b"\n", b"src/app.js\0src/vendor/old.js\0",
+                   b"src/vendor/new name.js\0src/moved.js\0", b"docs/new\nfile.md\0"]
+        with patch.object(check_repository, "git_output", side_effect=outputs) as git:
+            paths = check_repository.changed_paths("origin/main")
+        self.assertEqual(paths, {ROOT / name for name in [
+            "src/app.js", "src/vendor/old.js", "src/vendor/new name.js",
+            "src/moved.js", "docs/new\nfile.md",
+        ]})
+        self.assertEqual(git.call_args_list[0].args,
+                         ("rev-parse", "--verify", "--end-of-options", "origin/main^{commit}"))
+        for call in git.call_args_list[1:3]:
+            self.assertIn("--no-renames", call.args)
+            self.assertIn("-z", call.args)
+        self.assertIn("--cached", git.call_args_list[1].args)
+        self.assertNotIn("--cached", git.call_args_list[2].args)
+
+    def test_invalid_comparison_fails_closed(self):
+        with patch.object(check_repository, "changed_paths",
+                          side_effect=subprocess.CalledProcessError(128, ["git"])):
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                self.assertEqual(check_repository.check_vendor_changes("missing"), 2)
+            self.assertIn("Cannot inspect", errors.getvalue())
+
+    def test_vendor_guard_uses_changed_paths_not_a_fixed_allowlisted_file(self):
+        for name in ("src/vendor/new.js", "src/vendor/removed.js"):
+            with self.subTest(name=name), patch.object(
+                    check_repository, "changed_paths", return_value={ROOT / name}):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(check_repository.check_vendor_changes("HEAD"), 2)
+
+    def test_clean_or_non_vendor_changes_pass(self):
+        for paths in (set(), {ROOT / "src/app.js"}, {ROOT / "src/vendor-extra/new.js"}):
+            with self.subTest(paths=paths), patch.object(
+                    check_repository, "changed_paths", return_value=paths):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(check_repository.check_vendor_changes("HEAD"), 0)
+
+    def test_aggregate_continues_after_failure_and_reports_it(self):
+        with patch.object(check_repository.subprocess, "run", side_effect=[
+            subprocess.CompletedProcess([], 2), subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0),
+        ]) as run, patch.object(check_repository, "check_vendor_changes", return_value=0):
+            code, _, errors = invoke_main(check_repository, [])
+        self.assertEqual(code, 2)
+        self.assertEqual(run.call_count, 3)
+        self.assertIn("Strict versions", errors)
+
+    def test_aggregate_carries_explicit_base_to_vendor_guard(self):
+        with patch.object(check_repository.subprocess, "run",
+                          return_value=subprocess.CompletedProcess([], 0)), \
+                patch.object(check_repository, "check_vendor_changes", return_value=0) as guard:
+            self.assertEqual(invoke_main(check_repository, ["--base", "origin/main"])[0], 0)
+        guard.assert_called_once_with("origin/main")
+
+
+class WindowsReleaseTests(unittest.TestCase):
+    @staticmethod
+    def pe(*, dll=False, machine=0x8664):
+        data = bytearray(128)
+        data[:2] = b"MZ"
+        struct.pack_into("<I", data, 60, 64)
+        data[64:68] = b"PE\0\0"
+        struct.pack_into("<H", data, 68, machine)
+        struct.pack_into("<H", data, 86, 0x2000 if dll else 0x0002)
+        return bytes(data)
+
+    def contents(self):
+        return {
+            "Aerowave/aerowave.exe": self.pe(),
+            "Aerowave/WebView2Loader.dll": self.pe(dll=True),
+            "Aerowave/README.md": b"README", "Aerowave/LICENSE": b"MIT licence",
+            "Aerowave/data/README.txt": b"Portable settings directory",
+        }
+
+    @staticmethod
+    def archive(contents):
+        output = io.BytesIO()
+        with warnings.catch_warnings(), zipfile.ZipFile(output, "w") as archive:
+            warnings.simplefilter("ignore", UserWarning)
+            for name, value in contents:
+                archive.writestr(name, value)
+        output.seek(0)
+        return output
+
+    def test_portable_zip_validates_all_required_bytes_and_hashes(self):
+        contents = self.contents()
+        hashes = release_windows.validate_archive(self.archive(contents.items()), contents)
+        self.assertEqual(set(hashes), release_windows.MEMBERS)
+        self.assertEqual(hashes["Aerowave/LICENSE"], release_windows.sha256(b"MIT licence"))
+
+    def test_missing_empty_duplicate_and_unexpected_members_are_rejected(self):
+        contents = self.contents()
+        variants = [list(contents.items())[1:], [*contents.items(), ("../outside", b"x")],
+                    [*contents.items(), ("Aerowave/LICENSE", b"again")],
+                    [(name, b"" if name.endswith("README.txt") else data) for name, data in contents.items()]]
+        for members in variants:
+            with self.subTest(members=[name for name, _ in members]), self.assertRaises(ValueError):
+                release_windows.validate_archive(self.archive(members), contents)
+
+    def test_packaged_file_must_match_the_current_build(self):
+        contents = self.contents()
+        changed = {**contents, "Aerowave/LICENSE": b"different licence"}
+        with self.assertRaisesRegex(ValueError, "differs"):
+            release_windows.validate_archive(self.archive(changed.items()), contents)
+
+    def test_non_pe_wrong_architecture_and_wrong_binary_role_are_rejected(self):
+        for data, dll in [(b"not a binary", False), (self.pe(machine=0x14C), False),
+                          (self.pe(dll=True), False), (self.pe(), True)]:
+            with self.subTest(dll=dll), self.assertRaises(ValueError):
+                release_windows.validate_pe(data, dll=dll)
+
+    def test_fixed_file_and_product_versions_are_read_independently(self):
+        fields = [0xFEEF04BD, 0x10000, 16, 0, 17, 0, 0, 0, 0, 0, 0, 0, 0]
+        self.assertEqual(release_windows.fixed_versions(struct.pack("<13I", *fields)),
+                         [(0, 16, 0, 0), (0, 17, 0, 0)])
+        with self.assertRaisesRegex(ValueError, "version resource"):
+            release_windows.fixed_versions(bytes(52))
+
+    def test_packaging_refuses_existing_files_and_dangling_symlinks(self):
+        for exists, symlink in [(True, False), (False, True)]:
+            path = Mock()
+            path.exists.return_value = exists
+            path.is_symlink.return_value = symlink
+            with self.assertRaisesRegex(ValueError, "Refusing to replace"):
+                release_windows.assert_fresh([path])
+
+    def test_publication_requires_this_repository_main_push_context(self):
+        with patch.dict("os.environ", {}, clear=True), patch.object(release_windows, "run") as run:
+            with self.assertRaisesRegex(ValueError, "restricted"):
+                release_windows.release_context()
+            run.assert_not_called()
+
+    def test_existing_tag_blocks_before_any_release_creation(self):
+        with patch.object(release_windows, "github", return_value=[
+                {"ref": "refs/tags/" + release_windows.TAG}]) as github:
+            with self.assertRaisesRegex(ValueError, "Tag .* already exists"):
+                release_windows.require_unused_tag_and_release()
+            github.assert_called_once()
+
+    def test_existing_release_in_later_page_blocks_publication(self):
+        with patch.object(release_windows, "github", side_effect=[[], [[], [{"tag_name": release_windows.TAG}]]]):
+            with self.assertRaisesRegex(ValueError, "Release .* already exists"):
+                release_windows.require_unused_tag_and_release()
+
+    def test_similar_tag_names_do_not_conflict(self):
+        with patch.object(release_windows, "github", side_effect=[
+                [{"ref": "refs/tags/" + release_windows.TAG + "-older"}], [[]]]):
+            release_windows.require_unused_tag_and_release()
+
+    def test_release_requires_complete_exact_asset_and_prerelease_flags(self):
+        receipt = {"size": 123, "sha256": "a" * 64}
+        asset = {"name": release_windows.ASSET, "size": 123, "state": "uploaded",
+                 "digest": "sha256:" + "a" * 64}
+        release = {"tag_name": release_windows.TAG, "draft": True, "prerelease": True, "assets": [asset]}
+        release_windows.validate_release_record(release, receipt, draft=True)
+        for change in [{"assets": []}, {"assets": [asset, asset]}, {"draft": False},
+                       {"prerelease": False}, {"tag_name": "v0.16.1"},
+                       {"assets": [{**asset, "state": "starter"}]},
+                       {"assets": [{**asset, "digest": "sha256:" + "b" * 64}]}]:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                release_windows.validate_release_record({**release, **change}, receipt, draft=True)
 
 
 if __name__ == "__main__":

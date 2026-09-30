@@ -459,12 +459,10 @@ test("settings storage expands when configuration loading failed", async () => {
   const h = createHarness({ invoke: command => command === "config_location"
     ? { portable: true, path: "data/aerowave.json", loadError: "Could not read settings" }
     : undefined });
-  const problems = [];
-  h.el("#config-where").after = problem => problems.push(problem);
   await h.evaluate("showConfigLocation()");
   assert.equal(h.el("#config-details").open, true);
-  assert.equal(problems[0].textContent, "Could not read settings");
-  assert.equal(problems[0].className, "wherefrom warn");
+  assert.equal(h.el("#storage-status").textContent, "Could not read settings");
+  assert.equal(h.el("#storage-status").hidden, false);
 });
 
 test("choosing backup music clears or restores the empty-folder warning", () => {

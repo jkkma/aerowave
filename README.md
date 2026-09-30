@@ -333,6 +333,16 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 
 - The bottom bar shows the next alarm's countdown and scheduled local time.
   Use Test in the alarm editor to hear an alarm through the normal playback path.
+- **Alarm readiness** in Settings (also reachable from Alarms) runs an on-demand,
+  read-only check of the next scheduled alarm, a chosen alarm's saved source,
+  backup-folder access, settings recovery and platform wake limits. Folder checks
+  are bounded and do not consume shuffle history or play audio; station links
+  are inspected locally without a network probe. Android also reports its current
+  media-volume index and available audio outputs, including Bluetooth. Available
+  devices do not establish the exact route used at alarm time. Permission access,
+  a readable file and a foreground sound test never count as verified screen-off
+  audible wake: schedule a near-term alarm and listen on the device under its
+  usual overnight conditions.
 - Any number of them, each with its own time, repeat days, source, volume,
   fade-in, snooze length, give-up timeout and auto-snooze.
 - **Delete** on each alarm card removes it directly from the list. A failed
@@ -385,14 +395,24 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   make them ring early, extend them or discard them. Displayed times and wake
   requests follow the remaining duration.
 - No repeat days set means "once, at the next occurrence", and the alarm disables
-  itself afterwards.
+  itself afterwards. Desktop completion is protected immediately in the running
+  scheduler and saved through both the settings file and a separate receipt.
+  Failed saves retry without blocking the clock. Settings reports whether the
+  completion is safe across restart; if neither write succeeds, keep Aerowave
+  open until it saves. Editing or re-enabling an alarm creates a fresh arm, and
+  a stale editor cannot silently re-enable one that already rang.
 - Fade-in ramps the volume over up to 90 s.
 - **Everything falls back to the backup folder.** Set one in Settings and it stands in
   whenever an alarm's own source will not make a sound: a station that 404s, a
   stream whose playback clock has not advanced within twelve seconds, a station
   you deleted, a folder that has moved, a file that will not decode. If even the backup folder
-  is unusable the alarm still fires — the window comes up in red and says why.
-  There is no synthesised fallback tone.
+  is unusable, desktop alarms switch to a built-in offline emergency tone.
+  The tone is synthesized on a native audio thread, separate from the WebView,
+  network and media decoders. It keeps the alarm's volume, fades for automatic
+  completion, and stops on an accepted Dismiss or Snooze. A delayed device-open
+  result cannot restart a dismissed or replaced occurrence. If no audio output
+  can be opened, the red alarm card explains that sound is unavailable. A muted
+  or disconnected output can still prevent audibility; test on the actual device.
   Folder searches run outside the alarm clock, so a slow drive or disconnected
   share cannot stop the scheduler. The preferred folder and backup are searched
   concurrently: a ready backup can take over after two seconds, and source
@@ -402,8 +422,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   blocked threads.
   Each occurrence keeps the alarm settings it claimed. Edits apply to future
   occurrences; disabling or deleting an alarm still cancels an unresolved source.
-- The same rule applies to ordinary listening: when a station gives up after its
-  four reconnects, the backup folder takes over.
+- Ordinary listening still uses the backup folder when a station gives up
+  after four reconnects. The emergency tone is reserved for a ringing alarm.
 - Missed alarms are caught up: if the machine was asleep through the alarm minute,
   it rings on wake as long as it is no more than 15 minutes late. Short sleeps
   that skip the whole alarm minute are caught up too.
@@ -597,8 +617,9 @@ tools/drive.ps1      clicks and types at the running window, for end-to-end test
 **The clock lives in Rust, deliberately.** WebView2 throttles timers in hidden and
 occluded windows, so an alarm scheduled with `setInterval` would only be reliable
 while you were already looking at it. The Rust thread ticks once a second and
-emits `alarm-fire`; the webview is told when to ring and what to play, and only
-does the playing. Snooze goes back through Rust for the same reason.
+emits `alarm-fire`; the webview plays the selected media while a separate native
+audio thread owns the offline emergency tone. Snooze goes back through Rust for
+the same reason.
 
 Config lives in `data/aerowave.json` beside the executable when that folder exists.
 Otherwise it uses `%APPDATA%\com.aerowave.radio\aerowave.json` on Windows and
@@ -610,6 +631,12 @@ at, and prints its SHA-256.
 
 ## Notes and limits
 
+- If settings or one-shot completion receipts cannot be read or parsed, Aerowave
+  leaves the originals untouched and blocks ordinary writes. Playing a station
+  cannot replace the unreadable setup with temporary defaults. Settings storage
+  shows the problem and offers a read retry on desktop after the file is repaired
+  or unlocked. Restoring a backup first preserves the original bytes; failure to
+  preserve them stops the restore. Imported alarms still start off.
 - **Backup & restore** in Settings exports a versioned JSON file containing
   stations, alarms, preferences, and recent stations. Restore validates the
   file and previews its counts before replacing the setup. Imported alarms

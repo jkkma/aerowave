@@ -58,9 +58,25 @@ if (IS_ANDROID) {
 
 let state = { stations: [], alarms: [], settings: {} };
 let configLoadError = null;
+let storageStatus = null;
 let visibleStations = [];      // current filtered order, for prev/next
 const BACKUP = "\u0000backup";  // marks a track that came from the backup folder
 const shuffleFolder = () => state.settings.shuffleFolder || null;
+
+const alarmReadiness = window.AlarmReadiness.create({
+  getContext: () => ({
+    android: IS_ANDROID, alarms: state.alarms, stations: state.stations, settings: state.settings,
+    configError: configLoadError, saving: !!(settingsDirty || pendingSettingsSave || alarmSavePending || androidAlarmPending || setupRestorePending),
+  }),
+  readNext: () => invoke("next_alarm"),
+  readPower: () => invoke("power_status"),
+  readAndroid: () => androidCommand("get_alarm_state"),
+  readConfig: () => invoke("config_location"),
+  readStorage: () => invoke("get_storage_status"),
+  readFolder: path => folderCommand("folder_info", { path }),
+  localTime: atMs => invoke("local_time", { atMs }),
+  formatWhen: when => alarmDateLabel(when) + " at " + fmtClock(when, false),
+});
 
 // ---------------------------------------------------------------- clock ---
 
@@ -3303,19 +3319,42 @@ async function playBackupTrack(reason, opts = {}) {
   }
 }
 
-/** Nothing at all can be played: keep the alarm on screen and say why. */
-function goSilent(why) {
+/** Both media paths failed. The last resort bypasses the WebView decoder. */
+async function goSilent(why) {
+  const ring = ringing;
+  if (!ring || IS_ANDROID || ring.emergencyTone === "starting" || ring.emergencyTone === "playing") return;
   clearInterval(ringWatchdog);
   ringWatchdog = null;
   stopPlayback(true);
   markPlaying(false);
+  ring.emergencyTone = "starting";
   $("#ringcard").classList.add("silent");
-  $("#ring-trigger").textContent = "Alarm · no sound";
-  $("#ring-source").textContent = "No audio available";
-  const advice = state.settings.backupFolder
-    ? "Check the backup folder in SETUP."
-    : "Set a backup folder in SETUP so this alarm can always ring.";
-  $("#ring-note").textContent = (why ? why + ". " : "") + advice;
+  $("#ring-trigger").textContent = "Alarm · emergency tone";
+  $("#ring-source").textContent = "Starting built-in alarm tone…";
+  $("#ring-note").textContent = why || "The alarm source and backup are unavailable.";
+  try {
+    await invoke("start_emergency_tone", {
+      alarmId: ring.alarmId, occurrenceId: String(ring.occurrenceId ?? ""),
+    });
+    // Native occurrence checks also reject a request queued before Dismiss,
+    // Snooze, or replacement. A late reply must not rewrite the new card.
+    if (ringing !== ring) return;
+    ring.emergencyTone = "playing";
+    $("#ring-source").textContent = "Built-in emergency tone";
+    $("#ring-note").textContent = (why ? why + ". " : "") +
+      "Using the offline alarm tone. Check your audio output and volume.";
+  } catch (error) {
+    if (ringing !== ring) return;
+    ring.emergencyTone = "failed";
+    $("#ring-trigger").textContent = "Alarm · no sound";
+    $("#ring-source").textContent = "Emergency audio unavailable";
+    $("#ring-note").textContent = (why ? why + ". " : "") +
+      "Could not start the built-in tone: " + error + ". Check your audio output.";
+  }
+}
+
+function emergencyToneArgs(ring) {
+  return { alarmId: ring.alarmId, occurrenceId: String(ring.occurrenceId ?? "") };
 }
 
 /**
@@ -3487,11 +3526,17 @@ function giveUp(fadeMs = GIVE_UP_FADE_SECS * 1000) {
   ringWatchdog = null;
   // Nothing is making a sound - the silent card, or a source that never
   // started - so there is nothing to let go of.
-  if (!player.playing || fadeMs <= 0) {
+  if ((!player.playing && !["starting", "playing"].includes(ringing.emergencyTone)) || fadeMs <= 0) {
     endGiveUp();
     return;
   }
-  fadeOut(fadeMs / 1000);
+  if (["starting", "playing"].includes(ringing.emergencyTone)) {
+    const ring = ringing;
+    invoke("fade_emergency_tone", { ...emergencyToneArgs(ring), milliseconds: Math.ceil(fadeMs) })
+      .catch((error) => {
+        if (ringing === ring) say("Could not fade the emergency tone: " + error, "bad");
+      });
+  } else fadeOut(fadeMs / 1000);
   // The ending is its own timer rather than the fade's callback. Touching the
   // volume knob cancels a fade, and a ring that then never ended would be a
   // good deal worse than one that ends at the volume you just chose.
@@ -3593,7 +3638,12 @@ function recoverFailedRingAction(ring) {
   // The request can fail after the fade has reached zero. Keep the alarm
   // sounding while Rust is unavailable, and let the watchdog rescue a source
   // that stopped producing audio during the quiet request.
-  if (player.playing && player.source) {
+  if (["starting", "playing"].includes(ring.emergencyTone)) {
+    invoke("set_emergency_tone_volume", { ...emergencyToneArgs(ring), volume: ring.volume })
+      .catch((error) => {
+        if (ringing === ring) say("Could not restore the emergency tone volume: " + error, "bad");
+      });
+  } else if (player.playing && player.source) {
     audio.volume = ring.volume;
     player.lastProgress = Date.now();
     armRingWatchdog(
@@ -3617,7 +3667,7 @@ async function invokeRingAction(ring, intent, automatic) {
   if (intent === "snooze") {
     await invoke("snooze_alarm", { ...args, minutes: ring.snoozeMins });
   } else if (ring.alarmId) {
-    if (ring.trigger === "test") await invoke("dismiss_test_alarm", { alarmId: ring.alarmId });
+    if (ring.trigger === "test") await invoke("dismiss_test_alarm", { alarmId: ring.alarmId, occurrenceId: String(ring.occurrenceId ?? "") });
     else await invoke("dismiss_alarm", args);
   }
 }
@@ -3959,6 +4009,7 @@ function refreshStationIndicators() {
 }
 
 function renderStations() {
+  alarmReadiness.invalidate();
   clearStationDrag();
   renderAndroidQuickAccess();
   const q = $("#station-filter").value.trim().toLowerCase();
@@ -4234,6 +4285,7 @@ async function changeAlarmSkip(id, skip, expectedAtMs) {
 }
 
 function renderAlarms() {
+  alarmReadiness.invalidate();
   const list = $("#alarm-list");
   const scrollTop = list.scrollTop;
   const focused = document.activeElement;
@@ -4422,8 +4474,8 @@ function showFolderCounts(info, selector) {
 
 /** Fill in the folder rows from what is stored, with a fresh file count. */
 async function refreshFolderLabels() {
-  // An unset shuffle folder costs nothing. An unset backup folder means every
-  // fallback in the app ends in silence, so the two must not look alike.
+  // An unset backup folder skips the music fallback. Desktop alarms still
+  // have their native emergency tone, but ordinary listening does not.
   const rows = [
     { path: state.settings.shuffleFolder, selector: "#folder-path", critical: false },
     { path: state.settings.backupFolder, selector: "#backup-path", critical: true },
@@ -4452,6 +4504,7 @@ async function refreshFolderLabels() {
 }
 
 function renderSettings() {
+  alarmReadiness.invalidate();
   $$(".settings .row").forEach((row) => {
     const key = row.dataset.setting;
     const sw = row.querySelector(".sw");
@@ -4614,11 +4667,16 @@ let pendingSettingsSave = null;
 let settingsSaveFailures = 0;
 function saveSettings(explicitAutostart = null) {
   if (setupRestorePending) return;
+  if (configLoadError) {
+    say("Settings are protected while recovery is needed. See Settings storage.", "bad", true);
+    return;
+  }
   if (explicitAutostart !== null) {
     settingsAutostartIntent = explicitAutostart;
     state.settings.startWithWindows = explicitAutostart;
   }
   settingsDirty = true;
+  alarmReadiness.invalidate();
   settingsRevision++;
   clearTimeout(settingsSaveTimer);
   settingsSaveTimer = setTimeout(() => {
@@ -4683,6 +4741,9 @@ async function loadState(expectedSettingsRevision = null) {
   const alarmRequest = ++alarmStateRequest;
   const stationRevision = stationStateRevision;
   const loaded = await invoke("get_state");
+  if (!loaded || !Array.isArray(loaded.stations) || !Array.isArray(loaded.alarms) || !loaded.settings) {
+    throw new Error("The saved settings response was incomplete");
+  }
   if (setupRestorePending || setupRequest !== setupRestoreEpoch) return;
   if (expectedSettingsRevision !== null && expectedSettingsRevision !== settingsRevision) return;
   if (alarmRequest !== alarmStateRequest) loaded.alarms = state.alarms;
@@ -4714,11 +4775,17 @@ function setBackupBusy(busy) {
   $("#backup-preview").setAttribute("aria-busy", String(busy));
 }
 
-async function settleSetupWrites() {
+async function settleSetupWrites({ recovery = false } = {}) {
   const stationFailures = stationSaveFailures;
-  if (!(await flushSettings())) throw new Error("Save your current settings successfully before continuing.");
+  if (recovery) {
+    clearTimeout(settingsSaveTimer);
+    settingsSaveTimer = null;
+    settingsDirty = false;
+    settingsAutostartIntent = null;
+    await settingsSaveTail;
+  } else if (!(await flushSettings())) throw new Error("Save your current settings successfully before continuing.");
   await stationSaveTail;
-  if (stationEditorSaveFailed || stationFailures !== stationSaveFailures)
+  if (!recovery && (stationEditorSaveFailed || stationFailures !== stationSaveFailures))
     throw new Error("Your station change could not be saved. Retry it or cancel the draft before continuing.");
   if (IS_ANDROID) await androidAlarmQueue;
   if (alarmSavePending || alarmEditorSaving || alarmSkipPending || alarmDeletePending)
@@ -4782,14 +4849,17 @@ async function restoreSetup() {
   setBackupBusy(true);
   $("#backup-restore").textContent = "Restoring…";
   $("#backup-error").textContent = "";
+  let restoreFailed = false;
   try {
-    await settleSetupWrites();
+    await settleSetupWrites({ recovery: !!configLoadError });
     if (ringing || $("#power-countdown").open) throw new Error("Finish the active alarm or power countdown before restoring.");
     const restored = await invoke("restore_backup", { content: backupRestoreContent });
     stopPlayback(false);
     ++settingsRevision;
     ++alarmStateRequest;
     state = restored;
+    await showConfigLocation();
+    await refreshStorageStatus();
     if (IS_ANDROID) await refreshAndroidAlarms();
     renderStations();
     refreshBrowseIndicators();
@@ -4803,6 +4873,7 @@ async function restoreSetup() {
     say("Backup restored; imported alarms are off.", "good");
     $("#backup-import").focus();
   } catch (error) {
+    restoreFailed = true;
     $("#backup-error").textContent = String(error);
     backupMessage("Restore needs attention: " + String(error), true);
   } finally {
@@ -4810,6 +4881,14 @@ async function restoreSetup() {
     setupRestorePending = false;
     setBackupBusy(false);
     $("#backup-restore").textContent = "Restore backup";
+    await showConfigLocation();
+    await refreshStorageStatus();
+    if (restoreFailed) {
+      // A cross-store restore may have committed imported, disabled alarms
+      // before a later receipt repair failed. Display the actual live state.
+      try { await loadState(); }
+      catch (error) { say("Could not refresh settings after restore: " + error, "bad", true); }
+    }
   }
 }
 
@@ -4948,6 +5027,7 @@ async function saveStationEditorChange(change, message) {
 // ---------------------------------------------------------- alarm editor ---
 
 let editingAlarm = null;
+let alarmDraftRevision = null;
 let alarmDraftId = null;
 let alarmDraftEnabled = true;
 let alarmCopySourceId = null;
@@ -5093,12 +5173,12 @@ function setKind(kind) {
       : IS_ANDROID
         ? "If the stream cannot play, backup music takes over, followed by the phone’s alarm sound."
         : "If the stream will not start within twelve seconds, the backup folder plays instead.";
-  // Both kinds fall back to the backup folder, so both are silent without one.
+  // Both sources try backup music before the platform emergency sound.
   if (!state.settings.backupFolder) {
     note.className = "editor-note" + (IS_ANDROID ? "" : " bad");
     note.textContent += IS_ANDROID
       ? " Without backup music, the phone’s alarm sound is the fallback."
-      : " Choose backup music in Settings in case this source is unavailable.";
+      : " Choose backup music in Settings; the built-in offline tone is the final fallback.";
   }
 }
 
@@ -5209,6 +5289,7 @@ function openAlarmEditor(alarm, { copy = false } = {}) {
   }
   editorReturnFocus = document.activeElement;
   editingAlarm = copy ? null : alarm || null;
+  alarmDraftRevision = !copy && !IS_ANDROID ? alarm?.armingRevision ?? null : null;
   alarmDraftId = editingAlarm?.id || newId();
   alarmDraftEnabled = IS_ANDROID ? true : (alarm?.enabled ?? true);
   alarmCopySourceId = copy ? alarm?.id : null;
@@ -5371,6 +5452,7 @@ function readAlarmEditor() {
   return {
     alarm: {
       id: alarmDraftId || newId(),
+      ...(alarmDraftRevision !== null ? { armingRevision: alarmDraftRevision } : {}),
       label: $("#al-label").value.trim(),
       hour,
       minute,
@@ -5602,6 +5684,10 @@ setInterval(() => {
 // ---------------------------------------------------------------- wiring ---
 
 function wire() {
+  window.addEventListener("focus", () => alarmReadiness.expire());
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) alarmReadiness.expire();
+  });
   if (IS_ANDROID) {
     const refreshNative = () => {
       refreshAndroidPlayback({ allowRestore: true });
@@ -5683,7 +5769,16 @@ function wire() {
       audio.volume = player.target;
     }
     // Carry it into the ring so a later fallback does not snap back.
-    if (ringing) ringing.volume = v / 100;
+    if (ringing) {
+      ringing.volume = v / 100;
+      if (!IS_ANDROID) {
+        const ring = ringing;
+        invoke("set_emergency_tone_volume", { ...emergencyToneArgs(ring), volume: ring.volume })
+          .catch((error) => {
+            if (ringing === ring) say("Could not change alarm volume: " + error, "bad");
+          });
+      }
+    }
     saveSettings();
   });
 
@@ -5746,8 +5841,19 @@ function wire() {
         }
       }
       if (pane === "browse") browseFirstLook();
-      if (!IS_ANDROID && pane === "settings") refreshPowerStatus();
+      if (pane === "settings") {
+        alarmReadiness.expire();
+        if (!IS_ANDROID) refreshPowerStatus();
+      }
   };
+  $("#readiness-check").addEventListener("click", () => alarmReadiness.refresh());
+  $("#readiness-alarm").addEventListener("change", () => alarmReadiness.selectionChanged());
+  $("#btn-alarm-readiness").addEventListener("click", () => {
+    activateTab($("#tab-settings"));
+    $("#readiness-heading").focus({ preventScroll: true });
+    $("#readiness-panel").scrollIntoView({ block: "start" });
+    alarmReadiness.refresh();
+  });
   if (IS_ANDROID) {
     androidNavigateToPane = (pane) => activateTab($("#tab-" + pane));
     $("#mini-open").addEventListener("click", () => {
@@ -6134,6 +6240,10 @@ function wire() {
   $("#ring-dismiss").addEventListener("click", dismissRing);
 
   // settings
+  $("#storage-retry").addEventListener("click", retrySettingsStorage);
+  $("#config-details").addEventListener("toggle", () => {
+    if ($("#config-details").open) refreshStorageStatus();
+  });
   $$(".settings .row").forEach((row) => {
     row.querySelector(".sw").addEventListener("click", (e) => {
       if (activeWindowActions.size) return;
@@ -6217,18 +6327,14 @@ async function showConfigLocation() {
     label.textContent = IS_ANDROID ? "Android copy. " : where.portable ? "Portable copy. " : "Installed copy. ";
     line.append(label, "Settings: " + where.path);
 
-    // A reset that passes for a first run is how every alarm quietly vanishes.
     if (where.loadError) {
-      const problem = document.createElement("p");
-      problem.className = "wherefrom warn";
-      problem.textContent = where.loadError + (IS_ANDROID
-        ? " Existing Android alarm sources were kept. Restore a backup or repair settings before changing setup."
-        : "");
-      line.after(problem);
+      $("#storage-status").textContent = where.loadError + (IS_ANDROID
+        ? " Existing Android alarm sources were kept. Restore a backup or repair settings before changing setup." : "");
+      $("#storage-status").hidden = false;
       $("#config-details").open = true;
       say(IS_ANDROID
         ? "Settings could not be loaded. Android alarm sources were kept; restore a backup or repair settings before changing setup."
-        : "Settings could not be loaded. See Settings for details.", "bad", true);
+        : "Settings could not be loaded. The original is protected; see Settings storage.", "bad", true);
     }
   } catch {
     if (IS_ANDROID) {
@@ -6236,6 +6342,70 @@ async function showConfigLocation() {
       $("#config-where").textContent = configLoadError;
       say("Could not check Android settings. Existing alarm sources were kept; reopen the app or restore a backup before changing setup.", "bad", true);
     }
+  }
+}
+
+function applyStorageStatus(status) {
+  if (!status) return;
+  storageStatus = status;
+  configLoadError = status.writesBlocked ? status.error || "Settings recovery is needed" : null;
+  const line = $("#storage-status");
+  line.textContent = status.error || (status.pendingCompletions ? "Saving one-shot completion…" : "");
+  line.hidden = !line.textContent;
+  $("#storage-retry").hidden = IS_ANDROID || !(status.writesBlocked || status.pendingCompletions);
+  $("#storage-retry").textContent = status.writesBlocked ? "Retry reading saved settings" : "Retry saving completion";
+  if (status.error) $("#config-details").open = true;
+  if (!status.restartSafe && status.pendingCompletions) {
+    say(status.error || "One-shot completion is not saved yet. Keep Aerowave open while it retries.", "bad", true);
+  }
+}
+
+async function refreshStorageStatus() {
+  try { applyStorageStatus(await invoke("get_storage_status")); }
+  catch (error) {
+    $("#storage-status").textContent = "Could not check settings storage: " + error;
+    $("#storage-status").hidden = false;
+  }
+}
+
+async function retrySettingsStorage() {
+  if (setupRestorePending || backupBusy || alarmSavePending || alarmSkipPending || alarmEditorSaving) return;
+  const recovering = !!configLoadError || !!storageStatus?.writesBlocked;
+  if (recovering && ringing) return;
+  setupRestorePending = true;
+  ++setupRestoreEpoch;
+  $("#storage-retry").disabled = true;
+  // Discard edits to the temporary defaults before re-reading the protected
+  // file. Let already-issued writes settle while the backend still blocks them.
+  if (recovering) {
+    clearTimeout(settingsSaveTimer);
+    settingsSaveTimer = null;
+    settingsDirty = false;
+    settingsAutostartIntent = null;
+  }
+  try {
+    if (!recovering && !(await flushSettings())) throw new Error("The current settings could not be saved");
+    await Promise.all([settingsSaveTail, stationSaveTail]);
+    const recovered = await invoke("retry_settings_storage");
+    ++settingsRevision;
+    ++alarmStateRequest;
+    state = recovered;
+    await showConfigLocation();
+    renderStations();
+    refreshBrowseIndicators();
+    renderSettings();
+    renderAlarms();
+    refreshNextAlarm();
+    refreshFolderLabels();
+    if (!IS_ANDROID) refreshPowerStatus();
+    say(recovering ? "Saved settings recovered" : "One-shot completion saved", "good");
+  } catch (error) {
+    say("Settings recovery is still blocked: " + error, "bad", true);
+  } finally {
+    ++setupRestoreEpoch;
+    setupRestorePending = false;
+    $("#storage-retry").disabled = false;
+    await refreshStorageStatus();
   }
 }
 
@@ -6258,6 +6428,9 @@ async function boot() {
   }
 
   await showConfigLocation();
+  await listen("storage-status-updated", (event) => event.payload
+    ? applyStorageStatus(event.payload) : refreshStorageStatus());
+  await refreshStorageStatus();
   await loadState();
 
   await listen("icy-title", (event) => onStreamTitle(event.payload));

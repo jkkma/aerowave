@@ -713,6 +713,7 @@ private fun PersistedAlarmState.toAlarmJsObject(context: Context): JSObject = JS
     put("note", current.note)
   } })
   put("permissions", alarmPermissions(context))
+  put("audio", AlarmAudioReadiness.snapshot(context))
   put("error", error)
 }
 

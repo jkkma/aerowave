@@ -1,0 +1,155 @@
+name: Regression checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Commit/ref to compare for vendored-file changes
+        required: true
+        default: HEAD^
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  # A later main push must not interrupt a tag/asset publication half-way.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  regressions:
+    name: Frontend and repository (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      # The frontend harness uses Node built-ins and the tracked app files.
+      # It needs neither npm dependencies nor a browser/audio device.
+      - name: Frontend regressions
+        run: npm run test:frontend
+      - name: Version, IPC, checker regressions and changed vendor paths
+        if: ${{ !cancelled() }}
+        env:
+          AEROWAVE_CHECK_BASE: ${{ inputs.base || github.event.pull_request.base.sha || github.event.before }}
+        run: npm run check:repository
+
+  rust-core:
+    name: Rust core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Select stable Rust on the hosted runner
+        run: rustup toolchain install stable --profile minimal --no-self-update
+      - name: Test GUI-independent core with the committed lockfile
+        run: cargo +stable test --manifest-path src-tauri/Cargo.toml --locked -p aerowave-core
+
+  native-check:
+    name: Native compile check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Linux compilation prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential pkg-config libssl-dev libxdo-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev
+      - name: Select stable Rust on the hosted runner
+        run: rustup toolchain install stable --profile minimal --no-self-update
+      # The app crate has test=false: GUI dependencies are compile-checked,
+      # while runnable Rust regression tests belong in aerowave-core.
+      - name: Compile-check the workspace without packaging or launching the app
+        run: cargo +stable check --manifest-path src-tauri/Cargo.toml --workspace --locked
+
+  prerelease-0-16-0:
+    name: Publish Windows 0.16.0 prerelease
+    needs: [regressions, rust-core, native-check]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'jkkma/aerowave' && startsWith(github.event.head_commit.message, 'Release Aerowave 0.16.0 prerelease')
+    runs-on: windows-2022
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Restrict publication to this explicitly authorized version
+        id: gate
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($version -eq '0.16.0') {
+            'publish=true' >> $env:GITHUB_OUTPUT
+          } else {
+            'publish=false' >> $env:GITHUB_OUTPUT
+            Write-Host "No publication authorized for version $version; this job only handles 0.16.0."
+          }
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: steps.gate.outputs.publish == 'true'
+        with:
+          python-version: '3.12'
+      - name: Refuse existing tag or release conflicts
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -B tools/checks/release_windows.py preflight
+      - name: Install the x64 MSVC Rust toolchain on the hosted Windows runner
+        if: steps.gate.outputs.publish == 'true'
+        run: rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --no-self-update
+      - name: Build the actual Windows release executable with the checked lockfile
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          # Match Tauri's portable release setting; do not require a separately
+          # installed Visual C++ redistributable on the download recipient's PC.
+          STATIC_VCRUNTIME: 'true'
+        run: cargo +stable-x86_64-pc-windows-msvc build --manifest-path src-tauri/Cargo.toml --release --locked --features tauri/custom-protocol --bin aerowave
+      - name: Require exact version consistency after the build
+        if: steps.gate.outputs.publish == 'true'
+        run: python -B tools/checks/check_version.py --strict
+      - name: Package fresh output and verify binary versions, x64 layout and checksums
+        if: steps.gate.outputs.publish == 'true'
+        run: python -B tools/checks/release_windows.py package
+      - name: Upload, download-verify, then publish the prerelease
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -B tools/checks/release_windows.py publish

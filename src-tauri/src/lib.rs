@@ -2,10 +2,11 @@
 //!
 //! The split of work: Rust owns the clock, the config file, folder scanning
 //! and everything that has to keep working while the window is hidden. The
-//! webview owns playback and the face.
+//! webview owns media playback and the face; native audio owns the emergency tone.
 
 mod backup;
 mod browse;
+mod emergency_tone;
 mod hls;
 mod library;
 mod power;
@@ -39,6 +40,7 @@ use scheduler::{FirePayload, NextAlarm};
 use store::{Alarm, AppData, Settings, Station, Store};
 
 pub struct AppState {
+    pub emergency_tone: emergency_tone::EmergencyTone,
     pub store: Store,
     pub window_actions: Mutex<WindowActionRequests>,
     pub sched: Mutex<scheduler::SchedState>,
@@ -122,8 +124,10 @@ fn local_time(at_ms: Option<i64>) -> Result<LocalTime, String> {
 }
 
 #[tauri::command]
-fn save_stations(state: State<AppState>, stations: Vec<Station>) -> Result<(), String> {
-    state.store.replace_stations(stations)
+fn save_stations(app: AppHandle, state: State<AppState>, stations: Vec<Station>) -> Result<(), String> {
+    let result = state.store.replace_stations(stations);
+    let _ = app.emit("storage-status-updated", state.store.storage_status());
+    result
 }
 
 #[tauri::command]
@@ -131,7 +135,7 @@ fn save_alarms(app: AppHandle, state: State<AppState>, alarms: Vec<Alarm>) -> Re
     require_desktop_feature()?;
     let _power_update = state.power_updates.lock().unwrap();
     scheduler::ensure_power_idle(&app)?;
-    state.store.update_with(|candidate| {
+    let result = state.store.update_checked_with(|candidate| {
         let mut alarms = alarms;
         for alarm in &mut alarms {
             alarm.skip_date = candidate.alarms.iter().find(|old| {
@@ -141,7 +145,9 @@ fn save_alarms(app: AppHandle, state: State<AppState>, alarms: Vec<Alarm>) -> Re
                 )
             }).and_then(|old| old.skip_date.clone());
         }
+        store::prepare_alarm_revisions(&candidate.alarms, &mut alarms)?;
         candidate.alarms = alarms;
+        Ok(())
     }, |current, candidate| {
         let previous: Vec<_> = current.alarms.iter().map(|a| (a.id.as_str(), a.enabled)).collect();
         let next: Vec<_> = candidate.alarms.iter().map(|a| (a.id.as_str(), a.enabled)).collect();
@@ -149,9 +155,13 @@ fn save_alarms(app: AppHandle, state: State<AppState>, alarms: Vec<Alarm>) -> Re
         let mut sched = state.sched.lock().unwrap();
         *current = candidate;
         for id in cancelled {
+            let occurrence = sched.ring_generation;
             sched.cancel_pending(&id);
+            if sched.ringing.is_none() { state.emergency_tone.stop(occurrence); }
         }
-    })?;
+    });
+    let _ = app.emit("storage-status-updated", state.store.storage_status());
+    result?;
     scheduler::refresh(&app);
     let _ = app.emit("alarms-updated", ());
     Ok(())
@@ -169,7 +179,7 @@ fn skip_alarm(app: AppHandle, state: State<AppState>, id: String, skip: bool, ex
     let _power_update = state.power_updates.lock().unwrap();
     scheduler::ensure_power_idle(&app)?;
     let mut saved = Vec::new();
-    state.store.update_checked_with(|candidate| {
+    let result = state.store.update_checked_with(|candidate| {
         let alarm = candidate.alarms.iter_mut().find(|alarm| alarm.id == id)
             .ok_or_else(|| "That alarm is no longer saved".to_string())?;
         if !alarm.enabled || alarm.days.is_empty() {
@@ -184,7 +194,9 @@ fn skip_alarm(app: AppHandle, state: State<AppState>, id: String, skip: bool, ex
     }, |current, candidate| {
         saved = candidate.alarms.clone();
         *current = candidate;
-    })?;
+    });
+    let _ = app.emit("storage-status-updated", state.store.storage_status());
+    result?;
     scheduler::refresh(&app);
     let _ = app.emit("alarms-updated", ());
     Ok(saved)
@@ -209,14 +221,16 @@ fn save_settings(
         settings.minimize_to_tray = false;
     }
     let want_autostart = settings.start_with_windows;
-    state.store.update_with(|candidate| candidate.settings = settings, |current, candidate| {
+    let result = state.store.update_with(|candidate| candidate.settings = settings, |current, candidate| {
         // An explicit Off must clear the old snooze hold even if another save
         // enables wake again before the scheduler's next tick.
         let mut sched = state.sched.lock().unwrap();
         let wake_enabled = candidate.settings.wake_for_alarms;
         *current = candidate;
         sched.set_wake_enabled(wake_enabled);
-    })?;
+    });
+    let _ = app.emit("storage-status-updated", state.store.storage_status());
+    result?;
     #[cfg(desktop)]
     scheduler::refresh(&app);
     // Never let this lose the rest of the settings - they are saved already.
@@ -767,8 +781,9 @@ async fn test_alarm(app: AppHandle, alarm: Alarm) -> Result<FirePayload, String>
 }
 
 #[tauri::command]
-fn dismiss_test_alarm(app: AppHandle, alarm_id: String) {
-    scheduler::dismiss_test(&app, &alarm_id);
+fn dismiss_test_alarm(app: AppHandle, alarm_id: String, occurrence_id: String) -> Result<(), String> {
+    let occurrence = occurrence_id.parse::<u64>().map_err(|_| "Invalid alarm occurrence")?;
+    scheduler::dismiss_test(&app, &alarm_id, occurrence)
 }
 
 #[tauri::command]
@@ -785,6 +800,67 @@ fn snooze_alarm(app: AppHandle, alarm_id: String, occurrence_id: String, minutes
 fn dismiss_alarm(app: AppHandle, alarm_id: String, occurrence_id: String, automatic: Option<bool>) -> Result<(), String> {
     let occurrence = occurrence_id.parse().map_err(|_| "Invalid alarm occurrence")?;
     scheduler::dismiss(&app, &alarm_id, occurrence, automatic.unwrap_or(false))
+}
+
+/// The native audio worker is allowed to sound only for the current ring.
+/// Validation and enqueueing share the scheduler lock with Dismiss/Snooze.
+#[tauri::command]
+async fn start_emergency_tone(app: AppHandle, alarm_id: String, occurrence_id: String) -> Result<(), String> {
+    require_desktop_feature()?;
+    let occurrence = occurrence_id.parse::<u64>().map_err(|_| "Invalid alarm occurrence")?;
+    let reply = {
+        let state = app.state::<AppState>();
+        let mut sched = state.sched.lock().unwrap();
+        let payload = sched.payload.as_ref().filter(|payload|
+            sched.ringing.as_deref() == Some(alarm_id.as_str())
+                && sched.ring_generation == occurrence && payload.alarm_id == alarm_id)
+            .ok_or("That alarm is no longer ringing")?;
+        let reply = state.emergency_tone.start(occurrence, payload.volume)?;
+        // A reload during a slow device open must restore this fallback,
+        // rather than starting the failed media in parallel with the tone.
+        if let Some(payload) = &mut sched.payload { payload.kind = "tone".into(); }
+        reply
+    };
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(5), reply).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("The native emergency audio worker stopped".into()),
+        Err(_) => Err("The audio output did not open within five seconds".into()),
+    };
+    if let Err(error) = result {
+        app.state::<AppState>().emergency_tone.stop(occurrence);
+        return Err(error);
+    }
+    let state = app.state::<AppState>();
+    let mut sched = state.sched.lock().unwrap();
+    if sched.ringing.as_deref() != Some(alarm_id.as_str()) || sched.ring_generation != occurrence {
+        return Err("That alarm is no longer ringing".into());
+    }
+    if let Some(payload) = &mut sched.payload { payload.kind = "tone".into(); }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_emergency_tone_volume(state: State<AppState>, alarm_id: String, occurrence_id: String, volume: f64) -> Result<(), String> {
+    require_desktop_feature()?;
+    let occurrence = occurrence_id.parse::<u64>().map_err(|_| "Invalid alarm occurrence")?;
+    let mut sched = state.sched.lock().unwrap();
+    if sched.ringing.as_deref() != Some(alarm_id.as_str()) || sched.ring_generation != occurrence {
+        return Err("That alarm is no longer ringing".into());
+    }
+    let volume = f64::from(aerowave_core::emergency_tone::volume(volume));
+    if let Some(payload) = &mut sched.payload { payload.volume = volume; }
+    state.emergency_tone.set_volume(occurrence, volume)
+}
+
+#[tauri::command]
+fn fade_emergency_tone(state: State<AppState>, alarm_id: String, occurrence_id: String, milliseconds: u64) -> Result<(), String> {
+    require_desktop_feature()?;
+    let occurrence = occurrence_id.parse::<u64>().map_err(|_| "Invalid alarm occurrence")?;
+    let sched = state.sched.lock().unwrap();
+    if sched.ringing.as_deref() != Some(alarm_id.as_str()) || sched.ring_generation != occurrence {
+        return Err("That alarm is no longer ringing".into());
+    }
+    state.emergency_tone.fade(occurrence, milliseconds)
 }
 
 #[tauri::command]
@@ -943,8 +1019,32 @@ fn config_location(state: State<AppState>) -> ConfigLocation {
     ConfigLocation {
         path: state.store.path().to_string_lossy().to_string(),
         portable: store::portable_data_dir().is_some(),
-        load_error: state.store.load_error.clone(),
+        load_error: state.store.load_error(),
     }
+}
+
+#[tauri::command]
+fn get_storage_status(state: State<AppState>) -> store::StorageStatus {
+    state.store.storage_status()
+}
+
+#[tauri::command]
+fn retry_settings_storage(app: AppHandle, state: State<AppState>) -> Result<AppData, String> {
+    require_desktop_feature()?;
+    let _power_update = state.power_updates.lock().unwrap();
+    let result = if state.store.storage_status().writes_blocked {
+        state.sched.lock().unwrap().ensure_restore_idle()?;
+        state.store.retry_load_with(|current, candidate| *current = candidate)
+    } else {
+        state.store.retry_completions().map(|_| state.store.snapshot())
+    };
+    scheduler::refresh(&app);
+    let _ = app.emit("storage-status-updated", state.store.storage_status());
+    if result.is_ok() {
+        let _ = app.emit("settings-updated", ());
+        let _ = app.emit("alarms-updated", ());
+    }
+    result
 }
 
 /// Whatever is ringing right now, if anything.
@@ -1026,6 +1126,7 @@ pub fn run() {
             let handle = app.handle().clone();
             let store = Store::load(&handle);
             app.manage(AppState {
+                emergency_tone: emergency_tone::EmergencyTone::new(),
                 store,
                 window_actions: Mutex::new(WindowActionRequests::default()),
                 sched: Mutex::new(scheduler::SchedState::default()),
@@ -1168,12 +1269,17 @@ pub fn run() {
             dismiss_test_alarm,
             snooze_alarm,
             dismiss_alarm,
+            start_emergency_tone,
+            set_emergency_tone_volume,
+            fade_emergency_tone,
             hide_window,
             quit_app,
             request_window_action,
             acknowledge_window_action,
             complete_window_action,
             config_location,
+            get_storage_status,
+            retry_settings_storage,
             pending_alarm,
         ])
         .run(tauri::generate_context!())

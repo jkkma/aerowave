@@ -10,10 +10,12 @@
 pub mod clock;
 pub mod backup;
 pub mod directory;
+pub mod emergency_tone;
 pub mod icy;
 pub mod local_media;
 pub mod network;
 pub mod persistence;
+pub mod one_shot;
 pub mod power;
 pub mod ring;
 pub mod schedule;

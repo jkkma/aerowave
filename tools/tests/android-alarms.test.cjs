@@ -94,11 +94,9 @@ test("Android keeps native alarm sources when settings failed to load", async ()
       alarms: [{ id: "wake", enabled: true }],
     });
   } });
-  const problems = [];
-  h.el("#config-where").after = problem => problems.push(problem);
   await h.evaluate("boot()");
   assert.equal(h.el("#config-details").open, true);
-  assert.match(problems[0].textContent, /Android alarm sources were kept/);
+  assert.match(h.el("#storage-status").textContent, /Android alarm sources were kept/);
   assert.match(h.el("#status-msg").textContent, /restore a backup or repair settings/);
   assert.equal(h.evaluate("state.alarms[0].id"), "wake");
   assert.equal(h.calls.some(call => call.command.endsWith("|sync_alarms")), false);

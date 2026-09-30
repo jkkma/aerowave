@@ -4,10 +4,11 @@
 //! the webview: WebView2 throttles timers in hidden or occluded windows, and
 //! an alarm that only fires when you are already looking at the window is no
 //! alarm at all. The webview is told *when* to ring and *what* to play; it
-//! only does the playing.
+//! plays the selected media, with a separate native emergency tone as fallback.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 
 use aerowave_core::ring::{deadline_remaining_ms, RingAction, RingActions, RingHolds};
@@ -32,13 +33,14 @@ pub struct SchedState {
     /// alarm id -> the "%Y-%m-%d %H:%M" it last rang at, so a 1 s tick
     /// cannot fire the same alarm sixty times in its minute.
     fired: HashMap<String, String>,
+    fired_revisions: HashMap<String, String>,
     /// alarm id -> elapsed deadline and its wall-time display projection.
     snoozed: HashMap<String, schedule::Snooze>,
     /// Whatever is ringing right now.
     pub ringing: Option<String>,
     pub preview_alarm: Option<Alarm>,
     pub payload: Option<FirePayload>,
-    ring_generation: u64,
+    pub(crate) ring_generation: u64,
     auto_stop_at_elapsed_ms: Option<u64>,
     /// The track each folder alarm's current occurrence is playing, held so
     /// that the snoozes after it come back with the same one.
@@ -236,6 +238,12 @@ impl SchedState {
         self.fired.get(alarm_id).is_some_and(|fired| fired == key)
     }
 
+    fn fired_key_for(&self, alarm: &Alarm) -> Option<&str> {
+        aerowave_core::one_shot::same_scheduled_arm(alarm.days.is_empty(),
+            &alarm.arming_revision, self.fired_revisions.get(&alarm.id).map(String::as_str))
+            .then(|| self.fired.get(&alarm.id).map(String::as_str)).flatten()
+    }
+
     pub fn set_wake_enabled(&mut self, enabled: bool) {
         self.wake_hold.set_enabled(enabled);
     }
@@ -302,7 +310,7 @@ pub struct FirePayload {
     pub minute: u32,
     /// "scheduled", "snooze", "catchup" or "test".
     pub trigger: String,
-    /// "station", "folder" or "tone" - what the webview should play.
+    /// "station", "folder", "none", or the native emergency fallback "tone".
     pub kind: String,
     /// Stream URL, for `kind == "station"`.
     pub url: Option<String>,
@@ -509,7 +517,7 @@ fn surface_window(app: &AppHandle) {
 
 fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str, pending: &mut Option<PendingSource>) -> bool {
     let state = app.state::<AppState>();
-    let (one_shot, sleep, generation, claimed_alarm) = {
+    let (sleep, generation, claimed_alarm) = {
         // A skip save holds this gate through persistence. Its success cannot
         // overtake a claim of the skipped occurrence.
         let _power_update = state.power_updates.lock().unwrap();
@@ -522,6 +530,7 @@ fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str, pending: &mut Option<Pend
             return false;
         };
         if current != alarm { return false; }
+        if trigger != "snooze" && !state.store.scheduled_enabled(current) { return false; }
         let now = Local::now();
         if !schedule::alarm_may_fire_elapsed(
             trigger == "snooze",
@@ -545,11 +554,17 @@ fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str, pending: &mut Option<Pend
         sched
             .fired
             .insert(alarm.id.clone(), now.format("%Y-%m-%d %H:%M").to_string());
-        let one_shot = current.days.is_empty() && current.enabled;
+        sched.fired_revisions.insert(alarm.id.clone(), alarm.arming_revision.clone());
+        if trigger != "snooze" && current.days.is_empty() {
+            // This memory-only claim remains effective across days even when
+            // both durable writes fail. Snoozes belong to the same occurrence
+            // and deliberately bypass the scheduled-arm receipt.
+            state.store.claim_one_shot(current);
+        }
         let claimed_alarm = current.clone();
         sched.wake_hold.alarm_fired(wake_enabled);
         sched.sleep.cancel(SleepOutcome::Alarm);
-        (one_shot, sched.sleep.clone(), sched.ring_generation, claimed_alarm)
+        (sched.sleep.clone(), sched.ring_generation, claimed_alarm)
     };
     let _ = app.emit("sleep-timer-updated", sleep);
     match begin_source(app, &claimed_alarm, trigger, generation) {
@@ -564,34 +579,22 @@ fn fire(app: &AppHandle, alarm: &Alarm, trigger: &str, pending: &mut Option<Pend
         Err(work) => *pending = Some(work),
     }
 
-    // Persistence must not block the clock or expose an uncommitted settings
-    // candidate. The fired stamp already prevents a second ring this minute.
-    if one_shot {
-        let app = app.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            let state = app.state::<AppState>();
-            let result = state.store.update(|data| {
-                if let Some(current) = data.alarms.iter_mut().find(|a| **a == claimed_alarm) {
-                    current.enabled = false;
-                }
-            });
-            if let Err(error) = result { eprintln!("Could not save the completed one-shot alarm: {error}"); }
-            let _ = app.emit("alarms-updated", ());
-            refresh(&app);
-        });
-    }
+    let _ = app.emit("alarms-updated", ());
+    let _ = app.emit("storage-status-updated", ());
     true
 }
 
 /// A preview shares the display with real alarms but must not dismiss their
 /// occurrences or discard a saved snooze, even when it uses the same alarm id.
-pub fn dismiss_test(app: &AppHandle, alarm_id: &str) {
+pub fn dismiss_test(app: &AppHandle, alarm_id: &str, occurrence: u64) -> Result<(), String> {
     let state = app.state::<AppState>();
     {
         let mut sched = state.sched.lock().unwrap();
-        if sched.preview_alarm.as_ref().map(|a| a.id.as_str()) != Some(alarm_id) {
-            return;
+        if sched.preview_alarm.as_ref().map(|a| a.id.as_str()) != Some(alarm_id)
+            || sched.ring_generation != occurrence {
+            return Err("That alarm test is no longer active".into());
         }
+        state.emergency_tone.stop(sched.ring_generation);
         sched.preview_alarm = None;
         sched.payload = None;
         sched.ring_generation = sched.ring_generation.wrapping_add(1);
@@ -609,6 +612,7 @@ pub fn dismiss_test(app: &AppHandle, alarm_id: &str) {
         }
     }
     refresh(app);
+    Ok(())
 }
 
 /// Stop the ringing: drop the always-on-top grab and clear the snooze.
@@ -625,6 +629,7 @@ pub fn dismiss(app: &AppHandle, alarm_id: &str, occurrence: u64, automatic: bool
     if !changed { return Ok(()); }
     sched.snoozed.remove(alarm_id);
     if sched.ringing.as_deref() == Some(alarm_id) {
+        state.emergency_tone.stop(sched.ring_generation);
         sched.ringing = None;
         sched.preview_alarm = None;
         sched.payload = None;
@@ -683,6 +688,7 @@ pub fn snooze(app: &AppHandle, alarm_id: &str, occurrence: u64, minutes: u32, au
         // active wait for the same occurrence.
         sched.wake_hold.alarm_fired(wake_enabled);
         if sched.ringing.as_deref() == Some(alarm_id) {
+            state.emergency_tone.stop(sched.ring_generation);
             sched.ringing = None;
             sched.payload = None;
             sched.ring_generation = sched.ring_generation.wrapping_add(1);
@@ -715,7 +721,7 @@ pub fn next_alarm(app: &AppHandle) -> Option<NextAlarm> {
         if let Some(snooze) = snoozed.get(&alarm.id) {
             candidates.push((snooze.projected_at_ms(now_wall_ms, now_elapsed_ms), true));
         }
-        if alarm.enabled {
+        if state.store.scheduled_enabled(alarm) {
             if let Some(at) = schedule::next_occurrence_except(alarm.hour, alarm.minute, &alarm.days,
                 alarm.skip_date.as_deref(), &now)
             {
@@ -743,7 +749,7 @@ pub fn alarm_occurrences(app: &AppHandle) -> Vec<AlarmOccurrence> {
     let alarms = state.store.data.lock().unwrap().alarms.clone();
     let now = Local::now();
     alarms.into_iter().map(|alarm| {
-        let next_at_ms = alarm.enabled.then(|| schedule::next_occurrence_except(
+        let next_at_ms = state.store.scheduled_enabled(&alarm).then(|| schedule::next_occurrence_except(
             alarm.hour, alarm.minute, &alarm.days, alarm.skip_date.as_deref(), &now,
         )).flatten().and_then(|seconds| seconds.checked_mul(1000));
         let skipped_at_ms = alarm.enabled.then(|| schedule::future_skipped_occurrence(
@@ -796,12 +802,12 @@ fn tick(app: &AppHandle, power: &mut power::PowerManager, pending_source: &mut O
     }
 
     for alarm in &alarms {
-        if !alarm.enabled {
+        if !state.store.scheduled_enabled(alarm) {
             continue;
         }
         let already = {
             let sched = state.sched.lock().unwrap();
-            sched.fired.get(&alarm.id).cloned()
+            sched.fired_key_for(alarm).map(str::to_string)
         };
 
         let on_time = schedule::due_now_except(alarm.hour, alarm.minute, &alarm.days,
@@ -855,12 +861,38 @@ fn poll_source(app: &AppHandle, pending: &mut Option<PendingSource>) {
     }
 }
 
+#[derive(Default)]
+struct CompletionRetry {
+    running: Arc<AtomicBool>,
+    next_attempt_ms: u64,
+}
+
+fn retry_one_shots(app: &AppHandle, retry: &mut CompletionRetry) {
+    let now = elapsed_ms();
+    if now < retry.next_attempt_ms || retry.running.load(Ordering::Acquire)
+        || !app.state::<AppState>().store.has_pending_completions() { return; }
+    retry.next_attempt_ms = now.saturating_add(15_000);
+    retry.running.store(true, Ordering::Release);
+    let running = retry.running.clone();
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = app.state::<AppState>().store.retry_completions() {
+            eprintln!("aerowave: {error}");
+        }
+        running.store(false, Ordering::Release);
+        let _ = app.emit("alarms-updated", ());
+        let _ = app.emit("storage-status-updated", ());
+        refresh(&app);
+    });
+}
+
 /// Start the once-a-second clock. Runs for the life of the process.
 pub fn spawn(app: AppHandle, power_window: Option<isize>) {
     std::thread::spawn(move || {
         let mut power = power::PowerManager::new();
         let mut pending_power = None;
         let mut pending_source: Option<PendingSource> = None;
+        let mut completion_retry = CompletionRetry::default();
         let mut last_power_tick = elapsed_ms();
         {
             let state = app.state::<AppState>();
@@ -877,6 +909,7 @@ pub fn spawn(app: AppHandle, power_window: Option<isize>) {
             // alarm enters source resolution, which can involve folder I/O.
             update_power(&app, &mut power);
             tick(&app, &mut power, &mut pending_source);
+            retry_one_shots(&app, &mut completion_retry);
             update_power(&app, &mut power);
             tick_sleep(&app, &mut power, last_power_tick, &mut pending_power, power_window);
             last_power_tick = power_tick;
@@ -1024,9 +1057,9 @@ fn tick_sleep(
             }
             let now = Local::now();
             let now_ms = now.timestamp_millis();
-            let due = data.alarms.iter().any(|alarm| alarm.enabled && schedule::unclaimed_due_alarm_except(
+            let due = data.alarms.iter().any(|alarm| state.store.scheduled_enabled(alarm) && schedule::unclaimed_due_alarm_except(
                 alarm.hour, alarm.minute, &alarm.days, alarm.skip_date.as_deref(), &now, sched.last_tick,
-                sched.fired.get(&alarm.id).map(String::as_str),
+                sched.fired_key_for(alarm),
             ));
             let alarm_priority = due || wake_plan(now_ms, next, sched.ringing.is_some()).keep_awake;
             // Preparation can cross the dispatch deadline too. Recheck all
