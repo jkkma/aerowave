@@ -547,13 +547,22 @@
           </ul>
           <details class="settings-details">
             <summary>Screen wake and quick controls</summary>
-            <p>A ringing alarm shows Dismiss and Snooze over the lock screen. Shake firmly several times to snooze, or press either volume button while the alarm screen is open to dismiss. Test alarms can only be dismissed.</p>
+            <p>A ringing alarm shows Dismiss and Snooze over the lock screen. Shake firmly several times to dismiss, or press either volume button while the alarm screen or Aerowave is open to snooze. Test alarms stop on a shake or volume press without scheduling a snooze.</p>
             <p>Full-screen access alone does not guarantee that every phone will wake its display. Schedule an alarm with the screen off to check it.</p>
           </details>
           <details class="settings-details">
             <summary>Alarms after a restart</summary>
             <p>Keep the phone powered on. After restarting, music folders may need the first unlock; the system alarm sound is the fallback. Force-stopping Aerowave prevents alarms until you open it again.</p>
           </details>
+          </div>
+        </details>
+        <details class="settings-section android-only settings-category" aria-labelledby="settings-alarm-diagnostics">
+          <summary><h3 id="settings-alarm-diagnostics">Alarm diagnostics</h3></summary>
+          <div class="settings-category-body">
+            <p class="editor-note">Recent alarm events are saved automatically on this phone. Export them after a missed alarm or playback problem.</p>
+            <p class="editor-note">The file includes alarm times and device status. Review it before sharing.</p>
+            <button class="gel" id="android-alarm-log-export" type="button">Export alarm logs</button>
+            <p class="editor-note" id="android-alarm-log-status" role="status"></p>
           </div>
         </details>
         <details class="settings-details settings-storage" id="config-details">

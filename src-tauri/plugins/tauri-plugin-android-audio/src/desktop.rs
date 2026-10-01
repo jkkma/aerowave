@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use tauri::{plugin::PluginApi, AppHandle, Runtime};
 
 use crate::models::{
-    AlarmIdPayload, AlarmSettingsPayload, AlarmState, ArtworkPayload, FolderInfo,
+    AlarmIdPayload, AlarmLogExport, AlarmSettingsPayload, AlarmState, ArtworkPayload, FolderInfo,
     FolderPathPayload, MetadataEnabledPayload, PlayPayload, PlaybackState, RandomTrackPayload,
     SaveBackupFilePayload, SetPlayerFullscreenPayload, SkipAlarmPayload, SleepTimerPayload,
     SleepTimerSnapshot, SyncAlarmsPayload, TestAlarmPayload, TrackPick, VolumePayload,
@@ -107,6 +107,10 @@ impl<R: Runtime> AndroidAudio<R> {
     }
     pub fn pick_folder(&self) -> Result<Option<FolderInfo>, String> {
         Err("Android folders are only available on Android".into())
+    }
+
+    pub fn export_alarm_logs(&self) -> Result<Option<AlarmLogExport>, String> {
+        Err("Android alarm logs are only available on Android".into())
     }
     pub fn folder_info(&self, _payload: FolderPathPayload) -> Result<FolderInfo, String> {
         Err("Android folders are only available on Android".into())

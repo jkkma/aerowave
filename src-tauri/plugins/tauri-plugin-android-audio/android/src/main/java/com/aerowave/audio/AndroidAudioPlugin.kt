@@ -140,9 +140,12 @@ class AlarmSettingsArgs { lateinit var setting: String }
 )
 class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
   private var latestRequestedGeneration: Long? = null
+  private var alarmLogExportPending = false
+  private var alarmLogExportName = "Aerowave-alarm-logs.jsonl"
 
   override fun load(webView: WebView) {
     super.load(webView)
+    AlarmEventLog.recordSystemContext(activity, "app.plugin_load")
     // A recreated WebView starts in the ordinary window layout even if the
     // previous page left the main activity in immersive mode.
     activity.runOnUiThread {
@@ -427,17 +430,12 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
           throw IllegalStateException("Alarms changed on Android; refresh and try again")
         }
         previousAlarms = old.alarms
-        val merged = incoming?.let { AlarmStateTransitions.syncSkipDates(old.alarms, it) }
-        val cancelled = merged?.let {
-          AlarmStateTransitions.cancelledAlarmIds(old.alarms, it)
-        }.orEmpty()
-        old.copy(
+        val synced = incoming?.let { AlarmStateTransitions.syncSchedules(old, it) } ?: old
+        synced.copy(
           initialized = old.initialized || incoming != null,
           revision = old.revision + 1,
-          alarms = merged ?: old.alarms,
           stations = stations,
           backupFolder = args.backupFolder,
-          snoozes = old.snoozes - cancelled,
           error = null,
         )
       }
@@ -447,6 +445,7 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
       } else changed
       invoke.resolve(result.toAlarmJsObject(activity))
     } catch (error: Exception) {
+      AlarmEventLog.record(activity, "plugin.sync_alarms_failed", error = error)
       invoke.reject(error.message ?: "Unable to save Android alarms")
     }
   }
@@ -472,6 +471,7 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
       previousAlarmIds.forEach { AndroidAlarmScheduler.cancelAlarm(activity, it) }
       invoke.resolve(changed.toAlarmJsObject(activity))
     } catch (error: Exception) {
+      AlarmEventLog.record(activity, "plugin.restore_alarms_failed", error = error)
       invoke.reject(error.message ?: "Unable to restore Android alarms")
     }
   }
@@ -496,6 +496,7 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
       AndroidAlarmScheduler.replaceRegular(activity, args.id)
       invoke.resolve(changed.toAlarmJsObject(activity))
     } catch (error: Exception) {
+      AlarmEventLog.record(activity, "plugin.skip_alarm_failed", error = error)
       invoke.reject(error.message ?: "Unable to change the skipped alarm")
     }
   }
@@ -510,6 +511,7 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
         invoke.resolve(state.toAlarmJsObject(activity))
       }
     } catch (error: Exception) {
+      AlarmEventLog.record(activity, "plugin.snooze_alarm_failed", error = error)
       invoke.reject(error.message ?: "Unable to snooze the alarm")
     }
   }
@@ -524,6 +526,7 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
         invoke.resolve(state.toAlarmJsObject(activity))
       }
     } catch (error: Exception) {
+      AlarmEventLog.record(activity, "plugin.dismiss_alarm_failed", error = error)
       invoke.reject(error.message ?: "Unable to dismiss the alarm")
     }
   }
@@ -552,6 +555,7 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
       invoke.resolve(state.toAlarmJsObject(activity))
     } catch (error: Exception) {
       AlarmPlaybackService.clearPending()
+      AlarmEventLog.record(activity, "plugin.test_alarm_failed", error = error)
       invoke.reject(error.message ?: "Unable to test the alarm")
     }
   }
@@ -614,6 +618,57 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
     } catch (error: Exception) {
       invoke.reject(error.message ?: "Unable to save backup")
     }
+  }
+
+  @Command
+  fun exportAlarmLogs(invoke: Invoke) {
+    activity.runOnUiThread {
+      if (alarmLogExportPending) {
+        invoke.reject("An alarm log export is already open")
+        return@runOnUiThread
+      }
+      if (AlarmLogDocuments.isBusy()) {
+        invoke.reject("An earlier alarm log export is still finishing. Try again later.")
+        return@runOnUiThread
+      }
+      alarmLogExportPending = true
+      try {
+        val intent = AlarmLogDocuments.createIntent()
+        alarmLogExportName = intent.getStringExtra(Intent.EXTRA_TITLE) ?: "Aerowave-alarm-logs.jsonl"
+        startActivityForResult(invoke, intent, "exportAlarmLogsResult")
+      } catch (error: Exception) {
+        alarmLogExportPending = false
+        AlarmEventLog.record(activity, "logs.export_picker_failed", error = error)
+        invoke.reject(error.message ?: "Unable to open the alarm log export")
+      }
+    }
+  }
+
+  @ActivityCallback
+  fun exportAlarmLogsResult(invoke: Invoke, result: ActivityResult) {
+    if (result.resultCode == Activity.RESULT_CANCELED) {
+      alarmLogExportPending = false
+      invoke.resolve()
+      return
+    }
+    val request = AlarmLogDocuments.reserve(activity) { saved ->
+      activity.runOnUiThread {
+        alarmLogExportPending = false
+        saved.fold(
+          onSuccess = { value ->
+            if (value == null) invoke.resolve()
+            else invoke.resolve(value.toJsObject())
+          },
+          onFailure = { error -> invoke.reject(error.message ?: "Unable to export alarm logs") },
+        )
+      }
+    }
+    if (request == null) {
+      alarmLogExportPending = false
+      invoke.reject("An earlier alarm log export is still finishing. Try again later.")
+      return
+    }
+    AlarmLogDocuments.writeResult(activity, result, alarmLogExportName, request)
   }
 
   private fun requireMatchingRing(args: AlarmIdArgs): RingingRecord {

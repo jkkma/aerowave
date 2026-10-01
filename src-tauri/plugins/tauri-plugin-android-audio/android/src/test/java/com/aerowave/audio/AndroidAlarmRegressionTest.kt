@@ -206,11 +206,13 @@ class AndroidAlarmRegressionTest {
   @Test fun reenabledOneShotKeepsItsFutureScheduleAfterAGenuineSnooze() {
     val context = RuntimeEnvironment.getApplication()
     val alarm = oneShot() // Re-enabled while a genuine snooze was pending.
+    val future = AlarmStateTransitions.nextScheduled(alarm, null, System.currentTimeMillis())!!
     val snooze = ScheduledOccurrence(
       alarm.id, "genuine-snooze", System.currentTimeMillis() - 30_000L, true,
     )
     AlarmStateStore.update(context) { PersistedAlarmState(
       initialized = true, alarms = listOf(alarm),
+      scheduled = mapOf(alarm.id to future),
       snoozes = mapOf(alarm.id to snooze),
     ) }
     val ring = AndroidAlarmScheduler.claim(
@@ -218,9 +220,9 @@ class AndroidAlarmRegressionTest {
     )
     assertNotNull(ring)
     assertEquals("snooze", ring!!.trigger)
-    assertTrue(AlarmStateStore.snapshot(context).alarms.single().enabled)
-    assertNotNull(AlarmStateTransitions.nextScheduled(
-      AlarmStateStore.snapshot(context).alarms.single(), null, System.currentTimeMillis(),
-    ))
+    val claimed = AlarmStateStore.snapshot(context)
+    assertTrue(claimed.alarms.single().enabled)
+    assertEquals(future, claimed.scheduled[alarm.id])
+    assertNull(claimed.snoozes[alarm.id])
   }
 }

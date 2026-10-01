@@ -139,7 +139,9 @@ class MainActivity : TauriActivity() {
       KeyEvent.ACTION_UP -> {
         if (alarmKeys.volumeUp(event.keyCode, occurrence) && !event.isCanceled &&
           alarmKeys.beginAction(occurrence)) {
-          AlarmPlaybackService.dismissIfMatching(this, occurrence)
+          AlarmPlaybackService.volumeButtonIfMatching(this, occurrence) {
+            runOnUiThread { alarmKeys.actionFailed(occurrence) }
+          }
         }
         return true
       }

@@ -23,14 +23,15 @@ import org.robolectric.annotation.Config
 @Config(sdk = [33])
 class AlarmToneFallbackTest {
   private class FakeTone(
-    private val neverReportsPlaying: Boolean = false,
-    private val throwsOnPlay: Boolean = false,
+    var neverReportsPlaying: Boolean = false,
+    var throwsOnPlay: Boolean = false,
   ) : SystemAlarmTone {
     var playCalls = 0
     var stopCalls = 0
     var playing = false
     val volumes = mutableListOf<Float>()
     var volumeAtFirstPlay: Float? = null
+    var throwsOnVolume = false
 
     override fun play() {
       if (playCalls == 0) volumeAtFirstPlay = volumes.lastOrNull()
@@ -47,6 +48,7 @@ class AlarmToneFallbackTest {
     override fun isPlaying() = playing
 
     override fun setVolume(volume: Float) {
+      if (throwsOnVolume) throw IllegalStateException("tone volume unavailable")
       volumes += volume
     }
   }
@@ -90,6 +92,17 @@ class AlarmToneFallbackTest {
     listener.onAudioFocusChange(change)
     Shadows.shadowOf(Looper.getMainLooper()).idle()
   }
+
+  private fun watchdog(service: AlarmPlaybackService): Runnable =
+    AlarmPlaybackService::class.java.getDeclaredField("toneWatchdog")
+      .apply { isAccessible = true }.get(service) as Runnable
+
+  private fun idleFor(seconds: Long) {
+    Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(seconds))
+  }
+
+  private val alarmUri get() = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+  private val notificationUri get() = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
   @Test fun missingStationUsesMediaRingtoneAndDismissStopsIt() {
     val context = RuntimeEnvironment.getApplication()
@@ -204,17 +217,239 @@ class AlarmToneFallbackTest {
     controller.destroy()
   }
 
-  @Test fun ringtoneThatNeverPlaysFailsItsOwnWatchdog() {
+  @Test fun silentDefaultToneAdvancesToNotificationWithoutSpendingTheFade() {
     val context = RuntimeEnvironment.getApplication()
-    val tone = FakeTone(neverReportsPlaying = true)
-    val (controller, _) = start(context, ring()) { _, _ -> tone }
-    Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(3))
-    assertTrue(tone.playCalls >= 2)
-    val ringing = AlarmStateStore.snapshot(context).ringing
-    assertEquals("tone", ringing?.sourceKind)
-    assertTrue(ringing?.note?.contains("system alarm sound stopped playing") == true)
-    assertNull(ringing?.sourceUri)
-    controller.destroy()
+    val silent = FakeTone(neverReportsPlaying = true)
+    val alternate = FakeTone()
+    val requested = mutableListOf<Uri>()
+    val (controller, _) = start(context, ring(fadeSecs = 10)) { _, uri ->
+      requested += uri
+      if (uri == alarmUri) silent else alternate
+    }
+    try {
+      idleFor(3)
+      assertEquals(listOf(alarmUri, notificationUri), requested)
+      assertEquals(2, silent.playCalls)
+      assertEquals(1, silent.stopCalls)
+      assertEquals(1, alternate.playCalls)
+      assertTrue(alternate.playing)
+      assertEquals(0.012f, alternate.volumeAtFirstPlay ?: 1f, 0.001f)
+      assertEquals(notificationUri.toString(), AlarmStateStore.snapshot(context).ringing?.sourceUri)
+      assertTrue(AlarmStateStore.snapshot(context).ringing?.note?.contains("notification sound") == true)
+      idleFor(3)
+      assertTrue(alternate.volumes.last() in 0.20f..0.26f)
+    } finally { controller.destroy() }
+  }
+
+  @Test fun laterStoppedDefaultToneAdvancesAndRetainsItsAudibleFadeProgress() {
+    val context = RuntimeEnvironment.getApplication()
+    val first = FakeTone()
+    val alternate = FakeTone()
+    val requested = mutableListOf<Uri>()
+    val (controller, _) = start(context, ring(fadeSecs = 10)) { _, uri ->
+      requested += uri
+      if (uri == alarmUri) first else alternate
+    }
+    try {
+      idleFor(5)
+      first.playing = false
+      first.neverReportsPlaying = true
+      idleFor(3)
+      assertEquals(listOf(alarmUri, notificationUri), requested)
+      assertEquals(2, first.playCalls)
+      assertEquals(1, first.stopCalls)
+      assertTrue(alternate.playing)
+      assertTrue((alternate.volumeAtFirstPlay ?: 0f) in 0.28f..0.32f)
+      assertEquals(notificationUri.toString(), AlarmStateStore.snapshot(context).ringing?.sourceUri)
+    } finally { controller.destroy() }
+  }
+
+  @Test fun synchronousPlayFailureStillAdvancesDirectlyToTheNotificationTone() {
+    val context = RuntimeEnvironment.getApplication()
+    val first = FakeTone(throwsOnPlay = true)
+    val alternate = FakeTone()
+    val requested = mutableListOf<Uri>()
+    val (controller, _) = start(context, ring()) { _, uri ->
+      requested += uri
+      if (uri == alarmUri) first else alternate
+    }
+    try {
+      assertEquals(listOf(alarmUri, notificationUri), requested)
+      assertEquals(1, first.playCalls)
+      assertEquals(1, first.stopCalls)
+      assertTrue(alternate.playing)
+      assertEquals(notificationUri.toString(), AlarmStateStore.snapshot(context).ringing?.sourceUri)
+    } finally { controller.destroy() }
+  }
+
+  @Test fun bothSilentCandidatesExhaustOnceAndFocusGainCannotResetTheBudget() {
+    val context = RuntimeEnvironment.getApplication()
+    val first = FakeTone(neverReportsPlaying = true)
+    val alternate = FakeTone(neverReportsPlaying = true)
+    val requested = mutableListOf<Uri>()
+    val (controller, service) = start(context, ring()) { _, uri ->
+      requested += uri
+      if (uri == alarmUri) first else alternate
+    }
+    try {
+      idleFor(5)
+      assertEquals(listOf(alarmUri, notificationUri), requested)
+      assertEquals(2, first.playCalls)
+      assertEquals(2, alternate.playCalls)
+      assertEquals(1, first.stopCalls)
+      assertEquals(1, alternate.stopCalls)
+      assertFalse(first.playing || alternate.playing)
+      val terminal = AlarmStateStore.snapshot(context).ringing
+      assertEquals("tone", terminal?.sourceKind)
+      assertNull(terminal?.sourceUri)
+      assertTrue(terminal?.note?.contains("system alarm sound stopped playing") == true)
+      focus(service, AudioManager.AUDIOFOCUS_GAIN)
+      idleFor(5)
+      assertEquals(listOf(alarmUri, notificationUri), requested)
+      assertEquals(terminal, AlarmStateStore.snapshot(context).ringing)
+      assertEquals(2, alternate.playCalls)
+    } finally { controller.destroy() }
+  }
+
+  @Test fun focusLossSuspendsCandidateRecoveryAndGainResumesTheSameCandidate() {
+    val context = RuntimeEnvironment.getApplication()
+    val first = FakeTone(neverReportsPlaying = true)
+    val alternate = FakeTone()
+    val requested = mutableListOf<Uri>()
+    val (controller, service) = start(context, ring()) { _, uri ->
+      requested += uri
+      if (uri == alarmUri) first else alternate
+    }
+    try {
+      val beforeLoss = watchdog(service)
+      focus(service, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)
+      idleFor(5)
+      beforeLoss.run()
+      assertEquals(listOf(alarmUri), requested)
+      assertEquals(1, first.playCalls)
+      focus(service, AudioManager.AUDIOFOCUS_GAIN)
+      assertEquals(listOf(alarmUri), requested)
+      assertEquals(2, first.playCalls)
+      idleFor(3)
+      assertEquals(listOf(alarmUri, notificationUri), requested)
+      assertTrue(alternate.playing)
+    } finally { controller.destroy() }
+  }
+
+  @Test fun staleWatchdogCannotStopTheAlternateOrAReplacementOccurrence() {
+    val context = RuntimeEnvironment.getApplication()
+    val first = FakeTone(neverReportsPlaying = true)
+    val alternate = FakeTone()
+    val replacementTone = FakeTone()
+    val requested = mutableListOf<Uri>()
+    val (controller, service) = start(context, ring()) { _, uri ->
+      requested += uri
+      if (requested.size == 1) first else if (uri == notificationUri) alternate else replacementTone
+    }
+    try {
+      val oldWatchdog = watchdog(service)
+      idleFor(3)
+      oldWatchdog.run()
+      assertEquals(listOf(alarmUri, notificationUri), requested)
+      assertEquals(1, alternate.playCalls)
+      assertEquals(0, alternate.stopCalls)
+      val alternateWatchdog = watchdog(service)
+      val replacement = ring().copy(occurrenceId = "scheduled:replacement")
+      AlarmStateStore.update(context) { it.copy(ringing = replacement) }
+      service.onStartCommand(
+        AlarmPlaybackService.intentFor(context, AlarmPlaybackService.ACTION_RING, replacement.occurrenceId), 0, 2,
+      )
+      oldWatchdog.run()
+      alternateWatchdog.run()
+      assertEquals(listOf(alarmUri, notificationUri, alarmUri), requested)
+      assertTrue(replacementTone.playing)
+      assertEquals(1, replacementTone.playCalls)
+      assertEquals(0, replacementTone.stopCalls)
+      assertEquals(replacement.occurrenceId, AlarmStateStore.snapshot(context).ringing?.occurrenceId)
+      assertEquals(alarmUri.toString(), AlarmStateStore.snapshot(context).ringing?.sourceUri)
+      AlarmPlaybackService.dismissIfMatching(context, replacement.occurrenceId)
+      Shadows.shadowOf(Looper.getMainLooper()).idle()
+      alternateWatchdog.run()
+      assertNull(AlarmStateStore.snapshot(context).ringing)
+      assertFalse(replacementTone.playing)
+      assertEquals(listOf(alarmUri, notificationUri, alarmUri), requested)
+    } finally { controller.destroy() }
+  }
+
+  @Test fun volumeFailureDuringPlaybackAdvancesToTheNotificationTone() {
+    val context = RuntimeEnvironment.getApplication()
+    val first = FakeTone()
+    val alternate = FakeTone()
+    val requested = mutableListOf<Uri>()
+    val (controller, _) = start(context, ring(fadeSecs = 10)) { _, uri ->
+      requested += uri
+      if (uri == alarmUri) first else alternate
+    }
+    try {
+      idleFor(3)
+      first.throwsOnVolume = true
+      idleFor(1)
+      assertEquals(listOf(alarmUri, notificationUri), requested)
+      assertFalse(first.playing)
+      assertTrue(alternate.playing)
+      assertEquals(1, first.stopCalls)
+      assertTrue((alternate.volumeAtFirstPlay ?: 1f) in 0.17f..0.21f)
+      assertEquals(notificationUri.toString(), AlarmStateStore.snapshot(context).ringing?.sourceUri)
+    } finally { controller.destroy() }
+  }
+
+  @Test fun candidateChangeDuringAutomaticCompletionKeepsTheGainFalling() {
+    val context = RuntimeEnvironment.getApplication()
+    val first = FakeTone()
+    val alternate = FakeTone()
+    val requested = mutableListOf<Uri>()
+    val active = ring()
+    val (controller, _) = start(context, active) { _, uri ->
+      requested += uri
+      if (uri == alarmUri) first else alternate
+    }
+    try {
+      AlarmPlaybackService.autoStopIfMatching(context, active.occurrenceId)
+      idleFor(2)
+      first.playing = false
+      first.neverReportsPlaying = true
+      idleFor(2)
+      assertEquals(listOf(alarmUri, notificationUri), requested)
+      assertTrue(alternate.playing)
+      assertTrue((alternate.volumeAtFirstPlay ?: 1f) in 0.19f..0.21f)
+      assertEquals(active.occurrenceId, AlarmStateStore.snapshot(context).ringing?.occurrenceId)
+      idleFor(2)
+      assertTrue(alternate.volumes.zipWithNext().all { (before, after) -> after <= before + 0.0001f })
+      assertFalse(alternate.playing)
+      assertNull(AlarmStateStore.snapshot(context).ringing)
+    } finally { controller.destroy() }
+  }
+
+  @Test fun zeroGainDuringAutomaticCompletionCannotRiseWhenFocusRecoveryChangesCandidate() {
+    val context = RuntimeEnvironment.getApplication()
+    val first = FakeTone()
+    val alternate = FakeTone()
+    val requested = mutableListOf<Uri>()
+    val active = ring()
+    val (controller, service) = start(context, active) { _, uri ->
+      requested += uri
+      if (uri == alarmUri) first else alternate
+    }
+    try {
+      AlarmPlaybackService.autoStopIfMatching(context, active.occurrenceId)
+      idleFor(1)
+      focus(service, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)
+      idleFor(1)
+      first.throwsOnPlay = true
+      focus(service, AudioManager.AUDIOFOCUS_GAIN)
+      assertEquals(listOf(alarmUri, notificationUri), requested)
+      assertTrue(alternate.playing)
+      assertEquals(0f, alternate.volumeAtFirstPlay ?: 1f, 0.001f)
+      idleFor(4)
+      assertTrue(alternate.volumes.all { it == 0f })
+      assertNull(AlarmStateStore.snapshot(context).ringing)
+      assertFalse(alternate.playing)
+    } finally { controller.destroy() }
   }
 }
 

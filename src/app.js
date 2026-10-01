@@ -4759,6 +4759,42 @@ async function loadState(expectedSettingsRevision = null) {
   if (!IS_ANDROID) refreshPowerStatus();
 }
 
+let alarmLogExportBusy = false;
+
+async function exportAndroidAlarmLogs() {
+  if (!IS_ANDROID || alarmLogExportBusy) return;
+  alarmLogExportBusy = true;
+  const button = $("#android-alarm-log-export");
+  const message = $("#android-alarm-log-status");
+  button.disabled = true;
+  button.textContent = "Exporting…";
+  message.textContent = "Choose where to save recent alarm logs…";
+  message.classList.remove("bad", "warn");
+  try {
+    const saved = await androidCommand("export_alarm_logs");
+    if (saved == null) {
+      message.textContent = "Export cancelled.";
+    } else {
+      const missing = [];
+      if (saved.droppedRecords > 0) missing.push(`${saved.droppedRecords} dropped`);
+      if (saved.writeFailures > 0) missing.push(`${saved.writeFailures} write failures`);
+      if (saved.recoveredIncompleteData) missing.push("incomplete entries recovered");
+      const partial = saved.partial || missing.length > 0;
+      message.textContent = "Saved alarm logs." + (partial
+        ? " Some log entries were unavailable" + (missing.length ? ` (${missing.join("; ")})` : "") + "."
+        : "") + (saved.historyTruncated ? " Older entries were rotated out." : "");
+      message.classList.toggle("warn", partial);
+    }
+  } catch (error) {
+    message.textContent = "Could not export alarm logs: " + String(error) + ". Try again.";
+    message.classList.add("bad");
+  } finally {
+    alarmLogExportBusy = false;
+    button.disabled = false;
+    button.textContent = "Export alarm logs";
+  }
+}
+
 let backupBusy = false;
 let setupRestorePending = false;
 let setupRestoreEpoch = 0;
@@ -5714,6 +5750,7 @@ function wire() {
         button.disabled = false;
       }
     });
+    $("#android-alarm-log-export").addEventListener("click", exportAndroidAlarmLogs);
     $$("#al-days button").forEach(button => {
       button.setAttribute("aria-label", DAY_NAMES[+button.dataset.day]);
     });

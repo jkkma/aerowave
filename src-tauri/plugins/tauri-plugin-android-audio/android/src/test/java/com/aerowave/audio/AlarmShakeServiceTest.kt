@@ -59,19 +59,19 @@ class AlarmShakeServiceTest {
       0, 1,
     )
     assertTrue(shadowSensors.hasListener(service))
-    assertTrue(AlarmPlaybackService.canShakeToSnooze(active.occurrenceId))
+    assertTrue(AlarmPlaybackService.canShakeToDismiss(active.occurrenceId))
 
     AlarmPlaybackService.dismissIfMatching(context, active.occurrenceId)
     Shadows.shadowOf(Looper.getMainLooper()).idle()
     assertFalse(shadowSensors.hasListener(service))
-    assertFalse(AlarmPlaybackService.canShakeToSnooze(active.occurrenceId))
+    assertFalse(AlarmPlaybackService.canShakeToDismiss(active.occurrenceId))
 
     controller.destroy()
     assertFalse(shadowSensors.hasListener(service))
-    assertFalse(AlarmPlaybackService.canShakeToSnooze(active.occurrenceId))
+    assertFalse(AlarmPlaybackService.canShakeToDismiss(active.occurrenceId))
   }
 
-  @Test fun testRingAndMissingSensorDoNotRegisterShake() {
+  @Test fun shakingATestRingDismissesWithoutCreatingASnooze() {
     val context = RuntimeEnvironment.getApplication()
     val sensorManager = context.getSystemService(SensorManager::class.java)
     val shadowSensors = Shadows.shadowOf(sensorManager)
@@ -85,17 +85,22 @@ class AlarmShakeServiceTest {
       AlarmPlaybackService.intentFor(context, AlarmPlaybackService.ACTION_RING, testRing.occurrenceId),
       0, 1,
     )
-    assertFalse(shadowSensors.hasListener(testService))
-    assertFalse(AlarmPlaybackService.canShakeToSnooze(testRing.occurrenceId))
-    for (index in 0..3) {
-      val at = 1_000L + index * 280
-      sendAcceleration(shadowSensors, sensor, 0f, at)
-      sendAcceleration(shadowSensors, sensor, if (index % 2 == 0) 35f else -35f, at + 30)
+    assertTrue(shadowSensors.hasListener(testService))
+    assertTrue(AlarmPlaybackService.canShakeToDismiss(testRing.occurrenceId))
+    for (index in 0..20) {
+      sendAcceleration(shadowSensors, sensor, if (index % 2 == 0) 35f else -35f, index * 20L)
     }
-    assertEquals(testRing.occurrenceId, AlarmStateStore.snapshot(context).ringing?.occurrenceId)
+    assertNull(AlarmStateStore.snapshot(context).ringing)
     assertTrue(AlarmStateStore.snapshot(context).snoozes.isEmpty())
+    assertFalse(shadowSensors.hasListener(testService))
     testController.destroy()
+  }
 
+  @Test fun failedSensorRegistrationDoesNotAdvertiseShake() {
+    val context = RuntimeEnvironment.getApplication()
+    val sensorManager = context.getSystemService(SensorManager::class.java)
+    val shadowSensors = Shadows.shadowOf(sensorManager)
+    shadowSensors.addSensor(ShadowSensor.newInstance(Sensor.TYPE_ACCELEROMETER))
     shadowSensors.setForceListenersToFail(true)
     val realRing = ring("scheduled")
     AlarmStateStore.update(context) { PersistedAlarmState(ringing = realRing) }
@@ -106,11 +111,11 @@ class AlarmShakeServiceTest {
       0, 2,
     )
     assertFalse(shadowSensors.hasListener(realService))
-    assertFalse(AlarmPlaybackService.canShakeToSnooze(realRing.occurrenceId))
+    assertFalse(AlarmPlaybackService.canShakeToDismiss(realRing.occurrenceId))
     realController.destroy()
   }
 
-  @Test fun repeatedShakeSchedulesOneDurableSnoozeAndStopsListening() {
+  @Test fun repeatedShakeDismissesWithoutSchedulingAndStopsListening() {
     val context = RuntimeEnvironment.getApplication()
     val active = ring("scheduled")
     AlarmStateStore.update(context) { PersistedAlarmState(ringing = active) }
@@ -143,13 +148,36 @@ class AlarmShakeServiceTest {
     }
     val saved = AlarmStateStore.snapshot(context)
     assertNull(saved.ringing)
-    assertEquals(1, saved.snoozes.size)
-    val snooze = saved.snoozes.getValue(active.alarm.id)
-    assertTrue(snooze.snoozed)
-    assertTrue(snooze.occurrenceId != active.occurrenceId)
-    assertTrue(snooze.atMs > System.currentTimeMillis() + 9 * 60_000L)
+    assertTrue(saved.snoozes.isEmpty())
     assertFalse(shadowSensors.hasListener(service))
-    assertFalse(AlarmPlaybackService.canShakeToSnooze(active.occurrenceId))
+    assertFalse(AlarmPlaybackService.canShakeToDismiss(active.occurrenceId))
+    for (index in 0..20) {
+      sendAcceleration(shadowSensors, sensor, if (index % 2 == 0) 35f else -35f, 1_000L + index * 20)
+    }
+    assertNull(AlarmStateStore.snapshot(context).ringing)
+    assertTrue(AlarmStateStore.snapshot(context).snoozes.isEmpty())
+    controller.destroy()
+  }
+
+  @Test fun staleShakeCannotDismissADifferentStoredOccurrence() {
+    val context = RuntimeEnvironment.getApplication()
+    val active = ring("scheduled")
+    AlarmStateStore.update(context) { PersistedAlarmState(ringing = active) }
+    val sensors = Shadows.shadowOf(context.getSystemService(SensorManager::class.java))
+    val sensor = ShadowSensor.newInstance(Sensor.TYPE_ACCELEROMETER)
+    sensors.addSensor(sensor)
+    val controller = Robolectric.buildService(AlarmPlaybackService::class.java).create()
+    controller.get().onStartCommand(
+      AlarmPlaybackService.intentFor(context, AlarmPlaybackService.ACTION_RING, active.occurrenceId),
+      0, 1,
+    )
+    val newer = active.copy(occurrenceId = "scheduled:newer")
+    AlarmStateStore.update(context) { it.copy(ringing = newer) }
+    for (index in 0..20) {
+      sendAcceleration(sensors, sensor, if (index % 2 == 0) 35f else -35f, index * 20L)
+    }
+    assertEquals(newer.occurrenceId, AlarmStateStore.snapshot(context).ringing?.occurrenceId)
+    assertTrue(AlarmStateStore.snapshot(context).snoozes.isEmpty())
     controller.destroy()
   }
 }
