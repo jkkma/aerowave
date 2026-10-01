@@ -55,6 +55,8 @@ class AlarmActivity : Activity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     debugLifecycle("onCreate", "restored=${savedInstanceState != null}")
+    AlarmEventLog.record(this, "screen.create", intent?.getStringExtra(EXTRA_OCCURRENCE_ID),
+      mapOf("restored" to (savedInstanceState != null)))
     boundOccurrence = null
     inputGate.bind(null)
     actionPending = false
@@ -70,6 +72,7 @@ class AlarmActivity : Activity() {
   override fun onResume() {
     super.onResume()
     debugLifecycle("onResume")
+    AlarmEventLog.record(this, "screen.resume", boundOccurrence)
     visible = true
     refreshRing()
     handler.removeCallbacks(checkRing)
@@ -78,6 +81,7 @@ class AlarmActivity : Activity() {
 
   override fun onPause() {
     debugLifecycle("onPause")
+    AlarmEventLog.record(this, "screen.pause", boundOccurrence)
     visible = false
     handler.removeCallbacks(checkRing)
     setAlarmWindowFlags(false)
@@ -87,6 +91,7 @@ class AlarmActivity : Activity() {
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     debugLifecycle("onNewIntent")
+    AlarmEventLog.record(this, "screen.new_intent", intent.getStringExtra(EXTRA_OCCURRENCE_ID))
     setIntent(intent)
     boundOccurrence = null
     inputGate.bind(null)
@@ -96,6 +101,7 @@ class AlarmActivity : Activity() {
 
   override fun onDestroy() {
     debugLifecycle("onDestroy", "finishing=$isFinishing")
+    AlarmEventLog.record(this, "screen.destroy", boundOccurrence, mapOf("finishing" to isFinishing))
     handler.removeCallbacks(checkRing)
     setAlarmWindowFlags(false)
     super.onDestroy()
@@ -113,7 +119,10 @@ class AlarmActivity : Activity() {
       }
       KeyEvent.ACTION_UP -> {
         if (inputGate.volumeUp(event.keyCode, occurrence) && !event.isCanceled) {
-          performAction(occurrence, snooze = false)
+          val current = AlarmStateStore.snapshot(this).ringing
+          if (current?.occurrenceId == occurrence) {
+            performAction(occurrence, snooze = alarmVolumeButtonSnoozes(current.trigger), origin = "volume_button")
+          }
         }
         return true
       }
@@ -130,11 +139,15 @@ class AlarmActivity : Activity() {
       // Android can recreate an old alarm task with its saved intent before
       // delivering the new full-screen intent. Bind to the live claimed ring.
       debugLifecycle("recoverLaunch", "staleIntent=true")
+      AlarmEventLog.record(this, "screen.recovered_stale_intent", ring.occurrenceId,
+        mapOf("requestedOccurrenceId" to occurrence))
       occurrence = ring.occurrenceId
       setIntent(intentFor(this, occurrence))
     }
     if (occurrence == null || ring?.occurrenceId != occurrence || liveOccurrence != occurrence) {
       debugLifecycle("guardClose", "hasIntent=${occurrence != null} storedMatch=${ring?.occurrenceId == occurrence} liveMatch=${liveOccurrence == occurrence}")
+      AlarmEventLog.record(this, "screen.guard_close", occurrence,
+        mapOf("storedMatch" to (ring?.occurrenceId == occurrence), "liveMatch" to (liveOccurrence == occurrence)))
       closeAlarmScreen()
       return
     }
@@ -152,12 +165,14 @@ class AlarmActivity : Activity() {
     snoozeButton.text = "Snooze ${ring.alarm.snoozeMins} min"
     dismissButton.isEnabled = !actionPending
     snoozeButton.isEnabled = !actionPending
-    hintView.text = if (ring.trigger != "test" &&
-      AlarmPlaybackService.canShakeToSnooze(occurrence)) {
-      "Shake to snooze · Press a volume button to dismiss"
+    val volumeHint = if (ring.trigger == "test") {
+      "Press a volume button to stop the test"
     } else {
-      "Press a volume button to dismiss"
+      "Press a volume button to snooze"
     }
+    hintView.text = if (AlarmPlaybackService.canShakeToDismiss(occurrence)) {
+      "Shake to dismiss · $volumeHint"
+    } else volumeHint
   }
 
   private fun isCurrentRing(occurrence: String): Boolean =
@@ -169,7 +184,7 @@ class AlarmActivity : Activity() {
     }
   }
 
-  private fun performAction(occurrence: String, snooze: Boolean) {
+  private fun performAction(occurrence: String, snooze: Boolean, origin: String = "native_screen") {
     val current = AlarmStateStore.snapshot(this).ringing
     if (current?.occurrenceId != occurrence || !isCurrentRing(occurrence) ||
       (snooze && current.trigger == "test") || !inputGate.beginAction(occurrence)) return
@@ -177,7 +192,7 @@ class AlarmActivity : Activity() {
     actionStartedMs = SystemClock.elapsedRealtime()
     dismissButton.isEnabled = false
     snoozeButton.isEnabled = false
-    AlarmPlaybackService.stopIfMatching(this, occurrence, snooze) { state ->
+    AlarmPlaybackService.stopIfMatching(this, occurrence, snooze, origin = origin) { state ->
       runOnUiThread {
         if (isDestroyed || isFinishing || boundOccurrence != occurrence) return@runOnUiThread
         if (state.ringing?.occurrenceId == occurrence) {

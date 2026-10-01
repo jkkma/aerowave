@@ -433,10 +433,194 @@ checks. These short screen-wake checks do not establish audible output,
 credential-locked behavior, overnight delivery or behavior on other Android
 versions and manufacturers.
 
+## Cold alarm foreground startup — 2026-09-29
+
+The POCO X3 Pro retained evidence of a missed 07:10 alarm (UTC−03): Android
+started its preparation receiver at 07:09:01.319, delivered FIRE at
+07:10:01.299, and reported `ForegroundServiceDidNotStartInTimeException` in
+`AlarmPlaybackService` at 07:10:01.439. The process died at 07:10:01.597.
+`ApplicationExitInfo` independently recorded the app exception. The older
+main/system log buffers were unavailable, so the record cannot distinguish
+CPU suspension during service handoff from delayed initialization. It does
+not establish DND muting or a station outage as the cause of this failure.
+
+The service now posts a silent foreground notification before constructing
+the player or reading saved state. Receiver delivery holds an independent
+partial wake lock until service startup finishes; abandoned holds expire on
+a background thread even if the main thread stalls. Idle cleanup uses the
+latest delivered service start ID and removes foreground status only after
+`stopSelfResult` succeeds, preserving a newer FIRE already accepted by Android
+but not yet delivered to the service.
+
+The full Android JVM suite passed: 169 tests across 30 suites, with no failures,
+errors or skips. Regressions cover silent early foreground startup, overlapping
+wake holds, expiry with the main thread paused, and queued FIRE surviving
+preparation or dismissal cleanup. Version, IPC, vendor and whitespace checks
+also passed.
+
+The final signed ARM64 development build based on 0.15.3 installed with the
+existing signing certificate. The installed APK matched SHA-256
+`D7A6E3FDBB7B39DA4A0760E51A98B4D92C73FB33B4644B079F2BE30C9C9875EC`.
+With DND enabled, battery power simulated, the screen asleep and the app
+process absent, Android was forced into deep idle before the 19:05 radio
+alarm. Maintenance windows occurred during the test. Silent preparation
+started a cold process, acquired its own wake hold and released the startup
+hold in about 124 ms. Its player output remained at zero volume. The alarm
+started at 19:05:00.069, woke the display at .110 and adopted advancing
+44.1 kHz stereo AAC playback.
+
+A scheduled local-folder alarm at 19:08 selected and played an MP3. Native
+Snooze at 19:08:27.896 created a one-minute occurrence. After closing the app
+process and putting the screen back to sleep, that occurrence started a new
+process, rang at 19:09:29.127, woke the display at .145 and advanced MP3
+playback. Native Dismiss at 19:09:48.099 cleared the ring and destroyed the
+service.
+
+On that same final build, an unreachable radio source fell back to the original
+local backup folder at 19:13. The display woke at 19:13:00.082; the backup MP3
+was ready at .952, advanced normally and reached its configured volume of 1.0
+at 19:13:06.713. Native Dismiss cleared the ring and stopped the service.
+With both the radio and a test backup location unavailable, the 19:17 alarm
+woke the screen at 19:17:00.109 and selected the system tone at .525.
+AudioTrack reached the configured volume of 0.8 at 19:17:05.705. Automatic
+dismissal at 19:18:00.052 cleared ringing and snoozes; the service was destroyed
+at .214. No new app crash was recorded during these tests.
+
+Readback after cleanup matched the original app data and regular audio
+preferences. Native alarm data matched except for its revision counter; no
+test alarm or snooze remained. DND, charging detection and temporary idle
+overrides were restored to their initial values. There was no active alarm
+service, alarm notification or CPU wake lock at the final check.
+
+The tester confirmed screen wake and audible sound for the original build's
+18:43 baseline. Later tests were unattended by a person: decoded audio,
+advancing position and volume commands do not establish audible output from
+the final build. Simulated battery power and forced idle do not reproduce a
+physically unplugged night, credential-locked reboot or Bluetooth output.
+
+## Alarm controls and persistent diagnostics — 2026-09-30
+
+The POCO X3 Pro passed the new volume-to-snooze path through the native alarm
+screen. With DND enabled, the screen asleep and the app process absent, silent
+preparation started at 18:46:01 and the scheduled alarm claimed at 18:47:00
+(UTC−03). Radio Caprice decoded AAC and briefly advanced, then stalled; local
+backup music recovered playback. ADB-injected Volume Up and Volume Down each
+committed a one-minute snooze, and both snooze deliveries woke the screen.
+The system speaker volume remained unchanged. Separate immediate tests reached
+local backup and system-tone fallbacks and stopped without creating snoozes.
+
+The final signed development APK has SHA-256
+`1A2E814AE04E9C8BF0C04B2F37EA173354A58EAB2AF5D1DE2FB650E69BFBD494`.
+The scheduled checks used its preceding candidate; the only subsequent source
+change corrected the diagnostic source-kind label on early fallback. On the
+final APK, a real accelerometer shake dismissed an immediate backup-music test
+at 19:03:36.577, with no ringing or snooze left pending. The tester confirmed
+audible sound and that shaking stopped it. Physical shake during a cold,
+locked-screen scheduled ring was not separately repeated.
+
+Export cancellation and retry worked through the document picker. A final
+export contained 314 valid JSONL records across three process sessions,
+including the physical shake, with no dropped records, write failures or
+partial-data warning. Targeted checks found no cleartext source URLs, folder
+paths, track names or original alarm/station identifiers. The Android JVM
+suite passed 205 tests across 33 suites; 400 frontend tests and 212 core plus
+two Rust integration tests passed. Version, IPC, vendor and whitespace checks
+also passed.
+
+Cleanup preserved the original alarm, stations, backup folder and next OS
+alarm/preparation timers. Application JSON and audio preferences matched their
+original hashes, DND was restored, and no ring, snooze, alarm service or wake
+hold remained. These short checks do not qualify unattended overnight delivery,
+credential-locked reboot, Bluetooth output or an optimized release build.
+
+## Radio alarm fallback audit and automatic fade — 2026-10-01
+
+The POCO X3 Pro's existing 0.15.3 development build passed 11 controlled source
+and recovery scenarios. A cold scheduled Radio Caprice alarm decoded advancing
+AAC and woke its native screen with DND enabled. Missing station metadata,
+HTTP failure, a connection deadline and a rejected private destination selected
+the configured local backup. Absent, inaccessible, empty and corrupt backup
+cases reached the default system alarm tone. A separate cold tone alarm woke
+the screen. Native Snooze, cold redelivery of the held backup track and native
+Dismiss also passed.
+
+For a real ongoing-stall check, Wi-Fi and mobile data were briefly disabled
+after the station began advancing. Its buffered audio exhausted; the watchdog
+selected a local MP3, which continued advancing after connectivity was restored.
+The retained morning occurrence separately established successful silent
+preparation and adoption. Android deferred preparation for the controlled cold
+radio check, so that check establishes the independent direct startup path.
+
+The automatic timeout previously stopped audio abruptly. The updated signed
+ARM64 development APK, still version 0.15.3 / code 15003, has SHA-256
+`EE6CB97EF2439F34C107BD0784CC8D42BF1559C4E823B231FAB729643131C229`.
+Replacement installation preserved app data, and the installed APK readback
+matched that hash. On this update, radio, configured backup music and the
+default system tone each declined monotonically from their current gain to
+zero over approximately six seconds before automatic completion. Radio
+automatic snooze was committed after the fade and redelivered one minute later.
+
+On a separate cold scheduled backup ring, native Snooze was pressed 2.56 seconds
+into the automatic fade. It overrode the automatic action and committed in
+45 ms. The manual snooze remained pending after the old fade deadline, returned
+with the screen off and app process absent, and showed the native controls.
+Native Dismiss then committed in 38 ms with no fade or remaining snooze.
+
+The completion transaction now preserves playback until the action is saved
+and any snooze is successfully armed. Fault-injection tests verify that failure
+restores sound and leaves the controls retryable. The full Android JVM suite
+passed 222 tests across 35 suites, including 17 new completion tests for manual
+override, focus changes, fallback, stale callbacks and persistence/arming
+failure. All 400 frontend tests passed, as did version, IPC, vendor, whitespace,
+signature, ABI and packaged startup checks. The build source manifest and
+installed APK hash were retained separately from the earlier baseline's results.
+
+At the end of this development-build audit, four deterministic defects remained:
+claiming a snooze could remove a re-enabled one-shot's future regular occurrence;
+rebuilding an expired regular one-shot could rearm it for another day; an edit
+during the catch-up window could retain the old due time; and a system tone that
+accepted playback but never started or later stopped did not reach the alternate
+notification tone. The alternate worked for a synchronous opening/playback
+exception. These were reproduced state/provider-fixture failures, not faults
+observed during the successful phone fallback scenarios.
+
+The two isolated empty/corrupt folder fixtures and their exact read grants were
+retained; existing backup music was untouched. Default system sound settings
+were preserved. Volume commands and advancing playback do not establish
+subjective fade smoothness, Bluetooth routing, overnight/OEM deep-idle
+reliability, credential-locked reboot or optimized-release qualification.
+
+## Version 0.16.1 audit fixes — 2026-10-01
+
+The four remaining deterministic failures above are corrected. A genuine snooze
+preserves the independent regular schedule, including a re-enabled one-shot.
+Rebuilding consumes an expired regular one-shot. Saving a time or repeat-day
+edit invalidates the previous calendar occurrence and deferred calendar retry;
+genuine snoozes survive. Source and label edits preserve catch-up delivery.
+A pending deferred calendar occurrence also prevents a duplicate regular arm
+after a backward clock or time-zone change.
+
+System-tone recovery now consumes a bounded, occurrence-specific sequence of
+alarm and notification candidates. It covers opening errors, silent startup,
+later stops and volume failures, using Ringtone on Android 9+ and Media3 on
+Android 8. Old watchdog callbacks cannot affect a replacement output or alarm.
+Changing candidates or regaining audio focus cannot raise an automatic fade's
+volume, including after it has reached zero.
+
+The combined Android JVM suite passed 270 tests across 39 suites with no
+failures, errors or skips. It includes 26 new calendar transition/scheduler
+checks, 28 modern and legacy tone tests, and all 17 completion tests. Host
+validation passed 437 frontend tests, 34 repository-check tests, 234 Rust tests
+and a workspace compile check. These fault-injection results establish the
+state and recovery logic; they do not reproduce a physical Android 8 device or
+a defective system tone provider. Final package and connected-phone results
+are recorded in the [0.16.1 release notes](releases/0.16.1.md) and the published
+release's validation record.
+
 ## Qualification still open
 
-The Android scope is not complete or release-qualified. The remaining gates
-include:
+Short scheduled-alarm and package checks do not close the remaining
+long-duration qualification gates:
 
 - overnight playback and alarm delivery under the target phone's battery
   policy;

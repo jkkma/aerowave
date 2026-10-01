@@ -23,6 +23,7 @@ Allows Aerowave to control its Android background radio player.
 - `allow-dismiss-alarm`
 - `allow-test-alarm`
 - `allow-open-alarm-settings`
+- `allow-export-alarm-logs`
 - `allow-pick-folder`
 - `allow-folder-info`
 - `allow-random-track`
@@ -86,6 +87,32 @@ Enables the dismiss_alarm command without any pre-configured scope.
 <td>
 
 Denies the dismiss_alarm command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:allow-export-alarm-logs`
+
+</td>
+<td>
+
+Enables the export_alarm_logs command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`android-audio:deny-export-alarm-logs`
+
+</td>
+<td>
+
+Denies the export_alarm_logs command without any pre-configured scope.
 
 </td>
 </tr>

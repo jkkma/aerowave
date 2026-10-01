@@ -47,6 +47,29 @@ internal object AlarmStateTransitions {
       })
     }
 
+  /** An edit replaces the calendar arm, while a genuine snooze still belongs to its earlier ring. */
+  fun syncSchedules(state: PersistedAlarmState, incoming: List<NativeAlarm>): PersistedAlarmState {
+    val alarms = syncSkipDates(state.alarms, incoming)
+    val previous = state.alarms.associateBy { it.id }
+    val unchanged = alarms.mapNotNullTo(mutableSetOf()) { alarm ->
+      val before = previous[alarm.id]
+      if (alarm.enabled && before != null && before.enabled &&
+        before.hour == alarm.hour && before.minute == alarm.minute &&
+        before.days.toSet() == alarm.days.toSet()
+      ) alarm.id else null
+    }
+    val cancelled = cancelledAlarmIds(state.alarms, alarms)
+    val alarmIds = alarms.mapTo(mutableSetOf()) { it.id }
+    return state.copy(
+      alarms = alarms,
+      scheduled = state.scheduled.filterKeys { it in unchanged },
+      snoozes = state.snoozes.filter { (id, occurrence) ->
+        id in alarmIds && id !in cancelled &&
+          (!occurrence.deferredFromScheduled || id in unchanged)
+      },
+    )
+  }
+
   fun skippedAt(alarm: NativeAlarm, nowMs: Long, zone: ZoneId = ZoneId.systemDefault()): Long? {
     if (!alarm.enabled || alarm.days.isEmpty()) return null
     val date = alarm.skipDate?.let(LocalDate::parse) ?: return null
@@ -163,13 +186,37 @@ internal object AlarmStateTransitions {
     }
   }
 
-  fun consumeExpiredDeferredOneShots(
+  fun rebuildSchedules(
+    state: PersistedAlarmState,
+    nowMs: Long,
+    nowElapsedMs: Long,
+    bootCount: Int?,
+    zone: ZoneId = ZoneId.systemDefault(),
+  ): PersistedAlarmState {
+    val snoozes = rebuildSnoozes(state.alarms, state.snoozes, nowMs, nowElapsedMs, bootCount)
+    val alarms = consumeExpiredOneShots(state.alarms, state.scheduled, state.snoozes, snoozes, nowMs)
+    val scheduled = alarms.asSequence()
+      // A deferred clock is the unconsumed calendar occurrence. Recomputing
+      // it during a backward time/zone change could queue that occurrence twice.
+      .filter { it.enabled && snoozes[it.id]?.deferredFromScheduled != true }
+      .mapNotNull { alarm ->
+        nextScheduled(alarm, state.scheduled[alarm.id], nowMs, zone)?.let { alarm.id to it }
+      }.toMap()
+    return state.copy(alarms = alarms, scheduled = scheduled, snoozes = snoozes)
+  }
+
+  private fun consumeExpiredOneShots(
     alarms: List<NativeAlarm>,
-    before: Map<String, ScheduledOccurrence>,
-    kept: Map<String, ScheduledOccurrence>,
+    scheduled: Map<String, ScheduledOccurrence>,
+    beforeSnoozes: Map<String, ScheduledOccurrence>,
+    keptSnoozes: Map<String, ScheduledOccurrence>,
+    nowMs: Long,
   ): List<NativeAlarm> {
-    val expired = before.filter { (id, occurrence) ->
-      occurrence.deferredFromScheduled && id !in kept
+    val expired = scheduled.filter { (id, occurrence) ->
+      keptSnoozes[id]?.deferredFromScheduled != true &&
+        occurrence.atMs <= nowMs && !AlarmSchedule.isDeliverable(occurrence.atMs, nowMs)
+    }.keys + beforeSnoozes.filter { (id, occurrence) ->
+      occurrence.deferredFromScheduled && id !in keptSnoozes
     }.keys
     return alarms.map { alarm ->
       if (alarm.id in expired && alarm.days.isEmpty()) alarm.copy(enabled = false) else alarm
@@ -182,6 +229,24 @@ internal object AlarmStateTransitions {
   fun claimedAlarm(alarm: NativeAlarm, occurrence: ScheduledOccurrence): NativeAlarm =
     if (alarm.days.isEmpty() && isDeferredScheduled(occurrence))
       alarm.copy(enabled = false) else alarm
+
+  fun regularAfterDelivery(
+    state: PersistedAlarmState,
+    alarm: NativeAlarm,
+    occurrence: ScheduledOccurrence,
+    nowMs: Long,
+    zone: ZoneId = ZoneId.systemDefault(),
+  ): Map<String, ScheduledOccurrence> {
+    // Re-enabling a one-shot while its earlier ring is snoozed gives it an
+    // independent future arm. Returning from that snooze must not consume it.
+    if (!isDeferredScheduled(occurrence)) return state.scheduled
+    return state.scheduled.toMutableMap().apply {
+      remove(alarm.id)
+      if (alarm.enabled && alarm.days.isNotEmpty()) {
+        nextScheduled(alarm, null, nowMs, zone)?.let { put(alarm.id, it) }
+      }
+    }
+  }
 
   fun recoverableRing(state: PersistedAlarmState, nowMs: Long): RingingRecord? =
     state.ringing?.takeIf {
@@ -274,24 +339,14 @@ internal object AlarmStateTransitions {
     nowMs: Long,
     zone: ZoneId = ZoneId.systemDefault(),
   ): PersistedAlarmState {
-    val scheduled = state.scheduled.toMutableMap()
-    val snoozes = state.snoozes.toMutableMap()
-    if (expected.snoozed) {
-      snoozes.remove(alarm.id)
-    } else {
-      scheduled.remove(alarm.id)
-      if (alarm.enabled && alarm.days.isNotEmpty()) {
-        nextScheduled(alarm, null, nowMs, zone)?.let { scheduled[alarm.id] = it }
-      }
-    }
     val consumed = claimedAlarm(alarm, expected)
     return state.copy(
       revision = state.revision + 1,
       alarms = if (consumed != alarm) state.alarms.map {
         if (it.id == alarm.id) consumed else it
       } else state.alarms,
-      scheduled = scheduled,
-      snoozes = snoozes,
+      scheduled = regularAfterDelivery(state, consumed, expected, nowMs, zone),
+      snoozes = if (expected.snoozed) state.snoozes - alarm.id else state.snoozes,
       error = "A stale alarm delivery was ignored",
     )
   }

@@ -11,11 +11,11 @@ use desktop::AndroidAudio;
 use mobile::AndroidAudio;
 
 pub use models::{
-    AlarmDefinition, AlarmIdPayload, AlarmSettingsPayload, AlarmSource, AlarmState, AlarmStation,
-    ArtworkPayload, FolderInfo, FolderPathPayload, MetadataEnabledPayload, PlayPayload,
-    PlaybackState, RandomTrackPayload, SaveBackupFilePayload, SetPlayerFullscreenPayload,
-    SkipAlarmPayload, SleepTimer, SleepTimerPayload, SleepTimerSnapshot, SyncAlarmsPayload,
-    TestAlarmPayload, TrackPick, VolumePayload,
+    AlarmDefinition, AlarmIdPayload, AlarmLogExport, AlarmSettingsPayload, AlarmSource, AlarmState,
+    AlarmStation, ArtworkPayload, FolderInfo, FolderPathPayload, MetadataEnabledPayload,
+    PlayPayload, PlaybackState, RandomTrackPayload, SaveBackupFilePayload,
+    SetPlayerFullscreenPayload, SkipAlarmPayload, SleepTimer, SleepTimerPayload,
+    SleepTimerSnapshot, SyncAlarmsPayload, TestAlarmPayload, TrackPick, VolumePayload,
 };
 
 use tauri::{
@@ -61,7 +61,8 @@ fn set_player_fullscreen<R: Runtime>(
     app: AppHandle<R>,
     payload: SetPlayerFullscreenPayload,
 ) -> Result<(), String> {
-    app.state::<AndroidAudio<R>>().set_player_fullscreen(payload)
+    app.state::<AndroidAudio<R>>()
+        .set_player_fullscreen(payload)
 }
 
 #[tauri::command]
@@ -183,6 +184,11 @@ fn open_alarm_settings<R: Runtime>(
     app.state::<AndroidAudio<R>>().open_alarm_settings(payload)
 }
 #[tauri::command]
+fn export_alarm_logs<R: Runtime>(app: AppHandle<R>) -> Result<Option<AlarmLogExport>, String> {
+    app.state::<AndroidAudio<R>>().export_alarm_logs()
+}
+
+#[tauri::command]
 fn pick_folder<R: Runtime>(app: AppHandle<R>) -> Result<Option<FolderInfo>, String> {
     app.state::<AndroidAudio<R>>().pick_folder()
 }
@@ -248,6 +254,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             dismiss_alarm,
             test_alarm,
             open_alarm_settings,
+            export_alarm_logs,
             pick_folder,
             folder_info,
             random_track,

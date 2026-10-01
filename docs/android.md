@@ -152,9 +152,32 @@ opened again. OEM battery controls require testing on each phone.
 Ringing alarms use a native screen with Dismiss and Snooze controls. It requests
 screen wake, appears over the lock screen, and keeps the display on while visible.
 Dismiss or snooze closes that screen without unlocking the phone. Either volume
-button dismisses while the alarm screen or Aerowave is in front. A firm shake
-snoozes a scheduled alarm; a test alarm cannot be snoozed. Motion sensing runs
-only during a snoozable ring.
+button snoozes while the alarm screen or Aerowave is in front. A firm shake
+dismisses the ringing alarm. A test alarm stops on a shake or volume press
+without scheduling a real snooze. Motion sensing runs only while an alarm rings,
+including a test ring; silent preparation does not listen for motion.
+
+Automatic stopping or auto-snooze uses a six-second fade, matching the desktop
+give-up behavior. Manual Dismiss and Snooze respond immediately, including
+when an automatic fade is already in progress.
+The fade applies to radio, backup music and the system tone, starting from the
+current volume even when fade-in is unfinished. The screen closes after the
+action completes. If saving the action or scheduling the snooze fails, the
+alarm resumes and its controls remain available for another attempt.
+
+**Settings > Alarm diagnostics > Export alarm logs** saves recent automatic
+alarm diagnostics through Android's document picker. Logs are kept in a bounded
+history in the app's private storage, survive process restarts, and cover
+scheduling, preparation, ringing, playback recovery, controls and device state.
+Exporting takes a snapshot and preserves the live history. The `.jsonl` file
+includes export status and reports unavailable entries; cancellation and a
+failed save can be retried. Raw audio, full source URLs and folder paths are
+excluded. Alarm times, app/device state and correlated occurrence identifiers
+remain useful diagnostic data, so review the saved file before sharing it.
+An export that stalls times out after 30 seconds and releases the UI. Android
+document providers can ignore interruption; another export is accepted only
+after the previous native operation returns. Exports do not queue behind a
+stalled provider or create replacement writer threads.
 
 Shake detection follows [LineageOS DeskClock's motion-strength filter](https://github.com/LineageOS/android_packages_apps_DeskClock/blob/f8d2258e6a673c1b576f009eec98781a5956ffdb/src/com/android/deskclock/alarms/AlarmService.java#L333-L381):
 it removes gravity from raw accelerometer readings and combines motion across
@@ -187,6 +210,14 @@ the phone's default alarm sound. This Android fallback is shown in Settings;
 desktop fallback behavior is unchanged. It does not establish compatibility
 with every station supported by the desktop relay.
 
+Cold alarm starts acquire a bounded CPU wake hold before the receiver returns.
+The service posts a silent foreground notification before constructing its
+player, then releases the startup hold after taking its preparation or ringing
+hold. This avoids relying on AlarmManager's broadcast wake hold after delivery,
+and satisfies the foreground-service deadline before player initialization.
+Stale starts remove their temporary notification without stopping a newer
+queued alarm. Preparation remains silent and does not open the alarm screen.
+
 On Android 9 and later, the system tone uses Android's
 [Ringtone API](https://developer.android.com/reference/android/media/Ringtone).
 Some phones allow playing a default ringtone through that API while refusing
@@ -194,6 +225,16 @@ direct file access from Media3. The tone requests the same media audio route,
 per-alarm volume and fade, and stops on snooze or dismissal. Android 8 retains
 the Media3 tone path because per-instance ringtone volume and looping require
 Android 9.
+
+If the default alarm tone cannot start or stops unexpectedly, recovery advances
+to the default notification tone after a bounded retry. Recovery preserves an
+automatic fade already in progress and cannot raise its output again.
+
+A snoozed ring and the next regular alarm have independent schedules. Returning
+from a snooze preserves a one-shot alarm that was re-enabled in the meantime.
+An unhandled one-shot more than 15 minutes late is consumed instead of moving
+to another day. Editing its time or repeat days replaces the old scheduled
+occurrence; changing its label or source preserves the existing catch-up window.
 
 Native playback handles the same-format chained Opus broadcast used by
 ChillSynth: a song change starts a new Ogg link, whose headers must not be sent

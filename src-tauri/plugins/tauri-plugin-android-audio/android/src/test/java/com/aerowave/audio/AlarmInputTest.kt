@@ -6,6 +6,29 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AlarmInputTest {
+  @Test fun volumeButtonsSnoozeRealRingsAndStopTests() {
+    assertTrue(alarmVolumeButtonSnoozes("scheduled"))
+    assertTrue(alarmVolumeButtonSnoozes("snooze"))
+    assertFalse(alarmVolumeButtonSnoozes("test"))
+  }
+
+  @Test fun eitherVolumeKeyActsOnceAfterACompletedPress() {
+    for (key in listOf(24, 25)) {
+      val gate = AlarmInputGate()
+      gate.bind("ring")
+      assertFalse(gate.volumeUp(key, "ring"))
+      assertTrue(gate.volumeDown(key, 1, "ring"))
+      assertFalse(gate.volumeUp(key, "ring"))
+      assertTrue(gate.volumeDown(key, 0, "ring"))
+      repeat(3) { assertTrue(gate.volumeDown(key, it + 1, "ring")) }
+      assertTrue(gate.volumeUp(key, "ring"))
+      assertFalse(gate.volumeUp(key, "ring"))
+      assertTrue(gate.beginAction("ring"))
+      assertFalse(gate.volumeDown(key, 0, "ring"))
+      assertFalse(gate.beginAction("ring"))
+    }
+  }
+
   @Test fun volumeReleaseNeedsFreshPressOnTheSameOccurrence() {
     val gate = AlarmInputGate()
     gate.bind("first")
@@ -76,7 +99,7 @@ class AlarmInputTest {
     assertTrue(detector.sample(0f, 0f, 0f))
   }
 
-  @Test fun ordinaryMotionAndOneJoltDoNotSnooze() {
+  @Test fun ordinaryMotionAndOneJoltDoNotDismiss() {
     val detector = AlarmShakeDetector()
     repeat(28) { index ->
       val x = if (index == 14) 40f else 4f

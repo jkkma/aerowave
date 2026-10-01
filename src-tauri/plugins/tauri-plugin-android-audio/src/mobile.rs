@@ -4,7 +4,7 @@ use tauri::{
 };
 
 use crate::models::{
-    AlarmIdPayload, AlarmSettingsPayload, AlarmState, ArtworkPayload, FolderInfo,
+    AlarmIdPayload, AlarmLogExport, AlarmSettingsPayload, AlarmState, ArtworkPayload, FolderInfo,
     FolderPathPayload, MetadataEnabledPayload, PlayPayload, PlaybackState, RandomTrackPayload,
     SaveBackupFilePayload, SetPlayerFullscreenPayload, SkipAlarmPayload, SleepTimerPayload,
     SleepTimerSnapshot, StreamTitlePayload, SyncAlarmsPayload, TestAlarmPayload, TrackPick,
@@ -200,6 +200,12 @@ impl<R: Runtime> AndroidAudio<R> {
     pub fn pick_folder(&self) -> Result<Option<FolderInfo>, String> {
         self.0
             .run_mobile_plugin("pickFolder", ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn export_alarm_logs(&self) -> Result<Option<AlarmLogExport>, String> {
+        self.0
+            .run_mobile_plugin("exportAlarmLogs", ())
             .map_err(|e| e.to_string())
     }
 

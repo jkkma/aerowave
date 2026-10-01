@@ -1,5 +1,8 @@
 package com.aerowave.audio
 
+/** A test ring stops on a volume press without creating a real snooze. */
+fun alarmVolumeButtonSnoozes(trigger: String): Boolean = trigger != "test"
+
 /** A release belongs to the same press and ring that received its first DOWN. */
 class AlarmInputGate {
   private var occurrenceId: String? = null

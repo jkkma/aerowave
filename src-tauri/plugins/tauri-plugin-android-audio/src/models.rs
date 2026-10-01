@@ -2,6 +2,19 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AlarmLogExport {
+    pub name: String,
+    pub mime_type: String,
+    pub bytes: u64,
+    pub partial: bool,
+    pub dropped_records: u64,
+    pub write_failures: u64,
+    pub history_truncated: bool,
+    pub recovered_incomplete_data: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlayPayload {
     pub url: String,
     pub source_url: String,

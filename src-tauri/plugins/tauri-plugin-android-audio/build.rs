@@ -19,6 +19,7 @@ const COMMANDS: &[&str] = &[
     "dismiss_alarm",
     "test_alarm",
     "open_alarm_settings",
+    "export_alarm_logs",
     "pick_folder",
     "folder_info",
     "random_track",
