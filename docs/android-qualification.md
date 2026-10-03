@@ -617,6 +617,33 @@ a defective system tone provider. Final package and connected-phone results
 are recorded in the [0.16.1 release notes](releases/0.16.1.md) and the published
 release's validation record.
 
+## Android alarm adversarial follow-up — 2026-10-03
+
+The installed 0.16.1 build reproduced three delivery/state failures on the
+Android 13 phone: opening after a force-stop left enabled alarms without OS
+clocks, an editor left open across one-shot completion could rearm it, and an
+abandoned test ring deferred later scheduled alarms repeatedly.
+
+A 0.16.2 debug review build used a separate application ID and private storage,
+leaving the installed release and its setup intact. Connected-device checks
+then established:
+
+- Force-stop removed the review app's AlarmClock. Opening the app restored the
+  same due time from native storage; the occurrence was claimed 68 ms after
+  its requested time and selected the system-tone fallback.
+- An editor opened before a second one-shot fired became stale when native
+  completion disabled its arm. Submitting the draft left the definition off,
+  with no next occurrence. That ring was claimed 19 ms after its requested time.
+- A test ring with no automatic stop was killed using Android's stop-app
+  command. Its ring record remained on disk with no service. Without reopening
+  the UI, the next scheduled alarm claimed its occurrence 1.26 seconds after
+  its target, replaced the orphan, and started its foreground service and tone.
+
+These are instrumented checks of scheduling and native state. They do not
+establish physical audibility, locked-screen presentation, optimized APK
+startup or compatibility of a replacement signing certificate. Regression
+totals and final package checks are recorded in the published release notes.
+
 ## Qualification still open
 
 Short scheduled-alarm and package checks do not close the remaining

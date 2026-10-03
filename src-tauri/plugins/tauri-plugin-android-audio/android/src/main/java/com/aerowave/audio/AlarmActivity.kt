@@ -36,6 +36,7 @@ class AlarmActivity : Activity() {
   private lateinit var hintView: TextView
   private lateinit var dismissButton: Button
   private lateinit var snoozeButton: Button
+  private lateinit var resumeButton: Button
   private var boundOccurrence: String? = null
   private var visible = false
   private var actionPending = false
@@ -165,6 +166,8 @@ class AlarmActivity : Activity() {
     snoozeButton.text = "Snooze ${ring.alarm.snoozeMins} min"
     dismissButton.isEnabled = !actionPending
     snoozeButton.isEnabled = !actionPending
+    resumeButton.visibility = if (AlarmPlaybackService.canResumeSound(occurrence)) View.VISIBLE else View.GONE
+    resumeButton.isEnabled = !actionPending
     val volumeHint = if (ring.trigger == "test") {
       "Press a volume button to stop the test"
     } else {
@@ -297,6 +300,15 @@ class AlarmActivity : Activity() {
       setOnClickListener { boundOccurrence?.let { performAction(it, snooze = true) } }
     }
     add(snoozeButton, 24)
+    resumeButton = Button(this).apply {
+      text = "Resume sound"
+      contentDescription = "Retry interrupted alarm sound"
+      minHeight = dp(64)
+      setOnClickListener {
+        boundOccurrence?.let { AlarmPlaybackService.resumeSoundIfMatching(this@AlarmActivity, it) }
+      }
+    }
+    add(resumeButton, 24)
     hintView = TextView(this).apply {
       setTextColor(SECONDARY)
       setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)

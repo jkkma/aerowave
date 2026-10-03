@@ -388,7 +388,8 @@ test("deleting the last Android alarm focuses the empty-state Create action", as
     if (command === "plugin:android-audio|get_alarm_state") return snapshot();
   });
   h.el("#pane-alarms").classList.add("on");
-  h.evaluate(`state.alarms = ${JSON.stringify(alarms)}; renderAlarms()`);
+  h.context.alarmFixture = snapshot();
+  h.evaluate("applyAndroidAlarmState(alarmFixture); renderAlarms()");
   const remove = h.el("#alarm-list").querySelector(".alarm-delete");
   remove.focus();
   await remove.dispatch("click");

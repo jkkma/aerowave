@@ -69,7 +69,7 @@ def main(argv=None):
         ("Strict versions", ["tools/checks/check_version.py", "--strict"]),
         ("IPC seam", ["tools/checks/check_seam.py"]),
         ("Checker regressions", ["-m", "unittest", "discover", "-s",
-                                 "tools/checks/tests", "-p", "test_checks.py"]),
+                                 "tools/checks/tests", "-p", "test_*.py"]),
     ]
     failed = []
     for label, command in commands:

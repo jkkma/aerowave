@@ -109,26 +109,35 @@ internal object AlarmStreamResolver {
   private const val MAX_CONNECT_OR_READ_MS = 5_000L
 
   fun resolve(url: String, userAgent: String): ResolvedAlarmStream {
-    val initial = url.toHttpUrlOrNull()
-      ?: throw AlarmStreamResolutionException("The station URL is invalid")
     val baseClient = NetworkGuard.client(false, userAgent).newBuilder()
       // Count and validate redirects in the same budget as playlist hops.
       .followRedirects(false)
       .followSslRedirects(false)
       .build()
-    return Session(baseClient, System.nanoTime()).resolve(initial, 0)
+    return resolveWithClient(url, baseClient)
+  }
+
+  internal fun resolveWithClient(
+    url: String,
+    client: okhttp3.OkHttpClient,
+    nanoTime: () -> Long = System::nanoTime,
+  ): ResolvedAlarmStream {
+    val initial = url.toHttpUrlOrNull()
+      ?: throw AlarmStreamResolutionException("The station URL is invalid")
+    return Session(client, nanoTime(), nanoTime).resolve(initial, 0)
   }
 
   private class Session(
     private val baseClient: okhttp3.OkHttpClient,
     private val startedAtNanos: Long,
+    private val nanoTime: () -> Long,
   ) {
     private val visited = mutableSetOf<String>()
     private var requests = 0
 
     fun resolve(url: HttpUrl, hop: Int): ResolvedAlarmStream {
       if (hop > MAX_HOPS) {
-        throw AlarmStreamResolutionException("The station playlist contains too many redirects")
+        throw CandidateFailure("The station playlist contains too many redirects")
       }
       if (++requests > MAX_REQUESTS) {
         throw AlarmStreamResolutionException("The station playlist tried too many stream addresses")
@@ -182,7 +191,14 @@ internal object AlarmStreamResolver {
           return ResolvedAlarmStream(finalUrl.toString(), isHls = false)
         }
 
-        val body = readPlaylist(it)
+        val body = try {
+          readPlaylist(it)
+        } catch (error: IOException) {
+          if (remainingMsOrZero() == 0L) {
+            throw AlarmStreamResolutionException("Resolving that station took too long", error)
+          }
+          throw CandidateFailure("The station playlist could not be read", error)
+        }
         if (AlarmPlaylistParser.isHls(body)) {
           return ResolvedAlarmStream(finalUrl.toString(), isHls = true)
         }
@@ -204,7 +220,9 @@ internal object AlarmStreamResolver {
             lastFailure = error
           }
         }
-        throw AlarmStreamResolutionException(
+        // An exhausted child playlist is one failed address in its parent's
+        // candidate list. Global request and time limits still escape directly.
+        throw CandidateFailure(
           "The station playlist did not lead to a playable public stream",
           lastFailure,
         )
@@ -213,7 +231,7 @@ internal object AlarmStreamResolver {
 
     private fun followRedirect(response: Response, hop: Int): ResolvedAlarmStream {
       if (hop >= MAX_HOPS) {
-        throw AlarmStreamResolutionException("The station contains too many redirects")
+        throw CandidateFailure("The station contains too many redirects")
       }
       val location = response.header("Location")
         ?: throw CandidateFailure("The station returned a redirect without a destination")
@@ -226,7 +244,7 @@ internal object AlarmStreamResolver {
       val body = response.body ?: throw CandidateFailure("The station playlist was empty")
       val declared = body.contentLength()
       if (declared > MAX_PLAYLIST_BYTES) {
-        throw AlarmStreamResolutionException("The station playlist is larger than 256 KiB")
+        throw CandidateFailure("The station playlist is larger than 256 KiB")
       }
       val output = ByteArrayOutputStream(
         if (declared in 1..MAX_PLAYLIST_BYTES.toLong()) declared.toInt() else 8 * 1024,
@@ -237,13 +255,13 @@ internal object AlarmStreamResolver {
         remainingMs()
         val allowed = MAX_PLAYLIST_BYTES + 1 - output.size()
         if (allowed <= 0) {
-          throw AlarmStreamResolutionException("The station playlist is larger than 256 KiB")
+          throw CandidateFailure("The station playlist is larger than 256 KiB")
         }
         val read = input.read(buffer, 0, minOf(buffer.size, allowed))
         if (read < 0) break
         output.write(buffer, 0, read)
         if (output.size() > MAX_PLAYLIST_BYTES) {
-          throw AlarmStreamResolutionException("The station playlist is larger than 256 KiB")
+          throw CandidateFailure("The station playlist is larger than 256 KiB")
         }
       }
       return output.toString(Charsets.UTF_8.name()).removePrefix("\uFEFF")
@@ -256,7 +274,7 @@ internal object AlarmStreamResolver {
     }
 
     private fun remainingMsOrZero(): Long {
-      val elapsedNanos = (System.nanoTime() - startedAtNanos).coerceAtLeast(0)
+      val elapsedNanos = (nanoTime() - startedAtNanos).coerceAtLeast(0)
       return (MAX_TOTAL_DURATION_MS - TimeUnit.NANOSECONDS.toMillis(elapsedNanos)).coerceAtLeast(0)
     }
   }

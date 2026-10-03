@@ -1,0 +1,102 @@
+name: Build Windows release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      verify_scoop:
+        description: Verify installation of the published Scoop package
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    if: ${{ !inputs.verify_scoop }}
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install build tools and dependencies
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --no-self-update
+          npm ci
+      - name: Check frontend, repository and core
+        run: |
+          npm run test:frontend
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run check:repository
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo +stable-x86_64-pc-windows-msvc test --manifest-path src-tauri/Cargo.toml --locked -p aerowave-core
+      - name: Build Windows executable and installer
+        env:
+          STATIC_VCRUNTIME: 'true'
+        run: npm run build -- --ci
+      - name: Package fresh output and validate the portable application
+        run: python -B tools/checks/windows_artifact.py
+      - name: Retain the package, installer and validation receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aerowave-windows-${{ github.sha }}
+          path: |
+            dist/Aerowave-*-win-x64.zip
+            dist/windows-validation.json
+            dist/windows-smoke.log
+            dist/windows-smoke/**
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: ${{ job.status == 'success' && 'error' || 'warn' }}
+          retention-days: 30
+
+  scoop-install:
+    if: ${{ inputs.verify_scoop }}
+    runs-on: windows-2022
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install the published package and check its update status
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:SCOOP = Join-Path $env:RUNNER_TEMP 'aerowave-scoop-check'
+          if (Test-Path $env:SCOOP) { throw 'Refusing to replace an existing Scoop profile' }
+          $scoopSource = Join-Path $env:SCOOP 'apps/scoop/current'
+          git clone https://github.com/ScoopInstaller/Scoop.git $scoopSource
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git -C $scoopSource checkout e6aa3b366bdee8ed138c1e0f7b85192ebdd35d0f
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $scoop = Join-Path $scoopSource 'bin/scoop.ps1'
+          & $scoop bucket add ayylmao https://github.com/jkkma/scoop-ayylmao.git
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & $scoop install ayylmao/aerowave --no-update-scoop
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $app = Join-Path $env:SCOOP 'apps/aerowave/current'
+          $sentinel = Join-Path $env:SCOOP 'persist/aerowave/data/release-check.txt'
+          'Portable data survives the release update.' | Set-Content $sentinel
+          & $scoop config last_update ([DateTime]::Now.ToString('o'))
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & $scoop update aerowave
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $expected = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $installed = (Get-Content (Join-Path $app 'manifest.json') -Raw | ConvertFrom-Json).version
+          if ($installed -ne $expected) { throw "Installed $installed instead of $expected" }
+          $preserved = Get-Content (Join-Path $app 'data/release-check.txt') -Raw
+          if ($preserved.Trim() -ne 'Portable data survives the release update.') { throw 'Portable data was lost' }
+          Write-Host "Verified Scoop installation $installed, current update status and portable data mapping."

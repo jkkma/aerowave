@@ -141,15 +141,17 @@ window.AlarmReadiness = {
           scheduleError || (next ? `${next.label || "Alarm"} · ${when.value ? formatWhen(when.value) : "local time unavailable"}. Delivery and sound are not yet verified.`
             : "No upcoming alarm was reported. Save and enable an alarm to schedule a wake-up."), scheduleError || !next ? "attention" : "unknown");
         const recoveryError = config.error || (config.value ? config.value.loadError : context.configError || "Settings storage unavailable") || storage.value?.error;
+        const androidSetupError = context.android ? context.androidAlarmError || context.androidSourceError || scheduleError : null;
         const pendingStorage = storage.value?.writesBlocked || storage.value?.restartSafe === false || storage.value?.pendingCompletions > 0;
         const storageUnknown = storage.error || !storage.value;
         const saving = context.saving || pendingStorage;
-        row("Saved settings", recoveryError ? "Recovery needed" : saving ? "Save pending" : storageUnknown ? "Durability unknown" : "Readable",
+        row("Saved settings", recoveryError ? "Recovery needed" : androidSetupError ? "Update needed" : saving ? "Save pending" : storageUnknown ? "Durability unknown" : "Readable",
           recoveryError ? `${recoveryError}. Restore a backup or repair settings before changing setup or trusting this check.`
+            : androidSetupError ? `${androidSetupError}. Use Retry alarm setup in Permissions, then check again before relying on these sources.`
             : pendingStorage ? "Alarm changes or completions are not safely stored yet. Keep Aerowave open and use Retry in Settings storage before restarting."
             : context.saving ? "Wait for the current changes to save, then check again."
             : storageUnknown ? "Could not confirm durable alarm storage. Check Settings storage and try again."
-            : "Settings storage reported no load error. This does not verify alarm delivery.", recoveryError || saving || storageUnknown ? "attention" : "checked");
+            : "Settings storage reported no load error. This does not verify alarm delivery.", recoveryError || androidSetupError || saving || storageUnknown ? "attention" : "checked");
         if (context.android) androidRows(native);
         else {
           const power = platform.value;
@@ -161,8 +163,10 @@ window.AlarmReadiness = {
           row("System volume & output", "Check manually", "Check the OS mixer, mute and selected speakers or Bluetooth. Aerowave cannot read desktop system volume or confirm the eventual output.");
         }
         row("Screen-off audible wake", "Not verified", "Permission access and the foreground Test sound button do not verify a scheduled alarm with the screen off. Schedule a near-term alarm on this device and confirm both the screen and sound under your usual overnight conditions.");
-        if (recoveryError || saving) {
-          row("Source & backup", "Not checked", "Recover settings or finish saving, then check again.", "attention");
+        if (recoveryError || androidSetupError || saving) {
+          row("Source & backup", "Not checked", androidSetupError
+            ? "Retry alarm setup in Permissions to confirm saved station and backup changes, then check again."
+            : "Recover settings or finish saving, then check again.", "attention");
         } else {
           if (!alarm) row("Selected source", "No alarm selected", "Choose a saved alarm to inspect its source.", "attention");
           else {

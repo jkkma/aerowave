@@ -499,6 +499,18 @@ If Android settings cannot be read, Settings shows the storage error and startup
 keeps the native alarm store's existing source information. Recover the settings
 or restore a backup before changing setup.
 
+Opening the app reconciles Android's scheduled clocks with its durable alarm
+store, including after a force-stop. Android still suppresses delivery while an
+app remains force-stopped. Failed native reads block alarm edits, and a failed
+source-information sync remains visible until a retry succeeds. An editor opened
+before a one-shot finishes cannot silently turn that completed arm back on.
+
+Alarm source selection has a twelve-second deadline independent of the music
+provider. A blocked provider cannot hold up the fallback tone, and a late reply
+cannot replace a fallback that is already playing. After permanent audio-focus
+loss, the active ring waits for competing music or a call to end before making
+one recovery attempt. The native alarm controls also offer **Resume sound**.
+
 ### Zorin OS / Ubuntu Linux
 
 Download the x64 `.deb` from [Releases](https://github.com/jkkma/aerowave/releases),

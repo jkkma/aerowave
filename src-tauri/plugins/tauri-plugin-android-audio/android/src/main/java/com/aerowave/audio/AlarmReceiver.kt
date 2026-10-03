@@ -23,6 +23,10 @@ class AlarmReceiver : BroadcastReceiver() {
   }
 
   private fun dispatch(context: Context, intent: Intent) {
+    if (intent.action == AlarmServiceStarter.ACTION_RECOVER_START) {
+      intent.getStringExtra("occurrenceId")?.let { AndroidAlarmScheduler.failedStart(context, it) }
+      return
+    }
     if (intent.action == AndroidAlarmScheduler.ACTION_PREPARE) {
       val id = readAlarmId(context, intent) ?: return
       val occurrenceId = readOccurrenceId(context, intent) ?: return
@@ -68,12 +72,17 @@ class AlarmReceiver : BroadcastReceiver() {
         return
       }
       AlarmPlaybackService.markPending(ring.occurrenceId)
-      startService(
-        context,
-        AlarmPlaybackService.intentFor(context, AlarmPlaybackService.ACTION_RING, ring.occurrenceId),
-        ring.occurrenceId,
-        "ring",
-      )
+      try {
+        startService(
+          context,
+          AlarmPlaybackService.intentFor(context, AlarmPlaybackService.ACTION_RING, ring.occurrenceId),
+          ring.occurrenceId,
+          "ring",
+        )
+      } catch (error: RuntimeException) {
+        AndroidAlarmScheduler.failedStart(context, ring.occurrenceId)
+        throw error
+      }
       return
     }
 
@@ -116,6 +125,7 @@ class AlarmReceiver : BroadcastReceiver() {
   private fun actionName(action: String?): String = when (action) {
     AndroidAlarmScheduler.ACTION_FIRE -> "fire"
     AndroidAlarmScheduler.ACTION_PREPARE -> "prepare"
+    AlarmServiceStarter.ACTION_RECOVER_START -> "recover_start"
     Intent.ACTION_BOOT_COMPLETED -> "boot_completed"
     Intent.ACTION_LOCKED_BOOT_COMPLETED -> "locked_boot_completed"
     Intent.ACTION_MY_PACKAGE_REPLACED -> "package_replaced"
