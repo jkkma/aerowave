@@ -82,6 +82,9 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           git -C $scoopSource checkout e6aa3b366bdee8ed138c1e0f7b85192ebdd35d0f
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          foreach ($directory in @('shims', 'buckets')) {
+            New-Item -ItemType Directory -Path (Join-Path $env:SCOOP $directory) | Out-Null
+          }
           $scoop = Join-Path $scoopSource 'bin/scoop.ps1'
           & $scoop bucket add ayylmao https://github.com/jkkma/scoop-ayylmao.git
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -95,7 +98,7 @@ jobs:
           & $scoop update aerowave
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $expected = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          $installed = (Get-Content (Join-Path $app 'manifest.json') -Raw | ConvertFrom-Json).version
+          $installed = (Get-Content (Join-Path $app 'scoop-manifest.json') -Raw | ConvertFrom-Json).version
           if ($installed -ne $expected) { throw "Installed $installed instead of $expected" }
           $preserved = Get-Content (Join-Path $app 'data/release-check.txt') -Raw
           if ($preserved.Trim() -ne 'Portable data survives the release update.') { throw 'Portable data was lost' }
