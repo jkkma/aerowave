@@ -146,6 +146,11 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
   override fun load(webView: WebView) {
     super.load(webView)
     AlarmEventLog.recordSystemContext(activity, "app.plugin_load")
+    try {
+      AndroidAlarmScheduler.reconcileOnStartup(activity)
+    } catch (error: Exception) {
+      AlarmEventLog.record(activity, "plugin.alarm_startup_reconciliation_failed", error = error)
+    }
     // A recreated WebView starts in the ordinary window layout even if the
     // previous page left the main activity in immersive mode.
     activity.runOnUiThread {
@@ -419,9 +424,8 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
       if (incoming != null) {
         require(incoming.map { it.id }.distinct().size == incoming.size) { "Alarm ids must be unique" }
       }
-      var previousAlarms: List<NativeAlarm> = emptyList()
-      val changed = AlarmStateStore.update(activity) { old ->
-        if (incoming == null && !old.initialized && old.error != null) {
+      val transform: (PersistedAlarmState) -> PersistedAlarmState = { old ->
+        if (!old.initialized && old.error != null) {
           throw IllegalStateException(old.error)
         }
         if (args.expectedRevision != null &&
@@ -429,7 +433,6 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
         ) {
           throw IllegalStateException("Alarms changed on Android; refresh and try again")
         }
-        previousAlarms = old.alarms
         val synced = incoming?.let { AlarmStateTransitions.syncSchedules(old, it) } ?: old
         synced.copy(
           initialized = old.initialized || incoming != null,
@@ -439,10 +442,9 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
           error = null,
         )
       }
-      val result = if (incoming != null) {
-        previousAlarms.forEach { AndroidAlarmScheduler.cancelAlarm(activity, it.id) }
-        AndroidAlarmScheduler.rebuild(activity, "sync")
-      } else changed
+      val repairClocks = AlarmStateStore.snapshot(activity).let { it.initialized && it.error != null }
+      val result = if (incoming != null || repairClocks) AndroidAlarmScheduler.rebuild(activity, "sync", transform)
+        else AlarmStateStore.update(activity, transform)
       invoke.resolve(result.toAlarmJsObject(activity))
     } catch (error: Exception) {
       AlarmEventLog.record(activity, "plugin.sync_alarms_failed", error = error)
@@ -488,12 +490,11 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
     try {
       val args = invoke.parseArgs(SkipAlarmArgs::class.java)
       val now = System.currentTimeMillis()
-      val changed = AlarmStateStore.update(activity) { old ->
+      val changed = AndroidAlarmScheduler.rebuild(activity, "skip") { old ->
         AlarmStateTransitions.skipAlarm(
           old, args.id, args.skip, args.expectedAtMs, args.expectedRevision, now,
         )
       }
-      AndroidAlarmScheduler.replaceRegular(activity, args.id)
       invoke.resolve(changed.toAlarmJsObject(activity))
     } catch (error: Exception) {
       AlarmEventLog.record(activity, "plugin.skip_alarm_failed", error = error)
@@ -533,6 +534,7 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
 
   @Command
   fun testAlarm(invoke: Invoke) {
+    var requestedOccurrence: String? = null
     try {
       val alarm = alarmFromJson(JSONObject(invoke.parseArgs(TestAlarmArgs::class.java).alarmJson))
       require(AlarmStateStore.snapshot(activity).ringing == null) { "Another alarm is already ringing" }
@@ -544,17 +546,22 @@ class AndroidAudioPlugin(private val activity: Activity) : Plugin(activity) {
         startedAtMs = now,
         startedElapsedMs = SystemClock.elapsedRealtime(),
       )
-      val state = AlarmStateStore.update(activity) { old ->
+      val state = AlarmStateStore.updateBeforeCommit(activity,
+        beforeCommit = { _, _ -> AlarmPlaybackService.markPending(ring.occurrenceId) },
+        onFailure = { _, _ -> AlarmPlaybackService.clearPending(ring.occurrenceId) },
+      ) { old ->
+        check(old.initialized || old.error == null) { old.error ?: "Saved Android alarms could not be read" }
+        require(old.ringing == null) { "Another alarm is already ringing" }
         old.copy(revision = old.revision + 1, ringing = ring, error = null)
       }
-      AlarmPlaybackService.markPending(ring.occurrenceId)
-      ContextCompat.startForegroundService(
+      requestedOccurrence = ring.occurrenceId
+      AlarmServiceStarter.start(
         activity,
         AlarmPlaybackService.intentFor(activity, AlarmPlaybackService.ACTION_RING, ring.occurrenceId),
       )
       invoke.resolve(state.toAlarmJsObject(activity))
     } catch (error: Exception) {
-      AlarmPlaybackService.clearPending()
+      requestedOccurrence?.let { AndroidAlarmScheduler.failedStart(activity, it) }
       AlarmEventLog.record(activity, "plugin.test_alarm_failed", error = error)
       invoke.reject(error.message ?: "Unable to test the alarm")
     }

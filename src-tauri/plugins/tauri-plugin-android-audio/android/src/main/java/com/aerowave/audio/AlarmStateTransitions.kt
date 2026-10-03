@@ -135,6 +135,7 @@ internal object AlarmStateTransitions {
     zone: ZoneId = ZoneId.systemDefault(),
   ): ScheduledOccurrence? {
     if (!alarm.enabled) return null
+    if (previous?.deferredFromScheduled == true && !isExpired(previous, nowMs)) return previous
     if (previous != null && !isSkipped(alarm, previous.atMs, zone) && previous.atMs <= nowMs &&
       AlarmSchedule.isDeliverable(previous.atMs, nowMs)
     ) return previous
@@ -152,11 +153,15 @@ internal object AlarmStateTransitions {
     nowElapsedMs: Long,
     bootCount: Int?,
   ): ScheduledOccurrence {
-    if (!occurrence.snoozed) return occurrence
+    if (!occurrence.snoozed && !occurrence.deferredFromScheduled) return occurrence
     if (bootCount != null && occurrence.bootCount == bootCount &&
       occurrence.elapsedDeadlineMs != null
     ) {
-      return occurrence.copy(atMs = nowMs + occurrence.elapsedDeadlineMs - nowElapsedMs)
+      return occurrence.copy(
+        atMs = nowMs + occurrence.elapsedDeadlineMs - nowElapsedMs,
+        expiresAtMs = occurrence.expiresElapsedMs?.let { nowMs + it - nowElapsedMs }
+          ?: occurrence.expiresAtMs,
+      )
     }
     // A reboot resets elapsedRealtime. Recover from the durable wall deadline,
     // then anchor the remaining interval to this boot. Old records take this path too.
@@ -164,8 +169,13 @@ internal object AlarmStateTransitions {
     return if (bootCount != null && remaining > 0) occurrence.copy(
       elapsedDeadlineMs = nowElapsedMs + remaining,
       bootCount = bootCount,
-    ) else occurrence.copy(elapsedDeadlineMs = null, bootCount = null)
+      expiresElapsedMs = occurrence.expiresAtMs?.let { nowElapsedMs + it - nowMs },
+    ) else occurrence.copy(elapsedDeadlineMs = null, bootCount = null, expiresElapsedMs = null)
   }
+
+  fun isExpired(occurrence: ScheduledOccurrence, nowMs: Long): Boolean =
+    occurrence.expiresAtMs?.let { nowMs > it } == true ||
+      (occurrence.atMs <= nowMs && !AlarmSchedule.isDeliverable(occurrence.atMs, nowMs))
 
   fun rebuildSnoozes(
     alarms: List<NativeAlarm>,
@@ -179,7 +189,7 @@ internal object AlarmStateTransitions {
       snoozes.forEach { (id, occurrence) ->
         if (id !in alarmIds) return@forEach
         val projected = reprojectSnooze(occurrence, nowMs, nowElapsedMs, bootCount)
-        if (projected.atMs > nowMs || AlarmSchedule.isDeliverable(projected.atMs, nowMs)) {
+        if (!isExpired(projected, nowMs)) {
           put(id, projected)
         }
       }
@@ -194,13 +204,16 @@ internal object AlarmStateTransitions {
     zone: ZoneId = ZoneId.systemDefault(),
   ): PersistedAlarmState {
     val snoozes = rebuildSnoozes(state.alarms, state.snoozes, nowMs, nowElapsedMs, bootCount)
-    val alarms = consumeExpiredOneShots(state.alarms, state.scheduled, state.snoozes, snoozes, nowMs)
+    val projectedScheduled = state.scheduled.mapValues { (_, occurrence) ->
+      reprojectSnooze(occurrence, nowMs, nowElapsedMs, bootCount)
+    }
+    val alarms = consumeExpiredOneShots(state.alarms, projectedScheduled, state.snoozes, snoozes, nowMs)
     val scheduled = alarms.asSequence()
       // A deferred clock is the unconsumed calendar occurrence. Recomputing
       // it during a backward time/zone change could queue that occurrence twice.
       .filter { it.enabled && snoozes[it.id]?.deferredFromScheduled != true }
       .mapNotNull { alarm ->
-        nextScheduled(alarm, state.scheduled[alarm.id], nowMs, zone)?.let { alarm.id to it }
+        nextScheduled(alarm, projectedScheduled[alarm.id], nowMs, zone)?.let { alarm.id to it }
       }.toMap()
     return state.copy(alarms = alarms, scheduled = scheduled, snoozes = snoozes)
   }
@@ -214,7 +227,7 @@ internal object AlarmStateTransitions {
   ): List<NativeAlarm> {
     val expired = scheduled.filter { (id, occurrence) ->
       keptSnoozes[id]?.deferredFromScheduled != true &&
-        occurrence.atMs <= nowMs && !AlarmSchedule.isDeliverable(occurrence.atMs, nowMs)
+        isExpired(occurrence, nowMs)
     }.keys + beforeSnoozes.filter { (id, occurrence) ->
       occurrence.deferredFromScheduled && id !in keptSnoozes
     }.keys
@@ -248,25 +261,36 @@ internal object AlarmStateTransitions {
     }
   }
 
-  fun recoverableRing(state: PersistedAlarmState, nowMs: Long): RingingRecord? =
+  fun recoverableRing(
+    state: PersistedAlarmState, nowMs: Long, nowElapsedMs: Long? = null, bootCount: Int? = null,
+  ): RingingRecord? =
     state.ringing?.takeIf {
+      val expiresAt = ringExpiresAt(it, nowMs, nowElapsedMs, bootCount)
       it.trigger != "test" && state.alarms.any { alarm -> alarm.id == it.alarm.id } &&
-        nowMs >= it.startedAtMs && nowMs - it.startedAtMs <= AlarmSchedule.MISSED_WINDOW_MS
+        nowMs <= expiresAt && (it.deliveryExpiresAtMs != null || nowMs >= it.startedAtMs)
     }
+
+  private fun ringExpiresAt(ring: RingingRecord, nowMs: Long, nowElapsedMs: Long?, bootCount: Int?): Long =
+    if (bootCount != null && ring.deliveryBootCount == bootCount &&
+      nowElapsedMs != null && ring.deliveryExpiresElapsedMs != null
+    ) nowMs + ring.deliveryExpiresElapsedMs - nowElapsedMs
+    else ring.deliveryExpiresAtMs ?: (ring.startedAtMs + AlarmSchedule.MISSED_WINDOW_MS)
 
   fun ringDuringRebuild(
     state: PersistedAlarmState,
     nowMs: Long,
     activeOccurrenceId: String?,
+    nowElapsedMs: Long? = null,
+    bootCount: Int? = null,
   ): RebuildRingDecision {
     val ring = state.ringing
     if (ring != null && ring.occurrenceId == activeOccurrenceId) {
       return RebuildRingDecision(ring, null)
     }
-    val recovered = recoverableRing(state, nowMs)
+    val recovered = recoverableRing(state, nowMs, nowElapsedMs, bootCount)
     return RebuildRingDecision(
       ringing = null,
-      recoveredSnooze = recovered?.let {
+      recoveredSnooze = recovered?.takeIf { it.alarm.id !in state.snoozes }?.let {
         ScheduledOccurrence(
           it.alarm.id,
           AlarmSchedule.occurrenceId(it.alarm.id, nowMs, true),
@@ -279,6 +303,11 @@ internal object AlarmStateTransitions {
           it.sourceKind,
           it.note,
           it.sourceIsHls,
+          expiresAtMs = ringExpiresAt(it, nowMs, nowElapsedMs, bootCount),
+          elapsedDeadlineMs = if (nowElapsedMs != null && bootCount != null) nowElapsedMs else null,
+          bootCount = bootCount,
+          expiresElapsedMs = if (nowElapsedMs != null && bootCount != null)
+            nowElapsedMs + ringExpiresAt(it, nowMs, nowElapsedMs, bootCount) - nowMs else null,
         )
       },
     )
@@ -291,28 +320,25 @@ internal object AlarmStateTransitions {
     nowElapsedMs: Long? = null,
     bootCount: Int? = null,
   ): PersistedAlarmState {
-    val retryAt = maxOf(nowMs + 60_000L, expected.atMs + 60_000L)
-    val retry = ScheduledOccurrence(
-      expected.alarmId,
-      AlarmSchedule.occurrenceId(expected.alarmId, retryAt, true),
-      retryAt,
-      true,
-      expected.autoSnoozesUsed,
-      expected.heldUri,
-      expected.heldTitle,
-      expected.heldFolder,
-      expected.heldKind,
-      expected.heldNote,
-      expected.heldIsHls,
+    val expiresAt = expected.expiresAtMs ?: (expected.atMs + AlarmSchedule.MISSED_WINDOW_MS)
+    val retryAt = minOf(maxOf(nowMs + 60_000L, expected.atMs + 60_000L), expiresAt + 1)
+    // A deferred calendar arm stays in its own lane. A genuine snooze of the
+    // same alarm can be pending independently and must not be overwritten.
+    val retry = expected.copy(
+      occurrenceId = AlarmSchedule.occurrenceId(expected.alarmId, retryAt, expected.snoozed),
+      atMs = retryAt,
       elapsedDeadlineMs = if (nowElapsedMs != null && bootCount != null)
         nowElapsedMs + retryAt - nowMs else null,
       bootCount = bootCount,
       deferredFromScheduled = expected.deferredFromScheduled || !expected.snoozed,
+      expiresAtMs = expiresAt,
+      expiresElapsedMs = expected.expiresElapsedMs ?: if (nowElapsedMs != null && bootCount != null)
+        nowElapsedMs + expiresAt - nowMs else null,
     )
     return state.copy(
       revision = state.revision + 1,
-      scheduled = if (expected.snoozed) state.scheduled else state.scheduled - expected.alarmId,
-      snoozes = state.snoozes + (expected.alarmId to retry),
+      scheduled = if (expected.snoozed) state.scheduled else state.scheduled + (expected.alarmId to retry),
+      snoozes = if (expected.snoozed) state.snoozes + (expected.alarmId to retry) else state.snoozes,
     )
   }
 

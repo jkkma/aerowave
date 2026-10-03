@@ -10,6 +10,8 @@ import android.os.PowerManager
 import java.time.Duration
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -179,5 +181,99 @@ class AlarmServiceStarterTest {
     AlarmServiceStarter.complete(context.starts.single())
     Shadows.shadowOf(Looper.getMainLooper()).idle()
     assertTrue(mainThreadRan)
+  }
+
+  @Test fun completedRingSetupCancelsItsDurableRecoveryGuard() {
+    val context = StartContext()
+    val delivery = scheduledBroadcast(context, System.currentTimeMillis() - 1_000L,
+      AndroidAlarmScheduler.ACTION_FIRE)
+    try {
+      AlarmReceiver().onReceive(context, delivery)
+      val clocks = Shadows.shadowOf(context.getSystemService(AlarmManager::class.java))
+      assertEquals(1, clocks.scheduledAlarms.count {
+        Shadows.shadowOf(it.operation).savedIntent.action == AlarmServiceStarter.ACTION_RECOVER_START
+      })
+      val claimed = AlarmStateStore.snapshot(context).ringing
+      AlarmServiceStarter.complete(context.starts.single())
+      assertTrue(clocks.scheduledAlarms.none {
+        Shadows.shadowOf(it.operation).savedIntent.action == AlarmServiceStarter.ACTION_RECOVER_START
+      })
+      assertEquals(claimed, AlarmStateStore.snapshot(context).ringing)
+    } finally {
+      context.starts.forEach(AlarmServiceStarter::complete)
+      AlarmPlaybackService.clearPending()
+    }
+  }
+
+  @Test fun osGuardRecoversAClaimWhenTheStartingProcessNoLongerOwnsIt() {
+    val context = StartContext()
+    val delivery = scheduledBroadcast(context, System.currentTimeMillis() - 1_000L,
+      AndroidAlarmScheduler.ACTION_FIRE)
+    try {
+      AlarmReceiver().onReceive(context, delivery)
+      val originalRing = AlarmStateStore.snapshot(context).ringing!!
+      val guard = Shadows.shadowOf(context.getSystemService(AlarmManager::class.java))
+        .scheduledAlarms.single {
+          Shadows.shadowOf(it.operation).savedIntent.action == AlarmServiceStarter.ACTION_RECOVER_START
+        }.let { Shadows.shadowOf(it.operation).savedIntent }
+      AlarmPlaybackService.clearPending() // No in-process service owns the durable claim.
+      AlarmReceiver().onReceive(context, guard)
+      val recovered = AlarmStateStore.snapshot(context)
+      assertNull(recovered.ringing)
+      assertNull(AlarmPlaybackService.activeOccurrenceId())
+      val retry = recovered.snoozes.getValue(originalRing.alarm.id)
+      assertEquals(originalRing.deliveryExpiresElapsedMs, retry.expiresElapsedMs)
+      assertTrue(kotlin.math.abs(retry.expiresAtMs!! - originalRing.deliveryExpiresAtMs!!) < 1_000L)
+      assertTrue(retry.atMs > System.currentTimeMillis())
+      assertTrue(Shadows.shadowOf(context.getSystemService(AlarmManager::class.java)).scheduledAlarms.any {
+        it.alarmClockInfo?.triggerTime == retry.atMs
+      })
+    } finally {
+      context.starts.forEach(AlarmServiceStarter::complete)
+      AlarmPlaybackService.clearPending()
+    }
+  }
+
+  @Test fun missingRingStartTimesOutAndClearsAnAbandonedTestClaim() {
+    val context = StartContext()
+    val delivery = scheduledBroadcast(context, System.currentTimeMillis() - 1_000L,
+      AndroidAlarmScheduler.ACTION_FIRE)
+    try {
+      AlarmReceiver().onReceive(context, delivery)
+      val before = AlarmStateStore.snapshot(context)
+      AlarmStateStore.update(context) { before.copy(ringing = before.ringing!!.copy(trigger = "test")) }
+      val wakeLock = ShadowPowerManager.getLatestWakeLock()
+      Shadows.shadowOf(expiryLooper()).idleFor(Duration.ofMillis(AlarmServiceStarter.WAKE_TIMEOUT_MS))
+      assertFalse(wakeLock.isHeld)
+      assertNull(AlarmStateStore.snapshot(context).ringing)
+      assertTrue(AlarmStateStore.snapshot(context).snoozes.isEmpty())
+      assertNull(AlarmPlaybackService.activeOccurrenceId())
+    } finally {
+      context.starts.forEach(AlarmServiceStarter::complete)
+      AlarmPlaybackService.clearPending()
+    }
+  }
+
+  @Test fun staleRecoveryGuardCannotClearANewerPendingRing() {
+    val context = StartContext()
+    val delivery = scheduledBroadcast(context, System.currentTimeMillis() - 1_000L,
+      AndroidAlarmScheduler.ACTION_FIRE)
+    try {
+      AlarmReceiver().onReceive(context, delivery)
+      val guard = Shadows.shadowOf(context.getSystemService(AlarmManager::class.java))
+        .scheduledAlarms.single {
+          Shadows.shadowOf(it.operation).savedIntent.action == AlarmServiceStarter.ACTION_RECOVER_START
+        }.let { Shadows.shadowOf(it.operation).savedIntent }
+      val newer = AlarmStateStore.snapshot(context).ringing!!.copy(occurrenceId = "newer-ring")
+      AlarmPlaybackService.markPending(newer.occurrenceId)
+      AlarmStateStore.update(context) { it.copy(ringing = newer) }
+      AlarmReceiver().onReceive(context, guard)
+      assertEquals(newer, AlarmStateStore.snapshot(context).ringing)
+      assertEquals(newer.occurrenceId, AlarmPlaybackService.activeOccurrenceId())
+      assertNotNull(AlarmStateStore.snapshot(context).ringing)
+    } finally {
+      context.starts.forEach(AlarmServiceStarter::complete)
+      AlarmPlaybackService.clearPending()
+    }
   }
 }

@@ -41,7 +41,9 @@ import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import java.util.concurrent.Executors
+import java.util.concurrent.Executor
+import java.util.concurrent.FutureTask
+import java.util.concurrent.RejectedExecutionException
 
 class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   private val handler = Handler(Looper.getMainLooper())
@@ -69,12 +71,23 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   private var focusPaused = false
   private var focusGranted = false
   private var focusError: String? = null
+  private var focusRecoverable = false
+  private var automaticFocusRecoveryUsed = false
+  private var focusRequestToken = 0L
   private var fallbackStarted = false
   private var userAgent = "Aerowave/0.0.0"
   private lateinit var ringWakeLock: PowerManager.WakeLock
   private lateinit var preparationWakeLock: PowerManager.WakeLock
-  private val folderExecutor = Executors.newSingleThreadExecutor()
-  private val preparationExecutor = Executors.newSingleThreadExecutor()
+  internal var sourceExecutor: Executor = AlarmSourceTasks
+  internal var stationStreamResolver: (String, String) -> ResolvedAlarmStream = AlarmStreamResolver::resolve
+  internal var folderTrackResolver: (Context, String, String?) -> TrackPick = { context, folder, exclude ->
+    DocumentLibrary.randomTrack(context, folder, exclude).also {
+      require(DocumentLibrary.validatePlayable(context, Uri.parse(it.path))) { "The selected track is unavailable" }
+    }
+  }
+  private var sourceResolutionJob: FutureTask<Unit>? = null
+  private var sourceResolutionDeadline: Runnable? = null
+  private var preparationResolutionJob: FutureTask<Unit>? = null
   private var sourceResolutionToken = 0L
   private var preparation: AlarmPreparation.Candidate? = null
   private var preparationUri: String? = null
@@ -451,9 +464,9 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       playPreparedUri(candidate, held, candidate.heldIsHls)
       return
     }
-    preparationExecutor.execute {
+    val job = FutureTask<Unit>({
       val startedElapsed = SystemClock.elapsedRealtime()
-      val result = runCatching { AlarmStreamResolver.resolve(candidate.stationUrl, userAgent) }
+      val result = runCatching { stationStreamResolver(candidate.stationUrl, userAgent) }
       handler.post {
         if (token != preparationResolutionToken || preparation != candidate || ring != null) return@post
         if (!AlarmPreparation.stillCurrent(this, candidate)) {
@@ -473,6 +486,13 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
           },
         )
       }
+    }, Unit)
+    preparationResolutionJob = job
+    try {
+      sourceExecutor.execute(job)
+    } catch (_: RejectedExecutionException) {
+      preparationResolutionJob = null
+      retryPreparation("resolve_failed")
     }
   }
 
@@ -527,6 +547,8 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     preparation = null
     preparationUri = null
     preparationResolutionToken++
+    preparationResolutionJob?.cancel(true)
+    preparationResolutionJob = null
     preparationRetryPending = false
     preparationStartedElapsedMs = 0L
     preparationRetainedFromSnooze = false
@@ -570,15 +592,34 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     }
     cancelCompletion(AlarmStateStore.snapshot(this))
     automaticCompletionAttempted = null
+    cancelFocusRecovery()
+    automaticFocusRecoveryUsed = false
+    focusRecoverable = false
     val preparedUri = preparedUriFor(current)
     val preparedIsHls = preparationIsHls
     val preparedTitle = preparation?.stationName
     val retainedPreparation = preparationRetainedFromSnooze
     clearPreparation(stopPlayer = preparedUri == null, stopService = false)
-    clearPending(current.occurrenceId)
     stopSystemTone()
     stopShakeListening()
-    ring = current
+    var bound = false
+    // The handoff timeout retires abandoned claims under this same guard. It
+    // must see either a live owner or a claim that this start can still bind.
+    AlarmStateStore.update(this) { state ->
+      if (state.ringing?.occurrenceId == current.occurrenceId) {
+        ring = current
+        clearPending(current.occurrenceId)
+        bound = true
+      }
+      state
+    }
+    if (!bound) {
+      AlarmEventLog.record(this, "ring.rejected", current.occurrenceId,
+        mapOf("reason" to "claim_retired_before_bind"))
+      clearPending(current.occurrenceId)
+      stopObsoleteRing()
+      return
+    }
     AlarmEventLog.recordSystemContext(this, "ring.start", current.occurrenceId,
       mapOf("trigger" to current.trigger, "preparedAvailable" to (preparedUri != null),
         "claimToServiceMs" to System.currentTimeMillis() - current.startedAtMs,
@@ -588,7 +629,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       current.occurrenceId, current.trigger, focusGranted,
       preserveActive = preparedUri != null,
     )
-    sourceResolutionToken++
+    invalidateSourceResolution()
     fallbackStarted = false
     sourceKind = if (preparedUri == null) current.sourceKind else "station"
     sourceIsHls = if (preparedUri == null) current.sourceIsHls else preparedIsHls
@@ -669,67 +710,98 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     }
   }
 
+  private fun invalidateSourceResolution() {
+    sourceResolutionToken++
+    sourceResolutionDeadline?.let(handler::removeCallbacks)
+    sourceResolutionDeadline = null
+    sourceResolutionJob?.cancel(true)
+    sourceResolutionJob = null
+  }
+
+  private fun <T> resolveSource(
+    occurrence: String,
+    operation: () -> T,
+    onSuccess: (T, Long) -> Unit,
+    onFailure: (Throwable, Long) -> Unit,
+  ) {
+    invalidateSourceResolution()
+    // Selection has its own deadline: no player exists yet for the playback
+    // watchdog to observe, and a DocumentsProvider can ignore cancellation.
+    handler.removeCallbacks(progressWatchdog)
+    fadeProgress.pause()
+    val token = sourceResolutionToken
+    val startedElapsed = SystemClock.elapsedRealtime()
+    fun current() = token == sourceResolutionToken && ring?.occurrenceId == occurrence &&
+      AlarmStateStore.snapshot(this).ringing?.occurrenceId == occurrence
+    val timeout = Runnable {
+      if (current()) {
+        invalidateSourceResolution()
+        onFailure(IllegalStateException("Selecting the alarm source took too long"),
+          SystemClock.elapsedRealtime() - startedElapsed)
+      }
+    }
+    sourceResolutionDeadline = timeout
+    handler.postDelayed(timeout, SOURCE_SELECTION_TIMEOUT_MS)
+    val job = FutureTask<Unit>({
+      val result = runCatching(operation)
+      handler.post {
+        if (!current()) return@post
+        handler.removeCallbacks(timeout)
+        sourceResolutionDeadline = null
+        sourceResolutionJob = null
+        val duration = SystemClock.elapsedRealtime() - startedElapsed
+        if (duration >= SOURCE_SELECTION_TIMEOUT_MS) {
+          invalidateSourceResolution()
+          onFailure(IllegalStateException("Selecting the alarm source took too long"), duration)
+        } else result.fold({ onSuccess(it, duration) }, { onFailure(it, duration) })
+      }
+    }, Unit)
+    sourceResolutionJob = job
+    try {
+      sourceExecutor.execute(job)
+    } catch (error: RejectedExecutionException) {
+      invalidateSourceResolution()
+      onFailure(IllegalStateException("Alarm source workers are still busy", error), 0L)
+    }
+  }
+
   private fun resolveStation(station: NativeStation) {
     val occurrence = ring?.occurrenceId ?: return
     AlarmEventLog.record(this, "source.resolve_start", occurrence, mapOf("sourceKind" to "station"))
-    val token = ++sourceResolutionToken
     val startedMs = diagnostics?.resolveStart(station.url)
-    folderExecutor.execute {
-      val startedElapsed = SystemClock.elapsedRealtime()
-      val result = runCatching { AlarmStreamResolver.resolve(station.url, userAgent) }
-      handler.post {
-        if (token != sourceResolutionToken || ring?.occurrenceId != occurrence) return@post
-        result.fold(
-          onSuccess = { resolved ->
-            if (startedMs != null) diagnostics?.resolveResult(startedMs, resolved.url, resolved.isHls, null)
-            AlarmEventLog.record(this, "source.resolved", occurrence,
-              mapOf("durationMs" to SystemClock.elapsedRealtime() - startedElapsed, "isHls" to resolved.isHls))
-            playUri(resolved.url, station.name, null, "station", null, resolved.isHls)
-          },
-          onFailure = { error ->
-            if (startedMs != null) diagnostics?.resolveResult(startedMs, null, null, error)
-            AlarmEventLog.record(this, "source.resolve_failed", occurrence,
-              mapOf("durationMs" to SystemClock.elapsedRealtime() - startedElapsed), error)
-            tryBackup(error.message ?: "The selected station is unavailable")
-          },
-        )
-      }
-    }
+    resolveSource(occurrence, { stationStreamResolver(station.url, userAgent) },
+      onSuccess = { resolved, duration ->
+        if (startedMs != null) diagnostics?.resolveResult(startedMs, resolved.url, resolved.isHls, null)
+        AlarmEventLog.record(this, "source.resolved", occurrence,
+          mapOf("durationMs" to duration, "isHls" to resolved.isHls))
+        playUri(resolved.url, station.name, null, "station", null, resolved.isHls)
+      },
+      onFailure = { error, duration ->
+        if (startedMs != null) diagnostics?.resolveResult(startedMs, null, null, error)
+        AlarmEventLog.record(this, "source.resolve_failed", occurrence, mapOf("durationMs" to duration), error)
+        tryBackup(error.message ?: "The selected station is unavailable")
+      },
+    )
   }
 
   private fun playFolder(folder: String, exclude: String?, note: String?) {
     val occurrence = ring?.occurrenceId ?: return
+    val kind = if (note == null) "folder" else "backup"
     AlarmEventLog.record(this, "source.resolve_start", occurrence,
-      mapOf("sourceKind" to if (note == null) "folder" else "backup", "excludePrevious" to (exclude != null)))
-    val token = ++sourceResolutionToken
-    folderExecutor.execute {
-      val startedElapsed = SystemClock.elapsedRealtime()
-      val result = runCatching {
-        DocumentLibrary.randomTrack(this, folder, exclude).also {
-          require(DocumentLibrary.validatePlayable(this, Uri.parse(it.path))) {
-            "The selected track is unavailable"
-          }
-        }
-      }
-      handler.post {
-        if (token != sourceResolutionToken || ring?.occurrenceId != occurrence) return@post
-        result.fold(
-          onSuccess = { pick ->
-            AlarmEventLog.record(this, "source.resolved", occurrence,
-              mapOf("sourceKind" to if (note == null) "folder" else "backup",
-                "durationMs" to SystemClock.elapsedRealtime() - startedElapsed))
-            playUri(pick.path, pick.name, folder, if (note == null) "folder" else "backup", note)
-          },
-          onFailure = { error ->
-            AlarmEventLog.record(this, "source.resolve_failed", occurrence,
-              mapOf("sourceKind" to if (note == null) "folder" else "backup",
-                "durationMs" to SystemClock.elapsedRealtime() - startedElapsed), error)
-            if (note == null) tryBackup(error.message ?: "The alarm folder is unavailable")
-            else playTone("$note; ${error.message ?: "the backup folder is unavailable"}")
-          },
-        )
-      }
-    }
+      mapOf("sourceKind" to kind, "excludePrevious" to (exclude != null)))
+    resolveSource(occurrence, { folderTrackResolver(this, folder, exclude) },
+      onSuccess = { pick, duration ->
+        AlarmEventLog.record(this, "source.resolved", occurrence,
+          mapOf("sourceKind" to kind, "durationMs" to duration))
+        playUri(pick.path, pick.name, folder, kind, note)
+      },
+      onFailure = { error, duration ->
+        AlarmEventLog.record(this, "source.resolve_failed", occurrence,
+          mapOf("sourceKind" to kind, "durationMs" to duration), error)
+        if (note == null) tryBackup(error.message ?: "The alarm folder is unavailable")
+        else playTone("$note; ${error.message ?: "the backup folder is unavailable"}")
+      },
+    )
   }
 
   private fun tryBackup(reason: String) {
@@ -748,6 +820,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   }
 
   private fun playTone(reason: String) {
+    invalidateSourceResolution()
     val current = ring ?: return
     val previousCandidates = toneCandidates?.takeIf { it.occurrenceId == current.occurrenceId }
     // The candidate budget belongs to the occurrence, including focus returns
@@ -949,6 +1022,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     note: String?,
     isHls: Boolean = uri.substringBefore('?').endsWith(".m3u8", true),
   ) {
+    invalidateSourceResolution()
     stopSystemTone(clearCandidates = kind != "tone")
     fadeProgress.sourceChanged()
     activeFolder = folder
@@ -1302,6 +1376,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     val action = AlarmCompletionFade.Action(current.occurrenceId, snooze && current.trigger != "test", auto, origin)
     val decision = completionFade.request(action, output, audible)
     if (decision != AlarmCompletionFade.Decision.STARTED) return
+    cancelFocusRecovery()
     ring = current
     completionFocusMultiplier = focusMultiplier.coerceAtLeast(0.001f)
     completionOutputCeiling = output
@@ -1338,6 +1413,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       if (restored.ringing?.occurrenceId == current.occurrenceId) {
         player.volume = currentOutputVolume()
         setSystemToneVolume(currentOutputVolume())
+        queueFocusRecovery()
         handler.removeCallbacks(fadeTick)
         handler.post(fadeTick)
         AlarmEventLog.record(this, "ring.finish_recovered", current.occurrenceId,
@@ -1349,6 +1425,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       cancelCompletion(changed)
       player.volume = currentOutputVolume()
       setSystemToneVolume(currentOutputVolume())
+      queueFocusRecovery()
       return
     }
     diagnostics?.finishRing(if (snooze) "snooze" else if (auto) "auto_dismiss" else "dismiss")
@@ -1356,7 +1433,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     handler.removeCallbacks(fadeTick)
     handler.removeCallbacks(autoStop)
     handler.removeCallbacks(progressWatchdog)
-    sourceResolutionToken++
+    invalidateSourceResolution()
     val retainedUri = currentUri?.takeIf {
       snooze && current.trigger != "test" && sourceKind == "station" &&
         player.isPlaying && hasPlayableAudioTrack(player.currentTracks)
@@ -1422,7 +1499,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     handler.removeCallbacks(fadeTick)
     handler.removeCallbacks(autoStop)
     handler.removeCallbacks(progressWatchdog)
-    sourceResolutionToken++
+    invalidateSourceResolution()
     stopShakeListening()
     player.volume = 0f
     stopSystemTone()
@@ -1482,6 +1559,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
     val snooze = AlarmActionReceiver.pendingIntent(this, ACTION_SNOOZE, current)
+    val resume = AlarmActionReceiver.pendingIntent(this, ACTION_RESUME_SOUND, current)
     val dismiss = AlarmActionReceiver.pendingIntent(this, ACTION_DISMISS, current)
     val builder = NotificationCompat.Builder(this, CHANNEL_ID)
       .setSmallIcon(applicationInfo.icon)
@@ -1495,6 +1573,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       .setContentIntent(launch)
       .addAction(0, "Dismiss", dismiss)
     if (current.trigger != "test") builder.addAction(0, "Snooze", snooze)
+    if (focusRecoverable && completionFade.action == null) builder.addAction(0, "Resume sound", resume)
     if (canUseFullScreenIntent()) builder.setFullScreenIntent(launch, true)
     return builder.build()
   }
@@ -1503,40 +1582,69 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
       getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
 
-  private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
+  private val focusRecovery = object : Runnable {
+    override fun run() {
+      if (ring == null || !focusRecoverable || automaticFocusRecoveryUsed || completionFade.action != null) return
+      if (AlarmStateStore.snapshot(this@AlarmPlaybackService).ringing?.occurrenceId != ring?.occurrenceId) return
+      val quiet = runCatching {
+        !audioManager.isMusicActive && audioManager.mode == AudioManager.MODE_NORMAL
+      }.getOrDefault(false)
+      if (quiet) {
+        // Permanent loss has no later GAIN callback. Make at most one fresh
+        // request, only after other media/call activity has stopped.
+        automaticFocusRecoveryUsed = true
+        retryAlarmFocus("automatic_recovery")
+      } else handler.postDelayed(this, WATCHDOG_TICK_MS)
+    }
+  }
+
+  private fun cancelFocusRecovery() {
+    handler.removeCallbacks(focusRecovery)
+  }
+
+  private fun queueFocusRecovery() {
+    cancelFocusRecovery()
+    if (!focusRecoverable || automaticFocusRecoveryUsed || completionFade.action != null) return
+    handler.postDelayed(focusRecovery, WATCHDOG_TICK_MS)
+  }
+
+  private fun publishFocusState() {
+    val current = ring ?: return
+    val note = listOfNotNull(sourceFailure, focusError).joinToString("; ").takeIf(String::isNotBlank)
+    runCatching { updateRingingSource(sourceKind, current.title, note) }.onFailure {
+      AlarmEventLog.record(this, "focus.state_update_failed", current.occurrenceId, error = it)
+      NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification(current))
+    }
+  }
+
+  private fun resumeFocusedSource() {
+    focusPaused = false
+    focusGranted = true
+    focusRecoverable = false
+    focusError = null
+    focusMultiplier = 1f
+    cancelFocusRecovery()
+    if (systemTone != null && sourceKind == "tone") {
+      toneWatchdogMisses = 0
+      if (!startSystemTonePlayback()) advanceToneCandidate("The system alarm sound could not play")
+    } else if (!(Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && sourceKind == "tone")) {
+      sourceProgress.resumeFromFocus(player.currentPosition)
+      if (ring != null && currentUri != null && !player.isPlaying) player.play()
+    }
+    publishFocusState()
+    handler.removeCallbacks(fadeTick)
+    handler.post(fadeTick)
+  }
+
+  private fun enqueueFocusChange(change: Int, token: Long, occurrence: String?) {
     handler.post {
-      if (ring == null) return@post
+      if (occurrence == null || ring?.occurrenceId != occurrence || token != focusRequestToken) return@post
       diagnostics?.event("focus_change", "code=$change")
-      AlarmEventLog.recordSystemContext(this, "focus.change", ring?.occurrenceId,
+      AlarmEventLog.recordSystemContext(this, "focus.change", occurrence,
         mapOf("change" to change, "sourceKind" to sourceKind,
           "focusGrantedBefore" to focusGranted, "focusPausedBefore" to focusPaused))
       when (change) {
-        AudioManager.AUDIOFOCUS_GAIN -> {
-          focusPaused = false
-          focusGranted = true
-          focusError = null
-          focusMultiplier = 1f
-          if (systemTone != null && sourceKind == "tone") {
-            toneWatchdogMisses = 0
-            if (!startSystemTonePlayback()) {
-              advanceToneCandidate("The system alarm sound could not play")
-              return@post
-            }
-          } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && sourceKind == "tone") {
-            // A failed Ringtone must keep its error instead of reviving the old Media3 URI.
-            return@post
-          } else {
-            sourceProgress.resumeFromFocus(player.currentPosition)
-            if (ring != null && currentUri != null && !player.isPlaying) player.play()
-          }
-          ring?.let {
-            updateRingingSource(
-              sourceKind, it.title, sourceFailure, currentUri, activeFolder, sourceIsHls,
-            )
-          }
-          handler.removeCallbacks(fadeTick)
-          handler.post(fadeTick)
-        }
+        AudioManager.AUDIOFOCUS_GAIN -> resumeFocusedSource()
         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
           focusMultiplier = 0.2f
           handler.removeCallbacks(fadeTick)
@@ -1544,38 +1652,61 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
         }
         AudioManager.AUDIOFOCUS_LOSS,
         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+          cancelFocusRecovery()
           focusPaused = true
           fadeProgress.pause()
           if (systemTone != null && sourceKind == "tone") {
             cancelToneWatchdog()
             runCatching { systemTone?.stop() }
-          } else {
-            sourceProgress.pauseForFocus()
-          }
-          if (change == AudioManager.AUDIOFOCUS_LOSS) focusGranted = false
+          } else sourceProgress.pauseForFocus()
           player.pause()
+          if (change == AudioManager.AUDIOFOCUS_LOSS) {
+            focusGranted = false
+            focusRecoverable = true
+            focusError = "Alarm sound was interrupted. Waiting for other audio to stop; tap Resume sound to retry"
+            publishFocusState()
+            queueFocusRecovery()
+          } else focusRecoverable = false
         }
       }
     }
   }
 
+  private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
+    enqueueFocusChange(change, focusRequestToken, ring?.occurrenceId)
+  }
+
+  private fun retryAlarmFocus(origin: String) {
+    if (ring == null || completionFade.action != null) return
+    cancelFocusRecovery()
+    AlarmEventLog.record(this, "focus.retry", ring?.occurrenceId, mapOf("origin" to origin))
+    requestAlarmFocus()
+    if (focusGranted) resumeFocusedSource() else publishFocusState()
+  }
+
   private fun requestAlarmFocus() {
+    val token = ++focusRequestToken
+    val occurrence = ring?.occurrenceId
+    val listener = AudioManager.OnAudioFocusChangeListener { change ->
+      enqueueFocusChange(change, token, occurrence)
+    }
     val attributes = PlatformAudioAttributes.Builder()
       .setUsage(PlatformAudioAttributes.USAGE_MEDIA)
       .setContentType(PlatformAudioAttributes.CONTENT_TYPE_MUSIC)
       .build()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      audioFocusRequest?.let(audioManager::abandonAudioFocusRequest)
       val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
         .setAudioAttributes(attributes)
         .setAcceptsDelayedFocusGain(true)
-        .setOnAudioFocusChangeListener(focusListener, handler)
+        .setOnAudioFocusChangeListener(listener, handler)
         .build()
       audioFocusRequest = request
       applyFocusRequestResult(audioManager.requestAudioFocus(request))
     } else {
       @Suppress("DEPRECATION")
       applyFocusRequestResult(audioManager.requestAudioFocus(
-        focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT,
+        listener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT,
       ))
     }
   }
@@ -1583,17 +1714,22 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
   private fun applyFocusRequestResult(result: Int) {
     focusGranted = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
     focusPaused = !focusGranted
+    focusRecoverable = result == AudioManager.AUDIOFOCUS_REQUEST_FAILED
     focusError = when (result) {
       AudioManager.AUDIOFOCUS_REQUEST_GRANTED -> null
       AudioManager.AUDIOFOCUS_REQUEST_DELAYED -> "Waiting for Android audio focus"
-      else -> "Android denied audio focus; the alarm notification is still active"
+      else -> "Android denied alarm sound. Tap Resume sound to retry"
     }
+    if (focusRecoverable) queueFocusRecovery()
     diagnostics?.event("focus_request", "result=$result granted=$focusGranted paused=$focusPaused")
     AlarmEventLog.recordSystemContext(this, "focus.request_result", ring?.occurrenceId,
       mapOf("result" to result, "focusGranted" to focusGranted, "focusPaused" to focusPaused))
   }
 
   private fun abandonAlarmFocus() {
+    focusRequestToken++
+    cancelFocusRecovery()
+    focusRecoverable = false
     AlarmEventLog.record(this, "focus.abandon", ring?.occurrenceId)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       audioFocusRequest?.let(audioManager::abandonAudioFocusRequest)
@@ -1639,7 +1775,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     cancelCompletion(AlarmStateStore.snapshot(this))
     stopSystemTone()
     stopShakeListening()
-    sourceResolutionToken++
+    invalidateSourceResolution()
     preparationResolutionToken++
     if (::player.isInitialized) {
       player.removeListener(this)
@@ -1648,8 +1784,8 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     if (::audioManager.isInitialized) abandonAlarmFocus()
     if (::ringWakeLock.isInitialized && ringWakeLock.isHeld) ringWakeLock.release()
     if (::preparationWakeLock.isInitialized && preparationWakeLock.isHeld) preparationWakeLock.release()
-    folderExecutor.shutdownNow()
-    preparationExecutor.shutdownNow()
+    preparationResolutionJob?.cancel(true)
+    preparationResolutionJob = null
     instance = null
     super.onDestroy()
   }
@@ -1659,6 +1795,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     const val ACTION_RING = "com.aerowave.audio.action.RING"
     const val ACTION_SNOOZE = "com.aerowave.audio.action.SNOOZE_ALARM"
     const val ACTION_DISMISS = "com.aerowave.audio.action.DISMISS_ALARM"
+    const val ACTION_RESUME_SOUND = "com.aerowave.audio.action.RESUME_ALARM_SOUND"
     private const val EXTRA_OCCURRENCE_ID = "occurrenceId"
     private const val EXTRA_ALARM_ID = "alarmId"
     private const val EXTRA_AT_MS = "atMs"
@@ -1669,6 +1806,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     private const val PREPARATION_NOTIFICATION_ID = 71_002
     private const val FADE_TICK_MS = 250L
     private const val WATCHDOG_TICK_MS = 1_000L
+    internal const val SOURCE_SELECTION_TIMEOUT_MS = 12_000L
     private const val MAX_RING_WAKE_MS = 2 * 60 * 60 * 1000L
     private const val MAX_PREPARATION_WAKE_MS = 75_000L
     private const val PREPARATION_RETRY_STEP_MS = 3_000L
@@ -1685,6 +1823,23 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
     fun liveOccurrenceId(context: Context): String? {
       val active = instance?.ring?.occurrenceId ?: return null
       return active.takeIf { AlarmStateStore.snapshot(context).ringing?.occurrenceId == it }
+    }
+
+    @JvmStatic
+    fun canResumeSound(occurrenceId: String): Boolean = instance?.let {
+      it.ring?.occurrenceId == occurrenceId && it.focusRecoverable && it.completionFade.action == null
+    } == true
+
+    @JvmStatic
+    fun resumeSoundIfMatching(context: Context, occurrenceId: String) {
+      val service = instance ?: return
+      service.handler.post {
+        if (service.ring?.occurrenceId != occurrenceId ||
+          AlarmStateStore.snapshot(context).ringing?.occurrenceId != occurrenceId ||
+          !service.focusRecoverable || service.completionFade.action != null) return@post
+        service.automaticFocusRecoveryUsed = true
+        service.retryAlarmFocus("resume_control")
+      }
     }
 
     @JvmStatic
@@ -1864,6 +2019,7 @@ class AlarmActionReceiver : android.content.BroadcastReceiver() {
       mapOf("action" to when (intent.action) {
         AlarmPlaybackService.ACTION_SNOOZE -> "snooze"
         AlarmPlaybackService.ACTION_DISMISS -> "dismiss"
+        AlarmPlaybackService.ACTION_RESUME_SOUND -> "resume_sound"
         ACTION_AUTO_STOP -> "automatic_timeout"
         else -> "unknown"
       }))
@@ -1877,6 +2033,7 @@ class AlarmActionReceiver : android.content.BroadcastReceiver() {
     when (intent.action) {
       AlarmPlaybackService.ACTION_SNOOZE -> AlarmPlaybackService.stopIfMatching(context, occurrence, true, origin = "notification")
       AlarmPlaybackService.ACTION_DISMISS -> AlarmPlaybackService.stopIfMatching(context, occurrence, false, origin = "notification")
+      AlarmPlaybackService.ACTION_RESUME_SOUND -> AlarmPlaybackService.resumeSoundIfMatching(context, occurrence)
       ACTION_AUTO_STOP -> AlarmPlaybackService.autoStopIfMatching(context, occurrence)
     }
   }

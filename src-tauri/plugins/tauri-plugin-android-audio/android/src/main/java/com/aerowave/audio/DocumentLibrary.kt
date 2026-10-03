@@ -305,11 +305,11 @@ private class DeadlineContentReader(
       resolver.query(uri, projection, null, null, null, cancellation)?.use(read)
     }
 
-  fun openFileDescriptor(uri: Uri) = withCancellation { cancellation ->
+  fun openFileDescriptor(uri: Uri) = withCancellation(discard = { it?.close() }) { cancellation ->
     resolver.openFileDescriptor(uri, "r", cancellation)
   }
 
-  private fun <T> withCancellation(block: (CancellationSignal) -> T): T {
+  private fun <T> withCancellation(discard: (T) -> Unit = {}, block: (CancellationSignal) -> T): T {
     val cancellation = CancellationSignal()
     val timer = cancellationScheduler.schedule(
       cancellation::cancel,
@@ -317,7 +317,16 @@ private class DeadlineContentReader(
       TimeUnit.MILLISECONDS,
     )
     return try {
-      block(cancellation).also { deadline.check() }
+      val result = block(cancellation)
+      try {
+        deadline.check()
+        result
+      } catch (error: Exception) {
+        // A provider can return an open descriptor after ignoring cancellation.
+        // It must be closed even though the caller never receives that result.
+        runCatching { discard(result) }
+        throw error
+      }
     } catch (error: OperationCanceledException) {
       deadline.timeout(error)
     } finally {

@@ -8,6 +8,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.After
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
@@ -16,6 +17,8 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class AndroidAlarmRegressionTest {
+  @After fun clearPendingClaim() { AlarmPlaybackService.clearPending() }
+
   private fun oneShot() = NativeAlarm(
     id = "deferred-once", label = "Once", hour = 7, minute = 0,
     days = emptyList(), enabled = true,
@@ -35,11 +38,11 @@ class AndroidAlarmRegressionTest {
         scheduled = mapOf(alarm.id to first), ringing = other),
       first, now - 90_000,
     ).copy(ringing = null)
-    val retry = deferred.snoozes.getValue(alarm.id)
+    val retry = deferred.scheduled.getValue(alarm.id)
     AlarmStateStore.update(context) { deferred }
 
     val ring = AndroidAlarmScheduler.claim(
-      context, alarm.id, retry.occurrenceId, retry.atMs, true,
+      context, alarm.id, retry.occurrenceId, retry.atMs, false,
     )
     assertNotNull(ring)
     assertEquals("scheduled", ring!!.trigger)
@@ -175,14 +178,15 @@ class AndroidAlarmRegressionTest {
         scheduled = mapOf(alarm.id to original), ringing = other),
       original, original.atMs,
     ).copy(ringing = null)
-    val retry = deferred.snoozes.getValue(alarm.id)
+    val retry = deferred.scheduled.getValue(alarm.id)
     AlarmStateStore.update(context) { deferred }
     assertNull(AndroidAlarmScheduler.claim(
-      context, alarm.id, retry.occurrenceId, retry.atMs, true,
+      context, alarm.id, retry.occurrenceId, retry.atMs, false,
     ))
     val expired = AlarmStateStore.snapshot(context)
     assertFalse(expired.alarms.single().enabled)
     assertNull(expired.snoozes[alarm.id])
+    assertNull(expired.scheduled[alarm.id])
     assertNull(AndroidAlarmScheduler.rebuild(context).scheduled[alarm.id])
   }
 

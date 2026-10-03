@@ -67,6 +67,7 @@ const alarmReadiness = window.AlarmReadiness.create({
   getContext: () => ({
     android: IS_ANDROID, alarms: state.alarms, stations: state.stations, settings: state.settings,
     configError: configLoadError, saving: !!(settingsDirty || pendingSettingsSave || alarmSavePending || androidAlarmPending || setupRestorePending),
+    androidAlarmError: androidAlarmReadError, androidSourceError: androidAlarmSourceError,
   }),
   readNext: () => invoke("next_alarm"),
   readPower: () => invoke("power_status"),
@@ -477,17 +478,45 @@ let androidAlarmRequest = 0;
 let androidAlarmPending = 0;
 let androidAlarmQueue = Promise.resolve();
 let androidAlarmWriteBatch = null;
+let androidAlarmReadError = null;
+let androidAlarmSourceError = null;
+let androidAlarmSourceRequest = 0;
 const androidRingPending = new Set();
 let androidRingFocusBefore = null;
 
-function applyAndroidAlarmState(snapshot) {
+function setAndroidAlarmError(kind, error) {
+  if (error === (kind === "read" ? androidAlarmReadError : androidAlarmSourceError)) return;
+  if (kind === "read") androidAlarmReadError = error;
+  else androidAlarmSourceError = error;
+  alarmReadiness.invalidate();
+  renderAndroidAlarmPermissions();
+}
+
+function androidAlarmWriteError() {
+  if (configLoadError) return "Settings are protected while recovery is needed. Restore a backup or repair settings before changing alarms.";
+  return androidAlarmReadError ||
+    (!androidAlarmSnapshot ? "Android alarms have not been loaded. Check again in Permissions before changing alarms." : null);
+}
+
+function applyAndroidAlarmState(snapshot, { authoritative = true } = {}) {
   if (!snapshot || !Array.isArray(snapshot.alarms)) return;
+  // A failed native decode has revision zero and temporary empty defaults.
+  // Retain the last confirmed definitions rather than publishing those defaults.
+  if (snapshot.error && !snapshot.initialized) {
+    if (authoritative) setAndroidAlarmError("read", snapshot.error);
+    return;
+  }
   if (androidAlarmSnapshot && snapshot.revision < androidAlarmSnapshot.revision) return;
+  if (authoritative) setAndroidAlarmError("read", null);
   const alarmsChanged = JSON.stringify(state.alarms) !== JSON.stringify(snapshot.alarms);
   const permissionsChanged = !androidAlarmSnapshot || androidAlarmSnapshot.error !== snapshot.error ||
     JSON.stringify(androidAlarmSnapshot.permissions) !== JSON.stringify(snapshot.permissions);
   androidAlarmSnapshot = snapshot;
   state.alarms = snapshot.alarms;
+  if (IS_ANDROID && editingAlarm && androidAlarmDraftState !== null &&
+      JSON.stringify(state.alarms.find(alarm => alarm.id === editingAlarm.id)) !== androidAlarmDraftState) {
+    androidAlarmDraftStale = true;
+  }
   if (alarmsChanged) renderAlarms();
   if (permissionsChanged) renderAndroidAlarmPermissions();
   const nextRing = snapshot.ringing;
@@ -529,8 +558,7 @@ function applyAndroidAlarmState(snapshot) {
 }
 
 function renderAndroidAlarmPermissions() {
-  const snapshot = androidAlarmSnapshot;
-  if (!snapshot) return;
+  const snapshot = androidAlarmSnapshot || {};
   const permissions = snapshot.permissions || {};
   const maker = `${permissions.manufacturer || ""} ${permissions.brand || ""}`;
   const isXiaomi = /xiaomi|redmi|poco/i.test(maker);
@@ -661,50 +689,78 @@ function renderAndroidAlarmPermissions() {
     : permissions.batteryOptimized === true
       ? "Android alarm access looks ready. Review battery use and phone-specific settings, then test with the screen off."
       : "Android alarm access looks ready. Check phone-specific settings and test with the screen off.";
-  $("#android-alarm-status").textContent = snapshot.error || summary;
-  $("#android-alarm-status").classList.toggle("warn", !!snapshot.error || !!required.length || incomplete || dndOn);
-  $("#android-alarm-hint").textContent = snapshot.error || (required.length
+  const setupError = androidAlarmReadError || snapshot.error || androidAlarmSourceError;
+  const retryHelp = setupError ? `${setupError} ${configLoadError
+    ? "Restore a backup or repair settings before changing setup."
+    : "Use Retry alarm setup in Permissions before relying on alarms."}` : null;
+  $("#android-alarm-status").textContent = retryHelp || summary;
+  $("#android-alarm-status").classList.toggle("warn", !!setupError || !!required.length || incomplete || dndOn);
+  $("#android-alarm-hint").textContent = retryHelp || (required.length
     ? "Review Android permissions in Settings before relying on alarms."
     : dndOn ? "Review Do Not Disturb settings, then test a scheduled alarm with the screen off."
     : "Check phone-specific settings in Settings, then test an alarm with the screen off.");
+  $("#android-permissions-refresh").textContent = setupError ? "Retry alarm setup" : "Check again";
 }
 
-async function refreshAndroidAlarms({ initialize = false, reportError = false } = {}) {
+async function refreshAndroidAlarms({ initialize = false, reportError = false, retrySources = false } = {}) {
   if (!IS_ANDROID || androidAlarmPending || (document.hidden && !initialize)) return;
   const request = ++androidAlarmRequest;
+  let readSucceeded = false;
   try {
     const snapshot = await androidCommand("get_alarm_state");
     if (request !== androidAlarmRequest || androidAlarmPending) return;
-    if (initialize && snapshot && !snapshot.initialized && !snapshot.error) {
+    if (!snapshot || !Array.isArray(snapshot.alarms)) throw new Error("Android alarm state is unavailable");
+    readSucceeded = true;
+    if ((initialize || retrySources) && !snapshot.initialized && !snapshot.error) {
       if (configLoadError) applyAndroidAlarmState(snapshot);
       else {
         androidAlarmSnapshot = snapshot;
+        setAndroidAlarmError("read", null);
         await syncAndroidAlarms(true);
       }
     } else {
       applyAndroidAlarmState(snapshot);
       // Repair a source/settings save whose native update failed previously,
       // without overwriting native one-shot or snooze decisions.
-      if (initialize && snapshot?.initialized && !configLoadError) await syncAndroidAlarms(false);
+      if ((initialize || (retrySources && (androidAlarmSourceError || snapshot.error))) && snapshot.initialized && !configLoadError)
+        await syncAndroidAlarms(false);
     }
     refreshNextAlarm();
   } catch (error) {
+    if (readSucceeded) return;
     if (request !== androidAlarmRequest || androidAlarmPending) return;
+    setAndroidAlarmError("read", "Could not confirm Android alarms: " + String(error));
+    if (initialize) setAndroidAlarmError("source", "Station and backup settings have not been checked against Android.");
+    renderAlarms();
+    refreshNextAlarm();
     if (initialize) say("Could not load Android alarms: " + String(error), "bad", true);
     else if (reportError) say("Could not check Android settings: " + String(error), "bad");
   }
 }
 
 function syncAndroidAlarms(includeAlarms = false, alarms = state.alarms) {
-  const payload = JSON.parse(JSON.stringify({
-    ...(includeAlarms ? { alarms } : {}),
-    stations: state.stations,
-    backupFolder: state.settings.backupFolder || null,
-  }));
-  return writeAndroidAlarms("sync_alarms", payload);
+  const error = configLoadError || androidAlarmReadError;
+  const request = ++androidAlarmSourceRequest;
+  const operation = error ? Promise.reject(new Error(androidAlarmWriteError()))
+    : writeAndroidAlarms("sync_alarms", JSON.parse(JSON.stringify({
+      ...(includeAlarms ? { alarms } : {}),
+      stations: state.stations,
+      backupFolder: state.settings.backupFolder || null,
+    })));
+  return operation.then(snapshot => {
+    if (request === androidAlarmSourceRequest) setAndroidAlarmError("source", null);
+    return snapshot;
+  }, error => {
+    if (request === androidAlarmSourceRequest) setAndroidAlarmError("source",
+      (includeAlarms ? "Android alarm setup could not be saved: "
+        : "Saved station and backup changes have not reached Android: ") + String(error));
+    throw error;
+  });
 }
 
 function writeAndroidAlarms(command, payload) {
+  if (androidAlarmReadError)
+    return Promise.reject(new Error(androidAlarmWriteError()));
   if (!androidAlarmPending) {
     androidAlarmWriteBatch = { revision: androidAlarmSnapshot?.revision ?? 0, error: null };
   }
@@ -750,7 +806,7 @@ async function androidRingAction(command) {
     await refreshAndroidAlarms();
   } finally {
     androidRingPending.delete(ring.occurrenceId);
-    if (androidAlarmSnapshot) applyAndroidAlarmState(androidAlarmSnapshot);
+    if (androidAlarmSnapshot) applyAndroidAlarmState(androidAlarmSnapshot, { authoritative: false });
   }
 }
 
@@ -3741,6 +3797,8 @@ async function refreshNextAlarm() {
   let next = null;
   let scheduleError = null;
   try {
+    if (IS_ANDROID && (androidAlarmReadError || androidAlarmSnapshot?.error))
+      throw new Error(androidAlarmReadError || androidAlarmSnapshot.error);
     next = IS_ANDROID ? androidAlarmSnapshot?.next : await invoke("next_alarm");
     if (IS_ANDROID && next) next = { ...next, inSecs: Math.max(0, (next.atMs - Date.now()) / 1000) };
   } catch (error) { scheduleError = String(error); }
@@ -4611,6 +4669,10 @@ function saveStations({ extraStation = null, move = null, patch = null, removeId
   return result;
 }
 async function saveAlarms(alarms = state.alarms) {
+  if (IS_ANDROID && androidAlarmWriteError()) {
+    say(androidAlarmWriteError(), "bad", true);
+    return false;
+  }
   if (setupRestorePending) {
     say("Wait for the setup restore to finish.", "bad");
     return false;
@@ -4746,7 +4808,8 @@ async function loadState(expectedSettingsRevision = null) {
   }
   if (setupRestorePending || setupRequest !== setupRestoreEpoch) return;
   if (expectedSettingsRevision !== null && expectedSettingsRevision !== settingsRevision) return;
-  if (alarmRequest !== alarmStateRequest) loaded.alarms = state.alarms;
+  if (alarmRequest !== alarmStateRequest || (IS_ANDROID && androidAlarmSnapshot?.initialized))
+    loaded.alarms = state.alarms;
   if (stationRevision !== stationStateRevision) loaded.stations = state.stations;
   state = loaded;
   renderStations();
@@ -4890,6 +4953,14 @@ async function restoreSetup() {
     await settleSetupWrites({ recovery: !!configLoadError });
     if (ringing || $("#power-countdown").open) throw new Error("Finish the active alarm or power countdown before restoring.");
     const restored = await invoke("restore_backup", { content: backupRestoreContent });
+    if (IS_ANDROID) {
+      // Recovery can replace unreadable native state at a lower revision.
+      // Replies from the previous store must not outrank the restored store.
+      ++androidAlarmRequest;
+      androidAlarmSnapshot = null;
+      ++androidAlarmSourceRequest;
+      setAndroidAlarmError("source", null);
+    }
     stopPlayback(false);
     ++settingsRevision;
     ++alarmStateRequest;
@@ -4922,6 +4993,10 @@ async function restoreSetup() {
     if (restoreFailed) {
       // A cross-store restore may have committed imported, disabled alarms
       // before a later receipt repair failed. Display the actual live state.
+      if (IS_ANDROID) {
+        ++androidAlarmRequest;
+        androidAlarmSnapshot = null;
+      }
       try { await loadState(); }
       catch (error) { say("Could not refresh settings after restore: " + error, "bad", true); }
     }
@@ -5064,6 +5139,8 @@ async function saveStationEditorChange(change, message) {
 
 let editingAlarm = null;
 let alarmDraftRevision = null;
+let androidAlarmDraftState = null;
+let androidAlarmDraftStale = false;
 let alarmDraftId = null;
 let alarmDraftEnabled = true;
 let alarmCopySourceId = null;
@@ -5325,6 +5402,8 @@ function openAlarmEditor(alarm, { copy = false } = {}) {
   }
   editorReturnFocus = document.activeElement;
   editingAlarm = copy ? null : alarm || null;
+  androidAlarmDraftState = IS_ANDROID && editingAlarm ? JSON.stringify(editingAlarm) : null;
+  androidAlarmDraftStale = false;
   alarmDraftRevision = !copy && !IS_ANDROID ? alarm?.armingRevision ?? null : null;
   alarmDraftId = editingAlarm?.id || newId();
   alarmDraftEnabled = IS_ANDROID ? true : (alarm?.enabled ?? true);
@@ -5426,6 +5505,8 @@ function closeAlarmEditor(savedId = null) {
   const editedId = savedId || editingAlarm?.id || alarmCopySourceId;
   const wasCopy = !!alarmCopySourceId;
   editingAlarm = null;
+  androidAlarmDraftState = null;
+  androidAlarmDraftStale = false;
   alarmDraftId = null;
   alarmCopySourceId = null;
   $("#alarm-editor").classList.add("hidden");
@@ -5470,6 +5551,9 @@ function handleAndroidBack() {
 if (IS_ANDROID) window.__aerowaveHandleAndroidBack = handleAndroidBack;
 
 function readAlarmEditor() {
+  if (IS_ANDROID && androidAlarmDraftStale) {
+    return { error: "This alarm changed on Android while its editor was open. Cancel and reopen it to review the current alarm before saving or turning it on." };
+  }
   if (editorPendingTime === editorTimeRequest && editorPendingTime !== 0) {
     return { error: "Wait for the alarm time to finish updating." };
   }
@@ -5743,11 +5827,11 @@ function wire() {
       button.disabled = true;
       button.textContent = "Checking…";
       try {
-        await refreshAndroidAlarms({ reportError: true });
+        await refreshAndroidAlarms({ reportError: true, retrySources: true });
         renderAndroidAlarmPermissions();
       } finally {
-        button.textContent = "Check again";
         button.disabled = false;
+        renderAndroidAlarmPermissions();
       }
     });
     $("#android-alarm-log-export").addEventListener("click", exportAndroidAlarmLogs);

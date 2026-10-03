@@ -41,6 +41,8 @@ internal data class ScheduledOccurrence(
   val elapsedDeadlineMs: Long? = null,
   val bootCount: Int? = null,
   val deferredFromScheduled: Boolean = false,
+  val expiresAtMs: Long? = null,
+  val expiresElapsedMs: Long? = null,
 )
 
 internal data class RingingRecord(
@@ -56,6 +58,9 @@ internal data class RingingRecord(
   val sourceUri: String? = null,
   val sourceFolder: String? = null,
   val sourceIsHls: Boolean = false,
+  val deliveryExpiresAtMs: Long? = null,
+  val deliveryExpiresElapsedMs: Long? = null,
+  val deliveryBootCount: Int? = null,
 )
 
 internal data class PersistedAlarmState(
@@ -140,6 +145,7 @@ internal fun ScheduledOccurrence.toJson(): JSONObject = JSONObject()
   .put("heldIsHls", heldIsHls)
   .put("elapsedDeadlineMs", elapsedDeadlineMs).put("bootCount", bootCount)
   .put("deferredFromScheduled", deferredFromScheduled)
+  .put("expiresAtMs", expiresAtMs).put("expiresElapsedMs", expiresElapsedMs)
 
 internal fun occurrenceFromJson(value: JSONObject) = ScheduledOccurrence(
   value.getString("alarmId"), value.getString("occurrenceId"),
@@ -154,6 +160,8 @@ internal fun occurrenceFromJson(value: JSONObject) = ScheduledOccurrence(
   value.optLong("elapsedDeadlineMs", -1).takeIf { it >= 0 },
   value.optInt("bootCount", -1).takeIf { it >= 0 },
   value.optBoolean("deferredFromScheduled", false),
+  value.optLong("expiresAtMs", -1).takeIf { it >= 0 },
+  value.optLong("expiresElapsedMs", -1).takeIf { it >= 0 },
 )
 
 internal fun RingingRecord.toJson(): JSONObject = JSONObject()
@@ -164,6 +172,8 @@ internal fun RingingRecord.toJson(): JSONObject = JSONObject()
   .put("autoSnoozesUsed", autoSnoozesUsed)
   .put("sourceUri", sourceUri).put("sourceFolder", sourceFolder)
   .put("sourceIsHls", sourceIsHls)
+  .put("deliveryExpiresAtMs", deliveryExpiresAtMs)
+  .put("deliveryExpiresElapsedMs", deliveryExpiresElapsedMs).put("deliveryBootCount", deliveryBootCount)
 
 internal fun ringingFromJson(value: JSONObject) = RingingRecord(
   alarm = alarmFromJson(value.getJSONObject("alarm")),
@@ -178,6 +188,9 @@ internal fun ringingFromJson(value: JSONObject) = RingingRecord(
   sourceUri = value.optNullableString("sourceUri"),
   sourceFolder = value.optNullableString("sourceFolder"),
   sourceIsHls = value.optBoolean("sourceIsHls", false),
+  deliveryExpiresAtMs = value.optLong("deliveryExpiresAtMs", -1).takeIf { it >= 0 },
+  deliveryExpiresElapsedMs = value.optLong("deliveryExpiresElapsedMs", -1).takeIf { it >= 0 },
+  deliveryBootCount = value.optInt("deliveryBootCount", -1).takeIf { it >= 0 },
 )
 
 internal fun JSONObject.optNullableString(name: String): String? =

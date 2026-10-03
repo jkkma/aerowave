@@ -104,6 +104,85 @@ existing credential. Do not run initialization over a partial restore. A changed
 fingerprint creates a different Android application identity even when the
 package name is unchanged.
 
+## Build on Linux with the existing release identity
+
+Linux builds use the existing PKCS#12 keystore and an unlocked GNOME Secret
+Service session. The Linux helper does not initialize keys, register passwords,
+or regenerate missing signing material. It stops if any part of the existing
+identity is absent, unreadable or inconsistent.
+
+The default signing directory is `~/.local/share/aerowave/signing/`.
+`AEROWAVE_ANDROID_SIGNING_ROOT` may select another absolute private directory
+outside the repository. The directory must belong to the current user with
+mode `0700`; `signing-manifest.json` and `aerowave-release.p12` must be regular
+files owned by that user with mode `0600`. Symbolic links are rejected.
+
+The Linux manifest uses schema version 2, application ID `com.aerowave.radio`,
+alias `aerowave-release`, keystore filename `aerowave-release.p12`, and credential
+backend `secret-service`. Its `secretServiceAttributes` identify the credential
+with `application`, `purpose` (`android-release-signing`) and a UUID `keyId`.
+It also records the public uppercase `certificateSha256` and UTC creation time.
+Keep the manifest beside the original keystore; changing its fingerprint does
+not recover a lost identity.
+
+Provide Node/npm and Rust on `PATH`, JDK 17 through `JAVA_HOME`, the Android SDK
+through `ANDROID_HOME`, and NDK 29.0.14206865 through `NDK_HOME`. These versions
+passed the Linux release build. The SDK needs platform 36, build tools 36.0.0
+with `apksigner` and 16 KB capable `zipalign`, and
+command-line tools with `apkanalyzer`. Rust needs the `aarch64-linux-android`
+target. Once these prerequisites and signing material are ready, run:
+
+```bash
+python3 -B tools/android-build-linux.py
+```
+
+The helper looks up the password through `secret-tool`, holds it in memory,
+and verifies the keystore certificate through `keytool` using a child
+environment variable. The password and private key are never printed or put
+on a command line. All four Gradle signing values are passed only to the build's
+child environment; the calling shell's environment stays unchanged. Gradle
+uses a single-use daemon so a reusable background process does not retain the
+decrypted credential.
+
+It builds the optimized ARM64 APK and retains a copy in a new UTC-stamped
+directory under `dist/android-release/`. Before writing `manifest.json`, it
+checks the actual APK identity and semantic version/code, disabled debugging,
+exactly the ARM64 native ABI, signing certificate, 16 KB ZIP alignment, and the
+public non-static `getPluginManager()` method in packaged DEX after R8. The
+receipt records APK SHA-256, certificate SHA-256, source HEAD and whether the
+source was dirty before or after the build. A changed HEAD stops validation.
+Failed validation leaves the copied APK for inspection. Existing retained
+directories, APKs and receipts are never replaced or removed. The helper does
+not connect to a phone or publish anything.
+
+Back up the complete private signing directory and save its password separately
+in a password manager. A directory backup does not include the password held
+by GNOME Secret Service, and a Secret Service database backup can depend on the
+original login or keyring password. Recovery requires the same keystore,
+manifest, alias and password, plus a credential restored under the manifest's
+Secret Service attributes. Restore those originals before building; do not
+substitute a newly generated key.
+
+## The 0.16.2 signing-key transition
+
+The original release signing key was lost. Version 0.16.2 uses a new identity
+and **cannot update the existing 0.16.1 installation**, even though the
+application ID is unchanged. See the public certificate fingerprint in the
+[0.16.2 release notes](releases/0.16.2.md). The build helper does not uninstall
+or modify an existing installation. Migration requires an explicit manual
+uninstall and reinstall.
+
+When you deliberately choose to migrate, export a setup backup from the old
+installation and save that file outside its private app data. Confirm the file
+is accessible before manually uninstalling the old app, then install the new
+APK and restore the backup. Uninstalling removes private settings and document
+access grants. Choose music and backup folders again, review all Android alarm
+permissions and phone-specific battery controls, then turn the imported alarms
+on and test a near-term scheduled alarm with the screen off. Imported alarms
+remain off until reviewed. Keep the backup and original APK until migration is
+complete. The new retained signing identity supports later compatible updates
+with higher version codes.
+
 ## Moving from the debug preview
 
 Debug and release currently use the production application ID
