@@ -58,6 +58,15 @@ body {
   grid-template-rows: 42px 1fr 28px;
 }
 
+/* Freeze decorative motion in the tray or taskbar without unloading the page
+   that owns desktop audio. Pausing also preserves the backdrop's phase. */
+body.visuals-paused,
+body.visuals-paused *,
+body.visuals-paused *::before,
+body.visuals-paused *::after {
+  animation-play-state: paused !important;
+}
+
 /* ---------------------------------------------------------- backdrop --- */
 
 .sky {

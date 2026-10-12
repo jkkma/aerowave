@@ -518,16 +518,16 @@ function init() {
     renderer: state.renderer,
     draw: () => state.renderer.render(state.scene, state.camera),
     step,
-    visible: () => !document.hidden,
+    visible: () => window.aerowaveVisuals?.visible() ?? !document.hidden,
     reducedMotion: () => reducedMotion.matches,
     now: () => performance.now(),
     pause: () => { state.kick = 0; },
   });
-  document.addEventListener("visibilitychange", renderLoop.sync);
+  if (!window.aerowaveVisuals) document.addEventListener("visibilitychange", renderLoop.sync);
   if (reducedMotion.addEventListener) reducedMotion.addEventListener("change", renderLoop.sync);
   else reducedMotion.addListener(renderLoop.sync);
   renderLoop.sync();
   return true;
 }
 
-window.aerowaveOrb = { ok: init(), setImage };
+window.aerowaveOrb = { ok: init(), setImage, syncVisibility: () => renderLoop?.sync() };

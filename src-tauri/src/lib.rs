@@ -864,12 +864,40 @@ fn fade_emergency_tone(state: State<AppState>, alarm_id: String, occurrence_id: 
 }
 
 #[tauri::command]
+fn window_render_visible(app: AppHandle) -> Result<bool, String> {
+    #[cfg(desktop)]
+    {
+        let window = app.get_webview_window("main").ok_or("The main window is unavailable")?;
+        Ok(window.is_visible().map_err(|error| error.to_string())?
+            && !window.is_minimized().map_err(|error| error.to_string())?)
+    }
+    #[cfg(mobile)]
+    {
+        let _ = app;
+        Ok(true)
+    }
+}
+
+#[cfg(desktop)]
+pub(crate) fn emit_render_visibility(app: &AppHandle) {
+    // Native getters wait on the UI thread. The alarm clock can call this while
+    // holding its state lock, so enqueue the read instead of blocking that clock.
+    let emitter = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Ok(visible) = window_render_visible(emitter.clone()) {
+            let _ = emitter.emit("window-render-visibility", visible);
+        }
+    });
+}
+
+#[tauri::command]
 fn hide_window(_app: AppHandle) {
     #[cfg(desktop)]
     let app = _app;
     #[cfg(desktop)]
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.hide();
+        emit_render_visibility(&app);
     }
 }
 
@@ -902,6 +930,7 @@ fn finish_window_action(app: &AppHandle, action: WindowAction) {
     if to_tray {
         if let Some(window) = app.get_webview_window("main") {
             let _ = window.hide();
+            emit_render_visibility(app);
         }
     } else {
         app.exit(0);
@@ -1010,6 +1039,7 @@ fn surface(app: &AppHandle) {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        emit_render_visibility(app);
     }
 }
 
@@ -1212,6 +1242,7 @@ pub fn run() {
             if std::env::args().any(|a| a == "--minimized") {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.hide();
+                    emit_render_visibility(&handle);
                 }
             }
             Ok(())
@@ -1219,6 +1250,14 @@ pub fn run() {
         .on_window_event(|_window, _event| {
             #[cfg(desktop)]
             let (window, event) = (_window, _event);
+            #[cfg(desktop)]
+            if window.label() == "main"
+                && matches!(event, WindowEvent::Resized(_) | WindowEvent::Focused(_))
+            {
+                // Focus changes are only a cue to read the window state. An
+                // unfocused but visible window still has live visual effects.
+                emit_render_visibility(window.app_handle());
+            }
             #[cfg(desktop)]
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
@@ -1272,6 +1311,7 @@ pub fn run() {
             start_emergency_tone,
             set_emergency_tone_volume,
             fade_emergency_tone,
+            window_render_visible,
             hide_window,
             quit_app,
             request_window_action,

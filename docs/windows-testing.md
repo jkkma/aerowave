@@ -109,6 +109,21 @@ the production relay using the Aerowave User-Agent; FIP reached readyState 3
 with an advancing playhead. These were instrumented native-app checks, not
 physical keyboard, speaker-audibility or unattended-wake qualification.
 
+## Visual effects while hidden
+
+With disposable portable settings, start decoded audio and minimize the window,
+then restore it. Repeat with Close-to-tray and a launch with `--minimized`.
+The orb's WebGL render count must stop changing while hidden, and the backdrop's
+CSS animations must have a paused play state. A visible window that loses focus
+must keep animating. Restore must resume one render loop with no catch-up spin
+or backdrop jump. New station artwork received while hidden must appear on restore.
+
+Check an alarm due while minimized and while hidden in the tray: it must surface
+the window, resume the visuals and start decoded audio. Audio playback, volume
+fades, the ringing watchdog and automatic stop remain active independently of
+visual suspension. Record media readiness and an advancing media clock; this
+does not by itself establish physical speaker output.
+
 ## Closing and quitting
 
 With disposable settings, change volume, Wake PC for alarms, or the selected

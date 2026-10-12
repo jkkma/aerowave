@@ -24,6 +24,44 @@ const IS_LINUX_WEBVIEW = !IS_ANDROID && /\bLinux\b/i.test(
 document.body.classList.toggle("linux", IS_LINUX_WEBVIEW);
 document.body.classList.toggle("android", IS_ANDROID);
 
+// A tray-hidden WebView can still report a visible document. Only the visual
+// effects follow the native window; playback and alarm timers keep running.
+let nativeRenderVisible = !appWindow;
+let renderVisibilityRevision = 0;
+let renderVisible = null;
+window.aerowaveVisuals = { visible: () => renderVisible };
+
+function syncVisualVisibility() {
+  const visible = nativeRenderVisible && !document.hidden;
+  if (visible === renderVisible) return;
+  renderVisible = visible;
+  document.body.classList.toggle("visuals-paused", !visible);
+  window.aerowaveOrb?.syncVisibility?.();
+}
+
+async function watchVisualVisibility() {
+  if (!appWindow) return;
+  try {
+    await listen("window-render-visibility", (event) => {
+      if (typeof event.payload !== "boolean") return;
+      ++renderVisibilityRevision;
+      nativeRenderVisible = event.payload;
+      syncVisualVisibility();
+    });
+    const revision = renderVisibilityRevision;
+    const visible = await invoke("window_render_visible");
+    // A restore or hide received during the query is newer than its snapshot.
+    if (revision === renderVisibilityRevision) nativeRenderVisible = visible === true;
+  } catch (error) {
+    if (!renderVisibilityRevision) nativeRenderVisible = true;
+    console.warn("Aerowave: could not check window visibility -", error);
+  }
+  syncVisualVisibility();
+}
+
+document.addEventListener("visibilitychange", syncVisualVisibility);
+syncVisualVisibility();
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -6535,6 +6573,7 @@ async function retrySettingsStorage() {
 async function boot() {
   if (!IS_ANDROID) {
     await listen("window-action-requested", (event) => handleWindowAction(event.payload));
+    watchVisualVisibility();
   }
   await tickClock();
   // Saving an alarm can return before Windows finishes updating its timer.
