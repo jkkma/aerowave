@@ -162,6 +162,7 @@ function createHarness(options = {}) {
       if (result !== undefined) return result;
     }
     if (command === "relay_url") return "http://127.0.0.1/relay/" + encodeURIComponent(args.url);
+    if (command === "window_render_visible") return true;
     if (command === "probe_stream") return { url: args.url, hls: false };
     if (command === "hls_session") return "http://hls.localhost/session";
     if (command === "get_sleep_timer") return sleepSnapshot;

@@ -512,6 +512,7 @@ fn surface_window(app: &AppHandle) {
         let _ = w.show();
         let _ = w.set_always_on_top(true);
         let _ = w.set_focus();
+        crate::emit_render_visibility(app);
     }
 }
 
@@ -1034,6 +1035,7 @@ fn tick_sleep(
             let _ = w.unminimize();
             let _ = w.show();
             let _ = w.set_focus();
+            crate::emit_render_visibility(app);
         }
     }
     if let SleepEffect::Execute(action) = effect {
