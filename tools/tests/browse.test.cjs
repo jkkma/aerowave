@@ -100,6 +100,296 @@ test("a new Browse search skips queued logos whose old rows were replaced", asyn
   assert.equal(h.el("#browse-list").children[0].children[0].children[0].textContent, "NE");
 });
 
+function thumbnailHarness(invoke) {
+  const png = "data:image/png;base64,aW1hZ2U=";
+  const h = createHarness({ invoke });
+  h.context.Image = class {
+    naturalWidth = 128;
+    naturalHeight = 128;
+    async decode() { if (this.src.includes("Y29ycnVwdA==")) throw new Error("Corrupt image"); }
+  };
+  const create = h.document.createElement;
+  h.document.createElement = tag => tag === "canvas" ? {
+    getContext: () => ({ drawImage() {} }), toDataURL: () => png,
+  } : create(tag);
+  return { h, png };
+}
+
+for (const favicon of ["", "https://art.test/dead.png"]) {
+  test(`Browse recovers ${favicon ? "failed" : "missing"} artwork before playback, only when its row is visible`, async () => {
+    const artwork = deferred();
+    let observer;
+    const { h, png } = thumbnailHarness((command) => {
+      if (command === "station_logo") throw new Error("HTTP 404");
+      if (command === "station_art") return artwork.promise;
+    });
+    h.context.IntersectionObserver = class {
+      constructor(callback) { this.callback = callback; observer = this; }
+      observe() {}
+      unobserve() {}
+    };
+    h.context.favicon = favicon;
+    h.evaluate(`browseResults = [{ name: "Radio", url: "https://radio.test/live", favicon }]; renderBrowse()`);
+    const mark = h.el("#browse-list").children[0].children[0];
+    assert.equal(h.calls.some(({ command }) => command === "station_art" || command === "station_logo"), false);
+    assert.ok(observer, "rows without a favicon still register for lazy artwork loading");
+    observer.callback([{ target: mark, isIntersecting: true }]);
+    await flush();
+    const lookup = h.calls.find(({ command }) => command === "station_art");
+    assert.ok(lookup, "visible results recover artwork without pressing Listen");
+    assert.equal(lookup.args.url, "https://radio.test/live");
+    assert.equal(lookup.args.resolvedUrl, null);
+    assert.deepEqual([...lookup.args.excludedUrls], favicon ? [favicon] : []);
+    artwork.resolve({ url: "https://art.test/good.png", picture: png });
+    await flush();
+    assert.equal(mark.children[1].src, png);
+    await mark.children[1].dispatch("load");
+    assert.equal(mark.children[1].hidden, false);
+    assert.equal(mark.children[0].hidden, true);
+    assert.equal(h.evaluate("player.source"), null);
+    assert.equal(h.calls.some(({ command }) => ["probe_stream", "relay_url", "save_stations"].includes(command)), false);
+
+    const lookups = h.calls.length;
+    h.evaluate("renderBrowse()");
+    assert.equal(h.el("#browse-list").children[0].children[0].children[1].src, png);
+    assert.equal(h.calls.length, lookups, "recovered artwork stays cached across renders");
+  });
+}
+
+test("Browse excludes decode-rejected fallback artwork before trying another matching submission", async () => {
+  const corrupt = "data:image/png;base64,Y29ycnVwdA==";
+  let attempts = 0;
+  const { h, png } = thumbnailHarness((command) => {
+    if (command === "station_logo") return corrupt;
+    if (command === "station_art") return ++attempts === 1
+      ? { url: "https://art.test/corrupt.png", picture: corrupt }
+      : { url: "https://art.test/good.png", picture: png };
+  });
+  h.evaluate(`browseResults = [{ name: "Radio", url: "https://radio.test/live", favicon: "https://art.test/dead.png" }]; renderBrowse()`);
+  await flush();
+  assert.equal(h.el("#browse-list").children[0].children[0].children[1].src, png);
+  const lookups = h.calls.filter(({ command }) => command === "station_art");
+  assert.equal(lookups.length, 2);
+  assert.deepEqual([...lookups[1].args.excludedUrls], ["https://art.test/dead.png", "https://art.test/corrupt.png"]);
+});
+
+test("Browse bounds corrupt fallback attempts and caches failed recoveries", async () => {
+  let attempts = 0;
+  const { h } = thumbnailHarness((command) => command === "station_art"
+    ? { url: `https://art.test/corrupt${++attempts}.png`, picture: "data:image/png;base64,Y29ycnVwdA==" }
+    : undefined);
+  h.evaluate(`browseResults = [{ name: "Radio", url: "https://radio.test/live", favicon: "" }]; renderBrowse()`);
+  await flush();
+  assert.equal(attempts, 4);
+  assert.equal(h.el("#browse-list").children[0].children[0].children[1].src, undefined);
+  h.evaluate("renderBrowse()");
+  await flush();
+  assert.equal(attempts, 4);
+});
+
+test("late recovered artwork cannot repaint a row replaced by a new Browse query", async () => {
+  const old = deferred();
+  const { h, png } = thumbnailHarness((command, args) => {
+    if (command === "station_art") return args.url.endsWith("old") ? old.promise : null;
+  });
+  h.evaluate(`browseResults = [{ name: "Old", url: "https://radio.test/old", favicon: "" }]; renderBrowse()`);
+  const oldMark = h.el("#browse-list").children[0].children[0];
+  h.evaluate(`browseResults = [{ name: "New", url: "https://radio.test/new", favicon: "" }]; renderBrowse()`);
+  old.resolve({ url: "https://art.test/old.png", picture: png });
+  await flush();
+  assert.equal(oldMark.children[1].src, undefined);
+  assert.equal(h.el("#browse-list").children[0].children[0].children[1].src, undefined);
+});
+
+test("a disposed incomplete artwork lookup cannot cache a miss for a later query", async () => {
+  const old = deferred();
+  let attempts = 0;
+  const { h, png } = thumbnailHarness((command) => {
+    if (command === "station_art") return ++attempts === 1
+      ? old.promise : { url: "https://art.test/good.png", picture: png };
+  });
+  const results = `browseResults = [{ name: "Radio", url: "https://radio.test/live", favicon: "" }]; renderBrowse()`;
+  h.evaluate(results);
+  h.evaluate("browseResults = []; renderBrowse()");
+  old.resolve({ url: "https://art.test/corrupt.png", picture: "data:image/png;base64,Y29ycnVwdA==" });
+  await flush();
+  h.evaluate(results);
+  await flush();
+  assert.equal(attempts, 2);
+  assert.equal(h.el("#browse-list").children[0].children[0].children[1].src, png);
+});
+
+test("playback recovery fills a missing Browse thumbnail while preserving other streams and chosen logos", async () => {
+  let attempts = 0;
+  const { h, png } = thumbnailHarness((command) => {
+    if (command === "station_logo") throw new Error("HTTP 404");
+    if (command === "station_art") return ++attempts === 1
+      ? null : { url: "https://art.test/recovered.png", picture: png };
+  });
+  h.evaluate(`browseResults = [{ name: "Radio", url: "https://radio.test/live", favicon: "https://art.test/dead.png" }]; renderBrowse()`);
+  await flush();
+  const row = h.el("#browse-list").children[0];
+  const mark = row.children[0];
+  assert.equal(mark.children[1].src, undefined);
+  const chosen = h.document.createElement("span");
+  const unrelated = h.document.createElement("span");
+  const populated = h.document.createElement("span");
+  h.context.chosen = chosen;
+  h.context.unrelated = unrelated;
+  h.context.populated = populated;
+  h.evaluate(`thumbnailArt.set("https://art.test/other.png", "existing-picture");
+    stationThumbnail(chosen, { url: "https://radio.test/live", logo: "https://art.test/custom.png" }, "C");
+    stationThumbnail(unrelated, { url: "https://other.test/live" }, "U");
+    stationThumbnail(populated, { url: "https://radio.test/live", favicon: "https://art.test/other.png" }, "P", { recoverArtwork: true })`);
+  h.queries.set(".station-thumbnail-mark", [mark, chosen, unrelated, populated]);
+  h.evaluate("previewBrowse(browseResults[0])");
+  await flush();
+  assert.equal(h.evaluate("player.source.logo"), "https://art.test/recovered.png");
+  assert.equal(h.el("#browse-list").children[0], row, "recovery does not require another search or render");
+  assert.equal(mark.children[1].src, png);
+  assert.equal(chosen.children[1].src, undefined);
+  assert.equal(unrelated.children[1].src, undefined);
+  assert.equal(populated.children[1].src, "existing-picture");
+});
+
+for (const pending of ["favicon", "fallback"]) {
+  test(`a late Browse ${pending} lookup cannot replace artwork recovered by playback`, async () => {
+    const old = deferred();
+    let logoAttempts = 0;
+    let artAttempts = 0;
+    const { h, png } = thumbnailHarness((command) => {
+      if (command === "station_logo") {
+        if (pending === "favicon" && ++logoAttempts === 1) return old.promise;
+        throw new Error("HTTP 404");
+      }
+      if (command === "station_art") return pending === "fallback" && ++artAttempts === 1
+        ? old.promise : { url: "https://art.test/current.png", picture: png };
+    });
+    const create = h.document.createElement;
+    h.document.createElement = tag => {
+      if (tag !== "canvas") return create(tag);
+      let picture;
+      return { getContext: () => ({ drawImage(image) { picture = image.src; } }), toDataURL: () => picture };
+    };
+    h.evaluate(`browseResults = [{ name: "Radio", url: "https://radio.test/live", favicon: "https://art.test/dead.png" }]; renderBrowse()`);
+    await flush();
+    const mark = h.el("#browse-list").children[0].children[0];
+    h.queries.set(".station-thumbnail-mark", [mark]);
+    h.evaluate("previewBrowse(browseResults[0])");
+    await flush();
+    assert.equal(mark.children[1].src, png);
+    const oldPicture = "data:image/png;base64,b2xk";
+    old.resolve(pending === "favicon" ? oldPicture : { url: "https://art.test/old.png", picture: oldPicture });
+    await flush();
+    assert.equal(mark.children[1].src, png);
+  });
+}
+
+test("a new Browse query disposes fallback artwork work and keeps at most four requests active", async () => {
+  const primary = deferred();
+  let active = 0;
+  let peak = 0;
+  const { h, png } = thumbnailHarness(async (command) => {
+    if (command !== "station_logo" && command !== "station_art") return undefined;
+    peak = Math.max(peak, ++active);
+    try {
+      if (command === "station_logo") { await primary.promise; return null; }
+      return { url: "https://art.test/new.png", picture: png };
+    } finally { active--; }
+  });
+  h.evaluate(`browseResults = Array.from({ length: 36 }, (_, n) => ({ name: "Old " + n,
+    url: "https://radio.test/old/" + n, favicon: "https://art.test/old" + n + ".png" })); renderBrowse()`);
+  assert.equal(active, 4);
+  assert.equal(h.evaluate("thumbnailQueue.length"), 32);
+  h.evaluate(`browseResults = [{ name: "New", url: "https://radio.test/new", favicon: "" }]; renderBrowse()`);
+  primary.resolve();
+  await flush();
+  assert.ok(peak <= 4);
+  assert.deepEqual(h.calls.filter(({ command }) => command === "station_art").map(({ args }) => args.url), ["https://radio.test/new"]);
+  assert.equal(h.el("#browse-list").children[0].children[0].children[1].src, png);
+});
+
+for (const [favicon, playbackFills, failedFavicon] of [[true, false], [false, false], [true, true], [false, true], [true, false, true]]) {
+  test(`rapidly viewing more than 36 Browse rows loads their ${failedFavicon ? "artwork after failed favicons" : favicon ? "favicons" : "fallback artwork"}${playbackFills ? " and skips a wait filled by playback" : " without another scroll"}`, async () => {
+    const pending = deferred();
+    let active = 0;
+    let peak = 0;
+    let observer;
+    const { h, png } = thumbnailHarness(async (command) => {
+      if (command !== "station_logo" && command !== "station_art") return undefined;
+      peak = Math.max(peak, ++active);
+      try {
+        await pending.promise;
+        return command === "station_logo" ? failedFavicon ? null : png : { url: "https://art.test/matching.png", picture: png };
+      } finally { active--; }
+    });
+    h.context.IntersectionObserver = class {
+      observed = new Set();
+      constructor(callback) { this.callback = callback; observer = this; }
+      observe(mark) { this.observed.add(mark); }
+      unobserve(mark) { this.observed.delete(mark); }
+    };
+    h.context.withFavicon = favicon;
+    h.evaluate(`browseResults = Array.from({ length: 41 }, (_, n) => ({ name: "Radio " + n,
+      url: "https://radio.test/" + n, favicon: withFavicon ? "https://art.test/" + n + ".png" : "" })); renderBrowse()`);
+    const marks = h.el("#browse-list").children.map(row => row.children[0]);
+    h.queries.set(".station-thumbnail-mark", marks);
+    for (const mark of marks.slice(0, 40)) observer.callback([{ target: mark, isIntersecting: true }]);
+    await flush();
+    assert.equal(active, 4);
+    assert.equal(h.evaluate("thumbnailQueue.length"), 32);
+    const command = favicon ? "station_logo" : "station_art";
+    assert.equal(h.calls.filter(call => call.command === command).length, 4);
+    assert.equal(observer.observed.has(marks[40]), true, "a row never viewed remains lazy");
+    if (playbackFills) {
+      h.context.picture = png;
+      h.evaluate('refreshPlayingStationThumbnails({ kind: "station", url: "https://radio.test/39", logo: "https://art.test/recovered.png" }, picture)');
+      assert.equal(marks[39].children[1].src, png);
+    }
+    pending.resolve();
+    await flush();
+    assert.equal(h.calls.filter(call => call.command === command).length, playbackFills ? 39 : 40);
+    if (failedFavicon) assert.equal(h.calls.filter(call => call.command === "station_art").length, 40);
+    assert.equal(h.evaluate("thumbnailQueue.length"), 0);
+    assert.equal(active, 0);
+    assert.ok(peak <= 4);
+    assert.equal(marks.slice(0, 40).every(mark => mark.children[1].src === png), true);
+    assert.equal(marks[40].children[1].src, undefined);
+    assert.equal(h.calls.some(call => ["probe_stream", "relay_url"].includes(call.command)), false);
+  });
+}
+
+test("replacing a Browse query cancels capacity-blocked artwork admissions", async () => {
+  const pending = deferred();
+  let observer;
+  const { h, png } = thumbnailHarness(async (command) => {
+    if (command === "station_logo") { await pending.promise; return png; }
+    if (command === "station_art") return { url: "https://art.test/new.png", picture: png };
+  });
+  h.context.IntersectionObserver = class {
+    constructor(callback) { this.callback = callback; observer = this; }
+    observe() {}
+    unobserve() {}
+  };
+  h.evaluate(`browseResults = Array.from({ length: 40 }, (_, n) => ({ name: "Old " + n,
+    url: "https://radio.test/old/" + n, favicon: "https://art.test/" + n + ".png" })); renderBrowse()`);
+  const oldMarks = h.el("#browse-list").children.map(row => row.children[0]);
+  h.queries.set(".station-thumbnail-mark", oldMarks);
+  oldMarks.forEach(mark => observer.callback([{ target: mark, isIntersecting: true }]));
+  h.evaluate(`browseResults = [{ name: "New", url: "https://radio.test/new", favicon: "" }]; renderBrowse()`);
+  const mark = h.el("#browse-list").children[0].children[0];
+  h.queries.set(".station-thumbnail-mark", [mark]);
+  observer.callback([{ target: mark, isIntersecting: true }]);
+  pending.resolve();
+  await flush();
+  assert.equal(h.calls.filter(call => call.command === "station_logo").length, 4);
+  assert.deepEqual(h.calls.filter(call => call.command === "station_art").map(call => call.args.url), ["https://radio.test/new"]);
+  assert.equal(oldMarks.every(mark => mark.children[1].src === undefined), true);
+  assert.equal(mark.children[1].src, png);
+  assert.equal(h.evaluate("thumbnailQueue.length"), 0);
+  assert.equal(h.evaluate("thumbnailActive"), 0);
+});
+
 test("More pages the submitted text query rather than an unsubmitted edit", async () => {
   const requests = [];
   const h = browseHarness(({ query }) => {
@@ -837,6 +1127,109 @@ test("Browse Save stays pending until persistence and becomes retryable after fa
   assert.equal(h.evaluate("state.stations.length"), 1);
   assert.equal(add.textContent, "Saved");
   assert.equal(saves, 2);
+});
+
+for (const recoveryFails of [false, true]) {
+  test(`Browse Save rejected during settings recovery remains retryable after recovery ${recoveryFails ? "fails" : "succeeds"}`, async () => {
+    const recovery = deferred();
+    const write = deferred();
+    const healthy = { error: null, writesBlocked: false, pendingCompletions: false, restartSafe: true };
+    const recovered = { stations: [], alarms: [], settings: {} };
+    let blocked = true;
+    let retries = 0;
+    const h = createHarness({ invoke(command) {
+      if (command === "retry_settings_storage") {
+        if (++retries === 1) return recovery.promise;
+        blocked = false;
+        return structuredClone(recovered);
+      }
+      if (command === "get_storage_status") return { ...healthy, writesBlocked: blocked, error: blocked ? "Locked" : null };
+      if (command === "config_location") return { path: "/settings/aerowave.json", portable: true, loadError: blocked ? "Locked" : null };
+      if (command === "save_stations") {
+        if (blocked) throw new Error("Settings are protected");
+        return write.promise;
+      }
+      return undefined;
+    } });
+    h.evaluate(`applyStorageStatus({ error: "Locked", writesBlocked: true, pendingCompletions: false, restartSafe: true });
+      browseResults = [{ name: "Candidate", url: "https://candidate.test/live", favicon: "" }]; renderBrowse()`);
+    const recovering = h.evaluate("retrySettingsStorage()");
+    await flush();
+    assert.equal(h.evaluate("setupRestorePending"), true);
+    const add = h.el("#browse-list").children[0].querySelector(".browse-save");
+    await add.dispatch("click");
+    assert.equal(h.calls.some(({ command }) => command === "save_stations"), false);
+    assert.equal(h.evaluate("pendingBrowseAdds.size"), 0);
+    assert.equal(h.evaluate("state.stations.length"), 0);
+    assert.equal(add.textContent, "+ Save");
+    assert.equal(add.disabled, false);
+    assert.match(h.el("#status-msg").textContent, /finish.*again/);
+
+    if (recoveryFails) recovery.reject(new Error("Still locked"));
+    else { blocked = false; recovery.resolve(structuredClone(recovered)); }
+    await recovering;
+    assert.equal(h.evaluate("setupRestorePending"), false);
+    assert.equal(h.evaluate("pendingBrowseAdds.size"), 0);
+    assert.equal(h.evaluate("state.stations.length"), 0);
+    assert.equal(add.textContent, "+ Save");
+    if (recoveryFails) {
+      assert.equal(await h.evaluate("addBrowseStation(browseResults[0])"), false);
+      assert.equal(h.evaluate("pendingBrowseAdds.size"), 0);
+      assert.equal(add.textContent, "+ Save");
+      await h.evaluate("retrySettingsStorage()");
+    }
+
+    const saving = h.evaluate("addBrowseStation(browseResults[0])");
+    await flush();
+    assert.equal(add.textContent, "Saving…");
+    assert.equal(add.disabled, true);
+    assert.equal(h.evaluate("state.stations.length"), 0);
+    assert.equal(h.evaluate("addBrowseStation(browseResults[0])"), undefined);
+    write.resolve(null);
+    assert.equal(await saving, true);
+    assert.equal(h.evaluate("pendingBrowseAdds.size"), 0);
+    assert.equal(h.evaluate("state.stations.length"), 1);
+    assert.equal(add.textContent, "Saved");
+    assert.equal(h.evaluate("addBrowseStation(browseResults[0])"), undefined);
+    assert.equal(h.calls.filter(({ command }) => command === "save_stations").length, recoveryFails ? 2 : 1);
+  });
+}
+
+test("settings recovery drains an accepted Browse Save while rejecting a new addition without losing its retry", async () => {
+  const firstWrite = deferred();
+  const recovery = deferred();
+  const h = createHarness({ invoke(command) {
+    if (command === "save_stations") return firstWrite.promise;
+    if (command === "retry_settings_storage") return recovery.promise;
+    if (command === "get_storage_status") return { error: null, writesBlocked: false, pendingCompletions: false, restartSafe: true };
+    if (command === "config_location") return { path: "/settings/aerowave.json", portable: true, loadError: null };
+    return undefined;
+  } });
+  h.evaluate(`browseResults = [
+    { name: "One", url: "https://one.test/live", favicon: "" },
+    { name: "Two", url: "https://two.test/live", favicon: "" }
+  ]; renderBrowse()`);
+  const one = h.evaluate("addBrowseStation(browseResults[0])");
+  await flush();
+  const recovering = h.evaluate("retrySettingsStorage()");
+  await flush();
+  assert.equal(h.evaluate("setupRestorePending"), true);
+  assert.equal(h.calls.some(({ command }) => command === "retry_settings_storage"), false);
+  assert.equal(await h.evaluate("addBrowseStation(browseResults[1])"), false);
+  assert.equal(h.evaluate("pendingBrowseAdds.size"), 1);
+  assert.equal(h.el("#browse-list").children[0].querySelector(".browse-save").textContent, "Saving…");
+  assert.equal(h.el("#browse-list").children[1].querySelector(".browse-save").textContent, "+ Save");
+  firstWrite.resolve(null);
+  assert.equal(await one, true);
+  await flush();
+  assert.equal(h.calls.filter(({ command }) => command === "save_stations").length, 1);
+  assert.equal(h.calls.filter(({ command }) => command === "retry_settings_storage").length, 1);
+  recovery.resolve(JSON.parse(h.evaluate("JSON.stringify(state)")));
+  await recovering;
+  assert.equal(h.evaluate("pendingBrowseAdds.size"), 0);
+  assert.equal(await h.evaluate("addBrowseStation(browseResults[1])"), true);
+  assert.equal(h.evaluate("JSON.stringify(state.stations.map(station => station.name))"), '["One","Two"]');
+  assert.equal(h.calls.filter(({ command }) => command === "save_stations").length, 2);
 });
 
 test("a failed pending Add cannot leak into an ordinary queued station save", async () => {

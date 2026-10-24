@@ -1617,62 +1617,117 @@ const THUMBNAIL_CACHE = 24;
 const THUMBNAIL_CONCURRENT = 4;
 const THUMBNAIL_QUEUED = 32;
 
+async function recoverThumbnailArt(url, logo, key) {
+  const excludedUrls = logo ? [logo] : [];
+  // Search results can keep a submission with no usable favicon even when
+  // another submission for the exact stream has one. Recover visible rows the
+  // same way playback does, without starting audio or matching station names.
+  for (let attempt = 0; attempt < 4 && thumbnailConsumers.get(key)?.size; attempt++) {
+    const found = await invoke("station_art", { url, resolvedUrl: null, excludedUrls: [...excludedUrls] });
+    if (!found || excludedUrls.includes(found.url)) return null;
+    excludedUrls.push(found.url);
+    try { return await decodedOrbArt(found.picture); }
+    catch { /* Another matching submission may have a decodable picture. */ }
+  }
+  return null;
+}
+
 function pumpThumbnailQueue() {
   while (thumbnailActive < THUMBNAIL_CONCURRENT && thumbnailQueue.length) {
-    const { logo, resolve } = thumbnailQueue.shift();
-    if (!thumbnailConsumers.get(logo)?.size) {
-      thumbnailRequests.delete(logo);
-      thumbnailConsumers.delete(logo);
+    const { key, logo, url, resolve } = thumbnailQueue.shift();
+    if (!thumbnailConsumers.get(key)?.size) {
+      thumbnailRequests.delete(key);
+      thumbnailConsumers.delete(key);
       resolve(null);
       continue;
     }
     thumbnailActive += 1;
     (async () => {
       try {
-        const data = await invoke("station_logo", { url: logo });
-        const picture = data ? await decodedOrbArt(data) : null;
+        const data = url ? null : await invoke("station_logo", { url: logo });
+        const picture = url ? await recoverThumbnailArt(url, logo, key) : data ? await decodedOrbArt(data) : null;
         if (picture) {
-          thumbnailArt.set(logo, picture);
+          thumbnailArt.set(key, picture);
           while (thumbnailArt.size > THUMBNAIL_CACHE) thumbnailArt.delete(thumbnailArt.keys().next().value);
-          thumbnailMisses.delete(logo);
-        } else thumbnailMisses.set(logo, Date.now() + 60000);
+          thumbnailMisses.delete(key);
+        } else if (thumbnailConsumers.get(key)?.size) thumbnailMisses.set(key, Date.now() + 60000);
         resolve(picture);
       } catch {
-        thumbnailMisses.set(logo, Date.now() + 60000);
+        if (thumbnailConsumers.get(key)?.size) thumbnailMisses.set(key, Date.now() + 60000);
         resolve(null);
       } finally {
         while (thumbnailMisses.size > THUMBNAIL_CACHE) thumbnailMisses.delete(thumbnailMisses.keys().next().value);
-        thumbnailRequests.delete(logo);
-        thumbnailConsumers.delete(logo);
+        thumbnailRequests.delete(key);
+        thumbnailConsumers.delete(key);
         thumbnailActive -= 1;
         pumpThumbnailQueue();
+        admitWaitingThumbnails();
       }
     })();
   }
 }
 
-function fetchStationThumbnail(logo, mark) {
-  if (thumbnailArt.has(logo)) return Promise.resolve(thumbnailArt.get(logo));
-  if ((thumbnailMisses.get(logo) || 0) > Date.now()) return Promise.resolve(null);
-  if (thumbnailRequests.has(logo)) {
-    thumbnailConsumers.get(logo).add(mark);
-    return thumbnailRequests.get(logo);
+function fetchStationThumbnail(logo, mark, url = "") {
+  const key = url ? JSON.stringify([url, logo]) : logo;
+  if (thumbnailArt.has(key)) return Promise.resolve(thumbnailArt.get(key));
+  if ((thumbnailMisses.get(key) || 0) > Date.now()) return Promise.resolve(null);
+  mark._stationThumbnail.requests.add(key);
+  if (thumbnailRequests.has(key)) {
+    thumbnailConsumers.get(key).add(mark);
+    return thumbnailRequests.get(key);
   }
-  if (thumbnailQueue.length >= THUMBNAIL_QUEUED) return Promise.resolve(null);
-  const request = new Promise(resolve => thumbnailQueue.push({ logo, resolve }));
-  thumbnailConsumers.set(logo, new Set([mark]));
-  thumbnailRequests.set(logo, request);
+  if (thumbnailQueue.length >= THUMBNAIL_QUEUED) {
+    // A visible row keeps its own admission while the bounded request queue
+    // is full. Completion frees the slot; no new scroll event is required.
+    return new Promise(resolve => { mark._stationThumbnail.admission = { key, logo, url, resolve }; });
+  }
+  const request = new Promise(resolve => thumbnailQueue.push({ key, logo, url, resolve }));
+  thumbnailConsumers.set(key, new Set([mark]));
+  thumbnailRequests.set(key, request);
   pumpThumbnailQueue();
   return request;
+}
+
+function admitWaitingThumbnails() {
+  document.querySelectorAll(".station-thumbnail-mark").forEach(mark => {
+    const thumb = mark._stationThumbnail;
+    const admission = thumb?.admission;
+    if (!admission) return;
+    if (mark.dataset.thumbnailDisposed === "true" || thumb.hasArtwork()) {
+      thumb.admission = null;
+      admission.resolve(null);
+      return;
+    }
+    if (thumbnailQueue.length >= THUMBNAIL_QUEUED && !thumbnailRequests.has(admission.key)
+      && !thumbnailArt.has(admission.key) && !((thumbnailMisses.get(admission.key) || 0) > Date.now())) return;
+    thumb.admission = null;
+    fetchStationThumbnail(admission.logo, mark, admission.url).then(admission.resolve);
+  });
 }
 
 function releaseStationThumbnails(root) {
   root.querySelectorAll(".station-thumbnail-mark").forEach(mark => {
     mark.dataset.thumbnailDisposed = "true";
-    thumbnailConsumers.get(mark._stationThumbnail?.logo)?.delete(mark);
+    const thumb = mark._stationThumbnail;
+    thumb?.requests.forEach(key => thumbnailConsumers.get(key)?.delete(mark));
+    if (thumb?.admission) {
+      thumb.admission.resolve(null);
+      thumb.admission = null;
+    }
     thumbnailObserver?.unobserve(mark);
     thumbnailLoads.delete(mark);
   });
+  // Retired rows must free queued slots before their replacements request
+  // artwork, even while all four active requests are still waiting.
+  for (let index = thumbnailQueue.length - 1; index >= 0; index--) {
+    const { key, resolve } = thumbnailQueue[index];
+    if (thumbnailConsumers.get(key)?.size) continue;
+    thumbnailQueue.splice(index, 1);
+    thumbnailRequests.delete(key);
+    thumbnailConsumers.delete(key);
+    resolve(null);
+  }
+  admitWaitingThumbnails();
 }
 
 function observeStationThumbnail(mark, fetch) {
@@ -1690,7 +1745,7 @@ function observeStationThumbnail(mark, fetch) {
   thumbnailObserver.observe(mark);
 }
 
-function stationThumbnail(mark, station, letter) {
+function stationThumbnail(mark, station, letter, { recoverArtwork = false } = {}) {
   const url = station.url || "";
   const logo = station.logo || station.favicon || "";
   const key = JSON.stringify([url, logo]);
@@ -1718,13 +1773,21 @@ function stationThumbnail(mark, station, letter) {
     if (!picture || mark.dataset.thumbnailKey !== key || mark.dataset.thumbnailDisposed === "true") return;
     image.src = picture;
   };
-  mark._stationThumbnail = { url, logo, show };
+  mark._stationThumbnail = { url, logo, show, requests: new Set(),
+    hasArtwork: () => !!image.src, needsArtwork: () => recoverArtwork && !image.src };
   const current = player.source?.kind === "station" && sameStream(player.source.url, url)
     && (!logo || logo === (player.source.logo || "")) ? player.artwork : null;
-  const cached = current || orbArt.get(JSON.stringify([url, logo])) || (logo && thumbnailArt.get(logo));
+  const cached = current || orbArt.get(key) || (recoverArtwork && thumbnailArt.get(key)) || (logo && thumbnailArt.get(logo));
   if (cached) show(cached);
-  else if (logo) {
-    const fetch = () => fetchStationThumbnail(logo, mark).then(show);
+  else if (logo || (recoverArtwork && url)) {
+    const fetch = async () => {
+      let picture = logo ? await fetchStationThumbnail(logo, mark) : null;
+      if (!picture && !image.src && recoverArtwork && url && mark.dataset.thumbnailDisposed !== "true") {
+        picture = await fetchStationThumbnail(logo, mark, url);
+      }
+      // Playback can fill the mark while this background lookup is pending.
+      if (!image.src) show(picture);
+    };
     observeStationThumbnail(mark, fetch);
   }
 }
@@ -1734,7 +1797,9 @@ function refreshPlayingStationThumbnails(source, picture) {
   document.querySelectorAll(".station-thumbnail-mark").forEach(mark => {
     const thumb = mark._stationThumbnail;
     if (thumb && sameStream(thumb.url, source.url)
-      && (!thumb.logo || thumb.logo === (source.logo || ""))) thumb.show(picture);
+      // Playback may recover a different favicon after a result's own lookup
+      // failed. Fill that empty Browse mark without replacing a chosen logo.
+      && (thumb.needsArtwork() || !thumb.logo || thumb.logo === (source.logo || ""))) thumb.show(picture);
   });
 }
 
@@ -3170,6 +3235,10 @@ function previewBrowse(st) {
 
 function addBrowseStation(st) {
   if (browseSaved(st.url) || browseSaving(st.url)) return;
+  if (setupRestorePending) {
+    say("Wait for settings recovery to finish, then try saving this station again.");
+    return Promise.resolve(false);
+  }
   // The genre that was searched for beats the directory's own first tag: it
   // is what this station is to the person keeping it.
   const tag = browseTagLabel || st.tag;
@@ -3193,10 +3262,9 @@ function addBrowseStation(st) {
       refreshBrowseIndicators();
       say(st.name + " added to your stations", "good");
     },
-    onFailure: () => {
-      pendingBrowseAdds.delete(station);
-      refreshBrowseIndicators();
-    },
+  }).finally(() => {
+    pendingBrowseAdds.delete(station);
+    refreshBrowseIndicators();
   });
 }
 
@@ -3275,7 +3343,7 @@ function renderBrowse() {
     const mark = document.createElement("span");
     mark.className = "browse-station-mark";
     mark.setAttribute("aria-hidden", "true");
-    stationThumbnail(mark, st, (st.name || "Radio").trim().slice(0, 2).toLocaleUpperCase());
+    stationThumbnail(mark, st, (st.name || "Radio").trim().slice(0, 2).toLocaleUpperCase(), { recoverArtwork: true });
 
     const name = document.createElement("span");
     name.className = "name";
