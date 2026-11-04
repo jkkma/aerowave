@@ -135,6 +135,27 @@ pub fn is_hls(body: &str) -> bool {
     body.contains("#EXT-X-")
 }
 
+/// Error pages must not reach the audio decoder, whether the server answers
+/// with an HTTP status line or the older ICY dialect. A missing content type
+/// remains acceptable because many Shoutcast streams provide none.
+pub fn is_playable_type(content_type: &str) -> bool {
+    let t = content_type.trim().to_ascii_lowercase();
+    !(t.starts_with("text/")
+        || t.starts_with("application/json")
+        || t.starts_with("application/xml")
+        || t.starts_with("application/xhtml"))
+}
+
+/// IPv6 brackets belong in the HTTP Host header, but socket resolution needs
+/// the address itself. Keep those two representations separate.
+pub fn socket_host(url: &url::Url) -> Option<String> {
+    Some(match url.host()? {
+        url::Host::Domain(host) => host.to_string(),
+        url::Host::Ipv4(address) => address.to_string(),
+        url::Host::Ipv6(address) => address.to_string(),
+    })
+}
+
 /// The relay must honor every valid interval after asking for metadata. Its
 /// streaming stripper keeps only the metadata block, so the probe's buffer
 /// budget is not a limit on the distance between blocks.
@@ -596,6 +617,44 @@ fn radio_info_title(xml: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_audio_content_types_are_refused_in_both_server_dialects() {
+        for content_type in [
+            "text/html",
+            " TEXT/HTML; charset=utf-8 ",
+            "text/plain",
+            "application/json; charset=utf-8",
+            "application/xml",
+            "application/xhtml+xml",
+        ] {
+            assert!(!is_playable_type(content_type), "{content_type}");
+        }
+        for content_type in [
+            "",
+            "  ",
+            "audio/mpeg",
+            "audio/aac",
+            "application/ogg",
+            "application/octet-stream",
+        ] {
+            assert!(is_playable_type(content_type), "{content_type}");
+        }
+    }
+
+    #[test]
+    fn socket_hosts_leave_ipv6_brackets_in_the_http_authority_only() {
+        for (address, expected) in [
+            ("http://radio.example:8000/live", Some("radio.example")),
+            ("http://192.0.2.1:8000/live", Some("192.0.2.1")),
+            ("http://[2001:db8::1]:8000/live", Some("2001:db8::1")),
+            ("http://[::1]/live", Some("::1")),
+            ("file:///music.mp3", None),
+        ] {
+            let parsed = url::Url::parse(address).unwrap();
+            assert_eq!(socket_host(&parsed).as_deref(), expected, "{address}");
+        }
+    }
 
     #[test]
     fn reads_a_stream_title() {

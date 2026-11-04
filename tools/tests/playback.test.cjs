@@ -6,6 +6,136 @@ function folderHarness(pick) {
   return createHarness({ invoke: (command) => command === "random_track" ? pick.promise : undefined });
 }
 
+test("Pause cancels a scheduled station reconnect and Resume rejoins the station", async () => {
+  let plays = 0;
+  const h = createHarness({
+    onPlay: () => { plays++; },
+    onPause: audio => { void audio.dispatch("pause"); },
+  });
+  await h.evaluate("play({kind:'station',url:'https://radio.test/live',title:'Live'})");
+  await h.audios[0].dispatch("playing");
+  h.evaluate("failure('network dropped')");
+  const retryId = h.evaluate("player.retryTimer");
+  const queuedRetry = h.timers.get(retryId).fn;
+  h.evaluate("pausePlayback()");
+
+  assert.equal(h.timers.has(retryId), false);
+  await queuedRetry();
+  assert.equal(plays, 1);
+  assert.equal(h.audios[0].paused, true);
+  assert.equal(h.evaluate("player.paused"), true);
+  assert.equal(h.el("#statusline").textContent, "Paused");
+
+  await h.evaluate("resumePlayback()");
+  await flush();
+  assert.equal(plays, 2);
+  assert.equal(h.audios[0].paused, false);
+  assert.equal(h.evaluate("player.paused"), false);
+  assert.equal(h.evaluate("player.source.url"), "https://radio.test/live");
+});
+
+for (const stage of ["probe", "relay", "HLS session"]) {
+  for (const rejects of [false, true]) {
+    test(`Pause discards an awaited reconnect ${stage} ${rejects ? "failure" : "reply"}`, async () => {
+      const pending = deferred();
+      let probes = 0, routes = 0, sessions = 0, plays = 0;
+      const h = createHarness({
+        onPlay: () => { plays++; },
+        invoke: (command) => {
+          if (stage === "probe" && command === "probe_stream") {
+            return ++probes === 1 ? Promise.reject(new Error("initial timeout")) : pending.promise;
+          }
+          if (stage === "relay" && command === "relay_url" && ++routes === 2) return pending.promise;
+          if (stage === "HLS session" && command === "hls_session" && ++sessions === 2) return pending.promise;
+          return undefined;
+        },
+      });
+      h.evaluate("state.settings.showMetadata=false");
+      await h.evaluate(`play({kind:'station',url:'https://radio.test/live',title:'Live',hls:${stage === "HLS session"}})`);
+      h.evaluate(stage === "probe" ? "failure('first drop'); failure('second drop')" : "failure('network dropped')");
+      const retry = h.fireTimer(h.evaluate("player.retryTimer"));
+      await flush();
+      h.evaluate("pausePlayback()");
+      if (rejects) pending.reject(new Error("late connection failure"));
+      else pending.resolve(stage === "probe" ? { url: "https://radio.test/resolved", hls: false }
+        : stage === "relay" ? "http://127.0.0.1/relay/reconnected" : "http://hls.localhost/late-session");
+      await retry;
+      await flush();
+
+      assert.equal(plays, 1);
+      assert.equal(h.audios[0].paused, true);
+      assert.equal(h.evaluate("player.paused"), true);
+      assert.equal(h.evaluate("player.retryTimer"), null);
+      assert.equal(h.calls.some(({ command }) => command === "backup_track"), false);
+      assert.equal(h.el("#statusline").textContent, "Paused");
+      if (stage === "HLS session") {
+        assert.equal(h.hlsInstances.length, 1);
+        if (!rejects) assert.ok(h.calls.some(({ command, args }) => command === "hls_close" && args.session === "late-session"));
+      }
+    });
+  }
+}
+
+for (const rejects of [false, true]) {
+  test(`Pause discards an awaited direct-fallback probe ${rejects ? "failure" : "reply"}`, async () => {
+    const pending = deferred();
+    let probes = 0, plays = 0;
+    const h = createHarness({
+      onPlay: () => { plays++; },
+      invoke: command => command === "probe_stream"
+        ? ++probes === 1 ? Promise.reject(new Error("initial timeout")) : pending.promise : undefined,
+    });
+    h.evaluate("state.settings.showMetadata=false");
+    await h.evaluate("play({kind:'station',url:'https://radio.test/live',title:'Live'})");
+    const fallback = h.evaluate("fallBackToDirect(player.source,playGeneration)");
+    await flush();
+    h.evaluate("pausePlayback()");
+    if (rejects) pending.reject(new Error("late probe failure"));
+    else pending.resolve({ url: "https://radio.test/resolved", hls: false });
+    await fallback;
+    await flush();
+
+    assert.equal(plays, 1);
+    assert.equal(h.audios[0].paused, true);
+    assert.equal(h.evaluate("player.paused"), true);
+    assert.equal(h.evaluate("player.retryTimer"), null);
+    assert.equal(h.el("#statusline").textContent, "Paused");
+  });
+}
+
+test("a reconnect play rejection after Pause cannot schedule another attempt", async () => {
+  const pending = deferred();
+  let plays = 0;
+  const h = createHarness({ onPlay: () => ++plays === 2 ? pending.promise : undefined });
+  await h.evaluate("play({kind:'station',url:'https://radio.test/live',title:'Live'})");
+  h.evaluate("failure('network dropped')");
+  await h.fireTimer(h.evaluate("player.retryTimer"));
+  h.evaluate("pausePlayback()");
+  pending.reject(new Error("decoder failed after pause"));
+  await flush();
+
+  assert.equal(h.evaluate("player.retryTimer"), null);
+  assert.equal(h.audios[0].paused, true);
+  assert.equal(h.el("#statusline").textContent, "Paused");
+});
+
+test("late media errors cannot reconnect or start direct fallback while a station is paused", async () => {
+  let plays = 0;
+  const h = createHarness({ onPlay: () => { plays++; } });
+  await h.evaluate("play({kind:'station',url:'https://radio.test/live',title:'Live'})");
+  h.evaluate("pausePlayback()");
+  for (const code of [2, 4]) {
+    h.audios[0].error = { code };
+    await h.audios[0].dispatch("error");
+    await flush();
+  }
+  assert.equal(plays, 1);
+  assert.equal(h.audios[0].paused, true);
+  assert.equal(h.evaluate("player.retryTimer"), null);
+  assert.equal(h.calls.some(({ command }) => command === "backup_track"), false);
+  assert.equal(h.el("#statusline").textContent, "Paused");
+});
+
 test("brief reconnects consume the retry budget before backup takes over", async () => {
   const h = createHarness();
   await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Flaky' })");

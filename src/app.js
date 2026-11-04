@@ -1237,6 +1237,7 @@ function closeHlsSession(base) {
  * already said why.
  */
 async function startHls(source, url, generation) {
+  if (superseded(generation) || player.source !== source || player.paused || givingUp) return false;
   switchingSource = true;
   clearInterval(player.metaTimer);
   player.metaTimer = null;
@@ -1248,7 +1249,7 @@ async function startHls(source, url, generation) {
   try {
     base = await invoke("hls_session", { url });
   } catch { /* falls through to the null check */ }
-  if (superseded(generation) || player.source !== source) {
+  if (superseded(generation) || player.source !== source || player.paused || givingUp) {
     if (base) closeHlsSession(base);
     return false;
   }
@@ -1361,7 +1362,7 @@ async function startAndroidPlayback(source, sourceUrl, useHls, generation, volum
       return false;
     }
   }
-  if (superseded(generation) || player.source !== source || givingUp) return false;
+  if (superseded(generation) || player.source !== source || player.paused || givingUp) return false;
 
   player.relayed = !useHls && playUrl !== sourceUrl;
   player.hls = useHls;
@@ -2020,7 +2021,7 @@ function onStreamTitle(payload) {
  */
 function failure(detail, opts = {}) {
   const source = player.source;
-  if (!source) return;
+  if (!source || player.paused) return;
 
   // Already receding: what failed was on its way to silence anyway, and a
   // fallback would only come in at full volume over the fade.
@@ -2068,7 +2069,7 @@ function failure(detail, opts = {}) {
     setStatus("Reconnecting", "busy");
     clearTimeout(player.retryTimer);
     player.retryTimer = setTimeout(() => {
-      if (player.source === source) play(source, { volume: player.target });
+      if (player.source === source && !player.paused) play(source, { volume: player.target });
     }, 1500);
     return;
   }
@@ -2096,21 +2097,21 @@ function failure(detail, opts = {}) {
     // Snapshot before the await, not after: taken afterwards this could only
     // ever equal itself, so it guarded nothing.
     const generation = playGeneration;
-    if (player.source !== source) return;
+    if (player.source !== source || player.paused || givingUp) return;
     // Second attempt onwards, try the playlist-resolved URL.
     if (player.retries >= 2 && !player.probed) {
       try {
         const info = await invoke("probe_stream", { url: source.url, wantTitle: false });
         // A stop during the probe must not write a resolved URL back into a
         // session that has already been torn down.
-        if (superseded(generation) || player.source !== source) return;
+        if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
         player.resolved = info.url;
         player.probed = true;
         source.hls = !!info.hls;
         source.hlsUrl = info.hls ? info.url : null;
       } catch { /* stay with the original */ }
     }
-    if (superseded(generation) || player.source !== source) return;
+    if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
     const upstream = player.resolved || source.url;
     if (IS_ANDROID) {
       const useHls = !!(player.hls || source.hls);
@@ -2127,10 +2128,11 @@ function failure(detail, opts = {}) {
       if (!(await startHls(source, upstream, generation))) return;
     } else {
       const playUrl = player.triedDirect ? upstream : await playable(source, upstream);
-      if (superseded(generation) || player.source !== source) return;
+      if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
       player.relayed = playUrl !== upstream;
       setAudioSource(playUrl);
     }
+    if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
     audio.play().then(() => startRecoveredMetadata(source, generation)).catch((e) => {
       if (superseded(generation) || isAbort(e)) return;
       failure(String(e && e.message ? e.message : e));
@@ -2147,6 +2149,7 @@ function failure(detail, opts = {}) {
  * direct connection is worth trying. HLS must still go through hls.js.
  */
 async function fallBackToDirect(source, generation) {
+  if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
   const hadRelayTitle = player.relayed && player.streamTitle;
   player.triedDirect = true;
   player.relayed = false;
@@ -2159,14 +2162,14 @@ async function fallBackToDirect(source, generation) {
   if (!player.probed) {
     try {
       const info = await invoke("probe_stream", { url: source.url, wantTitle: false });
-      if (superseded(generation) || player.source !== source) return;
+      if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
       player.resolved = info.url;
       player.probed = true;
       source.hls = !!info.hls;
       source.hlsUrl = info.hls ? info.url : null;
     } catch { /* the direct request may still work */ }
   }
-  if (superseded(generation) || player.source !== source) return;
+  if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
   const upstream = player.resolved || source.url;
   if (source.hls) {
     if (!(await startHls(source, upstream, generation))) return;
@@ -2174,6 +2177,7 @@ async function fallBackToDirect(source, generation) {
     setStatus("Trying another connection", "busy");
     setAudioSource(upstream);
   }
+  if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
   audio.play().then(() => startRecoveredMetadata(source, generation)).catch((e) => {
     if (superseded(generation) || isAbort(e)) return;
     failure(String(e && e.message ? e.message : e));
@@ -2390,6 +2394,15 @@ function pausePlayback() {
   // Set before the element is touched: the `pause` listener below reads it to
   // tell this apart from the audio being taken away by something else.
   player.paused = true;
+  clearTimeout(player.retryTimer);
+  player.retryTimer = null;
+  if (player.source.kind === "station") {
+    // Resuming radio rebuilds its live connection. Retire any recovery already
+    // waiting on IPC or play(), so even its late failure cannot restart audio.
+    playGeneration += 1;
+    clearInterval(player.metaTimer);
+    player.metaTimer = null;
+  }
   if (IS_ANDROID) androidPlaybackStatus = "paused";
   if (IS_ANDROID) {
     const generation = player.nativeGeneration;
@@ -2989,6 +3002,9 @@ function facetQuery(base, omit) {
   // chosen format would only ever report the format already chosen.
   if (browseCodec && omit !== "codec") query.codec = browseCodec;
   if (browseBitrate && omit !== "bitrate") query.bitrate = browseBitrate;
+  // This preserves a genre outside the busiest buckets without self-filtering
+  // the genre tally. Only that dropdown passes a retained selection.
+  if (base.retainTag) query.retainTag = base.retainTag;
   return query;
 }
 
@@ -3014,7 +3030,7 @@ async function refreshBrowseFilters() {
 
   if (browseCountry || narrowed) {
     jobs.push(
-      narrow("#browse-tag", facetQuery({ countryCode: browseCountry }), (f) => f.tags, asTag, "genre")
+      narrow("#browse-tag", facetQuery({ countryCode: browseCountry, retainTag: browseTag }), (f) => f.tags, asTag, "genre")
     );
   } else if (browseTags) {
     invalidateBrowseNarrow("#browse-tag");
@@ -3940,6 +3956,17 @@ function recentStations() {
   return Array.isArray(state.settings.recentStations) ? state.settings.recentStations : [];
 }
 
+function currentRecentStations() {
+  const current = [];
+  for (const recent of recentStations()) {
+    const station = stationById(recent.id) || state.stations.find(saved => sameStream(saved.url, recent.url)) || recent;
+    // An edit can make separate history snapshots converge on one saved row or
+    // stream. Keep its newest position without changing the stored snapshots.
+    if (!current.some(item => item.id === station.id || sameStream(item.url, station.url))) current.push(station);
+  }
+  return current;
+}
+
 function renderAndroidQuickAccess() {
   if (!IS_ANDROID) return;
   const entries = [];
@@ -3947,8 +3974,7 @@ function renderAndroidQuickAccess() {
     if (!station?.url || entries.some(entry => sameStream(entry.station.url, station.url))) return;
     entries.push({ station, label });
   };
-  const recent = recentStations().map(station =>
-    state.stations.find(saved => sameStream(saved.url, station.url)) || station);
+  const recent = currentRecentStations();
   recent.slice(0, 4).forEach(station => add(station, "Recent"));
   state.stations.filter(station => station.favorite).forEach(station => {
     if (entries.length < 6) add(station, "Favourite");
@@ -4185,8 +4211,7 @@ function renderStations() {
   const focusedAction = focused?.classList.contains("star") ? ".star"
     : focused?.classList.contains("station-save-recent") ? ".station-save-recent"
     : focused?.classList.contains("station-edit") ? ".station-edit" : ".station-play";
-  const collection = stationRecentOnly ? recentStations().map(station =>
-    state.stations.find(saved => sameStream(saved.url, station.url)) || station) : state.stations;
+  const collection = stationRecentOnly ? currentRecentStations() : state.stations;
   visibleStations = collection.filter(
     (s) => (!stationFavoritesOnly || s.favorite) &&
       (!q || s.name.toLowerCase().includes(q) || (s.tag || "").toLowerCase().includes(q))

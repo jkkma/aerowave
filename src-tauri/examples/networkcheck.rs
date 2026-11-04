@@ -123,6 +123,71 @@ async fn http_stream_fixture(content_type: &'static str, body: Vec<u8>) -> Strin
     format!("http://127.0.0.1:{port}/stream")
 }
 
+async fn raw_icy_stream_fixture(host: &str, content_type: &'static str, body: Vec<u8>) -> String {
+    let listener = TcpListener::bind((host, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let body = body.clone();
+            tokio::spawn(async move {
+                let head = request(&mut socket).await.to_ascii_lowercase();
+                assert!(head.contains(&format!("user-agent: {}", stream::UA.to_ascii_lowercase())));
+                assert!(head.contains("icy-metadata: 1"));
+                assert!(head.lines().any(|line| line == format!("host: {address}")));
+                let response = format!("ICY 200 OK\r\nContent-Type: {content_type}\r\n\r\n");
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+            });
+        }
+    });
+    format!("http://{address}/stream")
+}
+
+async fn raw_icy_refuses_non_audio() {
+    let source = raw_icy_stream_fixture(
+        "127.0.0.1",
+        "text/html; charset=utf-8",
+        b"<html>The station is unavailable</html>".to_vec(),
+    )
+    .await;
+    let probe = stream::probe(&source, false, false).await;
+    let relay = relay::Relay::start(Arc::new(|_, _| {})).await.unwrap();
+    let response = reqwest::get(relay.route(&source)).await.unwrap();
+    assert!(
+        probe.is_err() && response.status() == 502,
+        "raw ICY HTML must fail the probe and relay: probe={probe:?}, relay={}",
+        response.status()
+    );
+    let reason = probe.unwrap_err();
+    assert!(
+        reason.contains("text/html") && reason.contains("not audio"),
+        "{reason}"
+    );
+    assert!(response.bytes().await.unwrap().is_empty());
+    println!("PASS: raw ICY HTML is rejected by probes and the relay with the non-audio reason");
+}
+
+async fn raw_icy_ip_literals() {
+    for host in ["127.0.0.1", "::1"] {
+        let source = raw_icy_stream_fixture(host, "audio/mpeg", b"fixture audio".to_vec()).await;
+        let info = stream::probe(&source, false, false)
+            .await
+            .unwrap_or_else(|error| panic!("raw ICY probe of {source} failed: {error}"));
+        assert_eq!(info.url, source);
+        assert_eq!(info.content_type.as_deref(), Some("audio/mpeg"));
+        let relay = relay::Relay::start(Arc::new(|_, _| {})).await.unwrap();
+        let response = reqwest::get(relay.route(&source)).await.unwrap();
+        assert!(
+            response.status().is_success(),
+            "{source}: {}",
+            response.status()
+        );
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"fixture audio");
+    }
+    println!("PASS: raw ICY IPv4 and IPv6 literals reach probes and relay playback with valid Host headers");
+}
+
 async fn native_container_metadata() {
     let mut body = opus_tags_page(1, &["ARTIST=Fixture Artist", "TITLE=Native One"]);
     body.extend(opus_tags_page(2, &["TITLE="]));
@@ -496,6 +561,8 @@ async fn local_files() {
 
 #[tokio::main]
 async fn main() {
+    raw_icy_refuses_non_audio().await;
+    raw_icy_ip_literals().await;
     #[cfg(target_os = "linux")]
     local_files().await;
     large_interval().await;

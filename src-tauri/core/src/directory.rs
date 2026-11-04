@@ -353,6 +353,45 @@ pub struct DirectoryFacetTally {
     pub bitrates: Vec<u32>,
 }
 
+/// A counted genre with its original filter value and cleaned display name.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DirectoryTagBucket {
+    pub value: String,
+    pub name: String,
+    pub stations: u32,
+}
+
+/// Keep the busiest genres and an existing selected genre, then alphabetize.
+/// Omission means zero to the dropdown, so a positive selected bucket must
+/// survive the display limit even when it is less popular than the others.
+pub fn directory_tag_buckets(
+    counts: HashMap<String, u32>,
+    limit: usize,
+    retained_tag: &str,
+) -> Vec<DirectoryTagBucket> {
+    let mut tags: Vec<_> = counts
+        .into_iter()
+        .map(|(value, stations)| DirectoryTagBucket {
+            name: clean_name(&value, 40),
+            value,
+            stations,
+        })
+        .filter(|tag| !tag.name.is_empty())
+        .collect();
+    tags.sort_by_key(|tag| std::cmp::Reverse(tag.stations));
+    let retained = tags
+        .iter()
+        .position(|tag| tag.value == retained_tag.trim())
+        .filter(|index| *index >= limit)
+        .map(|index| tags.remove(index));
+    tags.truncate(limit);
+    if let Some(retained) = retained {
+        tags.push(retained);
+    }
+    tags.sort_by_key(|tag| sort_key(&tag.name));
+    tags
+}
+
 /// Count every stream once in each classification a corresponding filtered
 /// search can find. A public stream may have several submissions with different
 /// countries or tags. Discarding the later submission globally would erase a
@@ -823,6 +862,71 @@ mod tests {
         assert_eq!(tally.codecs[1], 2); // AAC
         assert_eq!(tally.bitrates[2], 1); // 64k
         assert_eq!(tally.bitrates[4], 2); // 128k
+    }
+
+    fn crowded_genre_counts() -> HashMap<String, u32> {
+        let mut stations = Vec::new();
+        for genre in 0..200 {
+            for stream in 0..3 {
+                stations.push((
+                    format!("http://radio.example/{genre}/{stream}"),
+                    format!("popular {genre:03}"),
+                ));
+            }
+        }
+        stations.extend([
+            ("http://radio.example/quiet/one".into(), "quiet jazz".into()),
+            ("http://radio.example/quiet/two".into(), "quiet jazz".into()),
+            (
+                "https://radio.example/quiet/one/".into(),
+                "quiet jazz,quiet jazz".into(),
+            ),
+        ]);
+        tally_directory_facets(stations.iter().map(|(url, tags)| DirectoryFacetEntry {
+            url,
+            resolved_url: "",
+            name: "Radio station",
+            tags,
+            country_code: "DE",
+            country_name: "Germany",
+            codec: "MP3",
+            bitrate: 128,
+        }))
+        .tags
+    }
+
+    #[test]
+    fn retained_genre_outside_busiest_limit_keeps_true_count() {
+        let tags = directory_tag_buckets(crowded_genre_counts(), 200, "quiet jazz");
+
+        assert_eq!(tags.len(), 201);
+        assert_eq!(tags.first().unwrap().value, "popular 000");
+        assert_eq!(tags.last().unwrap().value, "quiet jazz");
+        assert_eq!(tags.last().unwrap().stations, 2);
+        assert_eq!(tags.iter().filter(|tag| tag.value == "quiet jazz").count(), 1);
+        assert!(tags.iter().take(200).all(|tag| tag.stations == 3));
+    }
+
+    #[test]
+    fn retained_genre_inside_busiest_limit_is_not_duplicated() {
+        let tags = directory_tag_buckets(crowded_genre_counts(), 200, "popular 000");
+
+        assert_eq!(tags.len(), 200);
+        assert_eq!(tags.iter().filter(|tag| tag.value == "popular 000").count(), 1);
+        assert_eq!(tags.first().unwrap().stations, 3);
+        assert!(!tags.iter().any(|tag| tag.value == "quiet jazz"));
+    }
+
+    #[test]
+    fn absent_retained_genre_does_not_create_bucket() {
+        for retained_tag in ["", "missing genre"] {
+            let tags = directory_tag_buckets(crowded_genre_counts(), 200, retained_tag);
+
+            assert_eq!(tags.len(), 200);
+            assert!(tags.iter().all(|tag| tag.stations == 3));
+            assert!(!tags.iter().any(|tag| tag.value == retained_tag));
+            assert!(!tags.iter().any(|tag| tag.value == "quiet jazz"));
+        }
     }
 
     #[test]

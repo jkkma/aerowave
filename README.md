@@ -24,7 +24,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   preserves station changes saved while it was waiting.
 - **Recent** keeps the last 20 stations that actually started playing, newest
   first, including stations tried in Browse. Unsaved discoveries can be saved
-  from that list. History survives restarting the app and travels with backups.
+  from that list. Saved stations reflect their current names and stream URLs
+  after edits. History survives restarting the app and travels with backups.
 - Drag a station with the mouse to change its **Saved order**, including within
   search results or favourites. The list scrolls as you drag near its edges.
   Keyboard users can focus a station and press Alt + Up/Down. Moves save before
@@ -173,7 +174,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   Pausing leaves the source where it is and the session alive, holding it in a
   paused state the next press comes back to. Resuming a file carries on from
   where it stopped; resuming a station rejoins the broadcast rather than
-  playing out a buffer that is now minutes behind live. A ringing alarm will
+  playing out a buffer that is now minutes behind live. Pausing also cancels
+  reconnects already waiting for a timer or a connection reply. A ringing alarm will
   not pause at all: its watchdog reads the same progress timestamp a pause
   freezes, so it would answer a held ring with the backup folder, and an alarm
   that a stray keypress can silence is not an alarm.
@@ -229,7 +231,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   new. The directory itself pages in name order. A station the directory has no
   country for sorts last within its page. The genre list is
   the busiest two hundred tags — the directory holds tens of thousands,
-  nearly all of them one station's private label.
+  nearly all of them one station's private label. Narrowing the list keeps a
+  selected matching genre and its count even when it falls outside that two hundred.
 - MORE keeps the submitted search even if you edit the name field before
   searching again. Failed pages can be retried, and pages containing only
   duplicates do not hide later results. Paging stops at the directory offset

@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use aerowave_core::directory::{
     art_query_urls, bitrate_band_by_key, clean_name, directory_failure_forgets_mirror,
-    directory_host_candidates, directory_page_window, exact_tag_filter, first_tag, image_kind,
-    is_country_code, is_hostname, playable_url, select_directory_host, sort_key, stream_key,
-    stream_matches, tally_directory_facets, DirectoryFacetEntry, DirectoryFailure, BITRATE_BANDS,
+    directory_host_candidates, directory_page_window, directory_tag_buckets, exact_tag_filter,
+    first_tag, image_kind, is_country_code, is_hostname, playable_url, select_directory_host, sort_key,
+    stream_key, stream_matches, tally_directory_facets, DirectoryFacetEntry, DirectoryFailure, BITRATE_BANDS,
     DIRECTORY_CODECS,
 };
 use aerowave_core::network::public_http_destination_allowed;
@@ -49,9 +49,9 @@ const MAX_FACET_BYTES: usize = 32 * 1024 * 1024;
 /// per-country genre counts, so the only way to know what a country has is to
 /// look at what is in it; beyond this the counts are a floor, not a total.
 const FACET_LIMIT: u32 = 5000;
-/// Genres to keep from a tally. A large country turns up two thousand distinct
-/// tags, nearly all of them one station's own label - the same reason the
-/// global list is trimmed.
+/// Popular genres to keep from a tally, plus the selected genre when present.
+/// A large country turns up two thousand distinct tags, nearly all of them
+/// one station's own label - the same reason the global list is trimmed.
 const FACET_TAGS: usize = 200;
 /// Results come back in name order, A to Z, and page that way too: a list
 /// you are reading down is easier to find something in than one ranked by a
@@ -360,6 +360,10 @@ pub struct Query {
     pub name: String,
     #[serde(default)]
     pub tag: String,
+    /// Keep this genre's counted bucket beyond the display limit. It does not
+    /// narrow the directory request: a genre cannot count under itself.
+    #[serde(default)]
+    pub retain_tag: String,
     /// ISO 3166-1 alpha-2, or empty for anywhere.
     #[serde(default)]
     pub country_code: String,
@@ -686,20 +690,14 @@ pub async fn facets(query: Query) -> Result<Facets, String> {
         bitrate: number(&entry.bitrate).clamp(0, u32::MAX as i64) as u32,
     }));
 
-    // Busiest first to decide what makes the cut, then alphabetical to read.
-    let mut tags: Vec<Tag> = counted
-        .tags
+    let tags = directory_tag_buckets(counted.tags, FACET_TAGS, &query.retain_tag)
         .into_iter()
-        .map(|(value, stations)| Tag {
-            name: clean_name(&value, 40),
-            value,
-            stations,
+        .map(|tag| Tag {
+            name: tag.name,
+            value: tag.value,
+            stations: tag.stations,
         })
-        .filter(|tag| !tag.name.is_empty())
         .collect();
-    tags.sort_by_key(|tag| std::cmp::Reverse(tag.stations));
-    tags.truncate(FACET_TAGS);
-    tags.sort_by_key(|tag| sort_key(&tag.name));
 
     let mut countries: Vec<Country> = counted
         .countries

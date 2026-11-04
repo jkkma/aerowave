@@ -1002,6 +1002,73 @@ test("changed queries clear stale counts and reject delayed facets while global 
   assert.deepEqual(h.el("#browse-tag").options.map((entry) => entry.textContent), ["Any genre", "Techno (80)"]);
 });
 
+for (const sampled of [false, true]) {
+  test(`a selected genre beyond the busiest 200 keeps its ${sampled ? "sampled floor" : "true count"} without self-filtering`, async () => {
+    const queries = [];
+    const popular = Array.from({ length: 200 }, (_, index) => ({
+      value: `popular-${index}`, name: `Popular ${index}`, stations: 50,
+    }));
+    const h = createHarness({ invoke(command, args) {
+      if (command !== "browse_facets") return undefined;
+      const query = JSON.parse(JSON.stringify(args.query));
+      queries.push(query);
+      return { countries: [], codecs: [], bitrates: [], sampled,
+        tags: query.retainTag === "rare genre"
+          ? [...popular, { value: "rare genre", name: "Rare genre", stations: 7 }] : popular };
+    } });
+    seedSelects(h);
+    h.evaluate(`browseCountry='DE'; browseCountryLabel='Germany'; browseCodec='MP3';
+      browseTag='rare genre'; browseTagLabel='Rare genre'; browseCountries=[]; browseTags=[]`);
+    await h.evaluate("refreshBrowseFilters()");
+
+    assert.deepEqual(queries.find(query => !query.tag && query.countryCode === "DE"), {
+      countryCode: "DE", codec: "MP3", retainTag: "rare genre",
+    });
+    assert.equal(queries.filter(query => query.retainTag).length, 1);
+    assert.equal(h.el("#browse-tag").selectedOptions[0].textContent, sampled ? "Rare genre (7+)" : "Rare genre (7)");
+    assert.equal(h.el("#browse-tag").options.length, 202);
+  });
+}
+
+test("changing the retained genre uses its own cached facet response and ignores older replies", async () => {
+  const rare = deferred(), other = deferred();
+  const genreQueries = [];
+  const h = createHarness({ invoke(command, args) {
+    if (command !== "browse_facets") return undefined;
+    if (!args.query.tag && args.query.countryCode === "DE") {
+      genreQueries.push(JSON.parse(JSON.stringify(args.query)));
+      return args.query.retainTag === "other" ? other.promise : rare.promise;
+    }
+    return { countries: [], tags: [], codecs: [], bitrates: [], sampled: false };
+  } });
+  seedSelects(h);
+  h.evaluate("browseCountry='DE'; browseCountries=[]; browseTags=[]; browseTag='rare'; browseTagLabel='Rare'");
+  const first = h.evaluate("refreshBrowseFilters()");
+  h.evaluate("browseTag='other'; browseTagLabel='Other'");
+  const second = h.evaluate("refreshBrowseFilters()");
+  assert.equal(genreQueries.length, 2);
+  other.resolve({ countries: [], tags: [{ value: "other", name: "Other", stations: 9 }], codecs: [], bitrates: [], sampled: false });
+  await second;
+  rare.resolve({ countries: [], tags: [{ value: "rare", name: "Rare", stations: 7 }], codecs: [], bitrates: [], sampled: false });
+  await first;
+  assert.equal(h.el("#browse-tag").selectedOptions[0].textContent, "Other (9)");
+
+  h.evaluate("browseTag='rare'; browseTagLabel='Rare'");
+  await h.evaluate("refreshBrowseFilters()");
+  assert.equal(h.el("#browse-tag").selectedOptions[0].textContent, "Rare (7)");
+  assert.equal(genreQueries.length, 2);
+});
+
+test("a retained genre absent from the filtered directory still displays zero", async () => {
+  const h = createHarness({ invoke: command => command === "browse_facets"
+    ? { countries: [], tags: [{ value: "jazz", name: "Jazz", stations: 8 }], codecs: [], bitrates: [], sampled: false } : undefined });
+  seedSelects(h);
+  h.evaluate("browseCountry='DE'; browseCountries=[]; browseTags=[]; browseTag='absent'; browseTagLabel='Absent'");
+  await h.evaluate("refreshBrowseFilters()");
+  assert.equal(h.el("#browse-tag").selectedOptions[0].textContent, "Absent (0)");
+  assert.equal(h.el("#browse-tag").selectedOptions[0].disabled, false);
+});
+
 test("sampled zero format, bitrate and selected dynamic buckets remain selectable", () => {
   const h = createHarness();
   seedSelects(h);

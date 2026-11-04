@@ -151,6 +151,132 @@ test("Recent stays newest-first while name sorting and search filter its results
   assert.deepEqual(rowNames(h), ["Zulu Jazz", "Alpha Jazz"]);
 });
 
+test("Recent plays the current saved station after its stream URL changes", async () => {
+  const old = station("saved", "Before edit", { url: "https://radio.test/old" });
+  const h = libraryHarness({
+    stations: [{ ...old, name: "After edit", url: "https://radio.test/new" },
+      station("different", "Another saved station", { url: old.url })],
+    recentStations: [old],
+  });
+  await h.el("#station-recent").dispatch("click");
+  assert.deepEqual(rowNames(h), ["After edit"]);
+  assert.equal(rows(h)[0].dataset.url, "https://radio.test/new");
+  await rows(h)[0].querySelector(".station-play").dispatch("click");
+  await flush();
+  assert.equal(h.evaluate("player.source.stationId"), "saved");
+  assert.equal(h.evaluate("player.source.url"), "https://radio.test/new");
+});
+
+test("editing a Recent tag cannot overwrite a saved station's newer URL", async () => {
+  const old = station("saved", "Saved", { url: "https://radio.test/old" });
+  const h = libraryHarness({ stations: [{ ...old }], recentStations: [{ ...old }] });
+  h.evaluate("openStationEditor(state.stations[0])");
+  h.el("#st-url").value = "https://radio.test/new";
+  await h.el("#station-editor").dispatch("submit");
+  await h.el("#station-recent").dispatch("click");
+  await rows(h)[0].querySelector(".station-edit").dispatch("click");
+  h.el("#st-tag").value = "ambient";
+  await h.el("#station-editor").dispatch("submit");
+
+  assert.equal(h.evaluate("state.stations[0].url"), "https://radio.test/new");
+  assert.equal(stationWrites(h).at(-1).args.stations[0].url, "https://radio.test/new");
+  assert.equal(h.evaluate("state.stations[0].tag"), "ambient");
+});
+
+for (const savedNewStream of [false, true]) {
+  test(`Recent collapses ${savedNewStream ? "saved" : "discovered"} streams that converge after an edit without rewriting history`, async () => {
+    const old = station("retuned", "Before edit", { url: "https://radio.test/old" });
+    const other = station("other", "New stream", { url: "https://radio.test/new" });
+    const h = libraryHarness({ stations: [old, station("oldest", "Oldest"),
+      station("middle", "Middle"), station("newest", "Newest"), ...(savedNewStream ? [other] : [])] });
+    const hear = async code => {
+      h.evaluate(code);
+      await flush();
+      h.audios[0].readyState = 3;
+      h.audios[0].currentTime += 1;
+      await h.audios[0].dispatch("timeupdate");
+    };
+    await hear("playStation(stationById('oldest'))");
+    await hear("playStation(stationById('retuned'))");
+    await hear("playStation(stationById('middle'))");
+    await hear(savedNewStream ? "playStation(stationById('other'))"
+      : "previewBrowse({name:'Discovery',url:'https://radio.test/new'})");
+    await hear("playStation(stationById('newest'))");
+    await h.evaluate("flushSettings()");
+    const history = jsonClone(h.evaluate("state.settings.recentStations"));
+    const settingsWrites = h.calls.filter(call => call.command === "save_settings");
+    assert.deepEqual(history.map(item => item.url), ["https://radio.test/newest", "https://radio.test/new",
+      "https://radio.test/middle", "https://radio.test/old", "https://radio.test/oldest"]);
+
+    h.evaluate("openStationEditor(stationById('retuned'))");
+    h.el("#st-url").value = "https://radio.test/new";
+    h.el("#st-name").value = "After edit";
+    await h.el("#station-editor").dispatch("submit");
+    await h.el("#station-recent").dispatch("click");
+    const currentId = savedNewStream ? "other" : "retuned";
+    assert.deepEqual(rowIds(h), ["newest", currentId, "middle", "oldest"]);
+    assert.deepEqual(rowNames(h), ["Newest", savedNewStream ? "New stream" : "After edit", "Middle", "Oldest"]);
+    assert.equal(h.el("#station-count").textContent, "4 recently played · newest first");
+    assert.equal(rows(h)[1].dataset.url, "https://radio.test/new");
+    assert.ok(rows(h)[1].querySelector(".station-edit"));
+
+    h.el("#station-filter").value = savedNewStream ? "New stream" : "After edit";
+    await h.el("#station-filter").dispatch("input");
+    assert.deepEqual(rowIds(h), [currentId]);
+    assert.equal(h.el("#station-count").textContent, "1 recently played · newest first");
+    h.el("#station-filter").value = "no matching station";
+    await h.el("#station-filter").dispatch("input");
+    assert.equal(rows(h).length, 0);
+    assert.equal(h.el("#station-count").textContent, "0 recently played · newest first");
+    assert.equal(h.el("#station-list").children[0].querySelector("b").textContent, "No matching stations");
+    h.el("#station-filter").value = "";
+    await h.el("#station-filter").dispatch("input");
+    assert.deepEqual(rowIds(h), ["newest", currentId, "middle", "oldest"]);
+    await h.evaluate("flushSettings()");
+    assert.deepEqual(jsonClone(h.evaluate("state.settings.recentStations")), history);
+    assert.equal(h.calls.filter(call => call.command === "save_settings").length, settingsWrites.length);
+    assert.deepEqual(jsonClone(settingsWrites.at(-1).args.settings.recentStations), history);
+  });
+}
+
+test("Android quick access resolves a Recent station's current saved identity", async () => {
+  const old = station("saved", "Before edit", { url: "https://radio.test/old" });
+  const h = libraryHarness({ navigator: androidNavigator,
+    stations: [{ ...old, name: "After edit", url: "https://radio.test/new" }], recentStations: [old] });
+  const quick = h.el("#android-quick-list").children[0];
+  assert.equal(quick.dataset.url, "https://radio.test/new");
+  assert.equal(quick.getAttribute("aria-label"), "Play After edit");
+});
+
+test("Android quick access fills its recent slots after resolving duplicate historical streams", () => {
+  const old = station("retuned", "Before edit", { url: "https://radio.test/old" });
+  const current = { ...old, name: "After edit", url: "https://radio.test/new" };
+  const middle = station("middle", "Middle"), oldest = station("oldest", "Oldest"), fourth = station("fourth", "Fourth");
+  const favorite = station("favorite", "Favourite", { favorite: true });
+  const h = libraryHarness({ navigator: androidNavigator, stations: [current, middle, oldest, fourth, favorite],
+    recentStations: [station("discovery", "Discovery", { url: current.url }), middle, old, oldest, fourth] });
+  assert.deepEqual(h.el("#android-quick-list").children.map(item => item.dataset.url), [
+    "https://radio.test/new", "https://radio.test/middle", "https://radio.test/oldest",
+    "https://radio.test/fourth", "https://radio.test/favorite",
+  ]);
+});
+
+test("a deleted station kept in Recent can be saved again with a new identity", async () => {
+  const old = station("deleted", "Deleted station");
+  const h = libraryHarness({ stations: [{ ...old }], recentStations: [{ ...old }] });
+  await h.evaluate("saveStations({removeId:'deleted'})");
+  await h.el("#station-recent").dispatch("click");
+  assert.equal(rows(h)[0].querySelector(".station-edit"), null);
+  const save = rows(h)[0].querySelector(".station-save-recent");
+  assert.ok(save);
+  await save.dispatch("click");
+  await h.evaluate("stationSaveTail");
+  await flush();
+  assert.equal(h.evaluate("state.stations.length"), 1);
+  assert.equal(h.evaluate("state.stations[0].url"), old.url);
+  assert.notEqual(h.evaluate("state.stations[0].id"), "deleted");
+});
+
 test("saving an unsaved recent station waits in the station write queue and uses the latest library", async () => {
   const firstWrite = deferred();
   const secondWrite = deferred();

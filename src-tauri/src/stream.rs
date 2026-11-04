@@ -11,8 +11,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use aerowave_core::icy::{
-    decode_text, first_url_in_playlist, head_end, is_hls, looks_like_playlist, metadata_interval,
-    parse_head, Head, MetaStrip,
+    decode_text, first_url_in_playlist, head_end, is_hls, is_playable_type, looks_like_playlist,
+    metadata_interval, parse_head, socket_host, Head, MetaStrip,
 };
 use aerowave_core::stream_tags::StreamTags;
 use futures_util::StreamExt;
@@ -175,25 +175,6 @@ async fn read_capped(resp: reqwest::Response) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
-/// Is this a body worth handing to a player?
-///
-/// A station that is down, full, or pointed at the wrong path answers `200`
-/// with a web page - Shoutcast's admin console, an error page, a consent
-/// screen. Passing that to <audio> gets `MEDIA_ERR_SRC_NOT_SUPPORTED`, which
-/// says "this codec is unsupported" when the truth is "this is not audio at
-/// all". Better to notice here, where the content type is in hand.
-fn is_playable_type(content_type: &str) -> bool {
-    let t = content_type.trim().to_ascii_lowercase();
-    if t.is_empty() {
-        // Plenty of Shoutcast servers say nothing at all, and play fine.
-        return true;
-    }
-    !(t.starts_with("text/")
-        || t.starts_with("application/json")
-        || t.starts_with("application/xml")
-        || t.starts_with("application/xhtml"))
-}
-
 fn content_type_of(resp: &reqwest::Response) -> String {
     resp.headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -341,6 +322,7 @@ async fn icy_connect_once(
     let host = parsed
         .host_str()
         .ok_or_else(|| unproven("that URL has no host in it"))?;
+    let connect_host = socket_host(&parsed).ok_or_else(|| unproven("that URL has no host in it"))?;
     let port = parsed.port().unwrap_or(80);
     let mut target = parsed.path().to_string();
     if target.is_empty() {
@@ -353,7 +335,7 @@ async fn icy_connect_once(
 
     let mut socket = tokio::time::timeout(
         Duration::from_secs(6),
-        tokio::net::TcpStream::connect((host, port)),
+        tokio::net::TcpStream::connect((connect_host.as_str(), port)),
     )
     .await
     .map_err(|_| unproven(format!("timed out connecting to {host}")))?
@@ -427,6 +409,16 @@ async fn icy_connect(
                 return Err(IcyFailure {
                     proven: true,
                     message: format!("ICY {} from {host}", head.code),
+                });
+            }
+            let content_type = head.get("content-type").unwrap_or("");
+            if !is_playable_type(content_type) {
+                return Err(IcyFailure {
+                    proven: true,
+                    message: format!(
+                        "that address answers with {content_type}, not audio - \
+                         the station is probably down, full, or has moved"
+                    ),
                 });
             }
             return Ok((socket, head, body, current));
