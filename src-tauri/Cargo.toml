@@ -3,7 +3,7 @@ members = ["core"]
 
 [package]
 name = "aerowave"
-version = "0.16.5"
+version = "0.16.6"
 description = "Internet radio player and alarm clock"
 authors = ["jkkma"]
 edition = "2021"
