@@ -2098,8 +2098,11 @@ function failure(detail, opts = {}) {
     // ever equal itself, so it guarded nothing.
     const generation = playGeneration;
     if (player.source !== source || player.paused || givingUp) return;
-    // Second attempt onwards, try the playlist-resolved URL.
-    if (player.retries >= 2 && !player.probed) {
+    // The first attempt reuses the address playback resolved. That address
+    // is where the station's redirects led, which can be one node of a load
+    // balancer or carry a token that expires, so from the second attempt the
+    // station's own URL is resolved again and may lead somewhere fresh.
+    if (player.retries >= 2) {
       try {
         const info = await invoke("probe_stream", { url: source.url, wantTitle: false });
         // A stop during the probe must not write a resolved URL back into a
@@ -2109,22 +2112,25 @@ function failure(detail, opts = {}) {
         player.probed = true;
         source.hls = !!info.hls;
         source.hlsUrl = info.hls ? info.url : null;
-      } catch { /* stay with the original */ }
+      } catch { /* stay with the address already resolved */ }
     }
     if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
     const upstream = player.resolved || source.url;
+    // `source.hls`, not `player.hls`: resolving again can find a station that
+    // has stopped being HLS, and the decoder still attached would say it was.
     if (IS_ANDROID) {
-      const useHls = !!(player.hls || source.hls);
+      const useHls = !!source.hls;
       if (await startAndroidPlayback(source, upstream, useHls, generation, player.target)) {
         if (!useHls) startMetadata(source);
       }
       return;
     }
-    if (player.hls || source.hls) {
-      // Start the HLS player over rather than assigning a source: the element
-      // plays a MediaSource, and pointing it at the .m3u8 would give it a
-      // playlist it cannot read.
-      stopHls();
+    // Start the HLS player over rather than assigning a source: the element
+    // plays a MediaSource, and pointing it at the .m3u8 would give it a
+    // playlist it cannot read. For the same reason a station that is no longer
+    // HLS has to be taken off hls.js before the element gets its URL.
+    stopHls();
+    if (source.hls) {
       if (!(await startHls(source, upstream, generation))) return;
     } else {
       const playUrl = player.triedDirect ? upstream : await playable(source, upstream);
@@ -2332,6 +2338,22 @@ function playStation(station, opts) {
 let folderHistory = [];
 let folderPickRequest = 0;
 
+/**
+ * Remember the track being left so prev has somewhere to go back to. A
+ * different folder is a different shuffle: what came before it is not part
+ * of this one.
+ */
+function rememberLeavingTrack(folder) {
+  const leaving = player.source;
+  if (leaving && leaving.kind === "folder" && leaving.folder === folder) {
+    folderHistory.push(leaving);
+    // A shuffle can run all night; only the recent past is worth keeping.
+    if (folderHistory.length > 50) folderHistory.shift();
+  } else {
+    folderHistory = [];
+  }
+}
+
 async function playRandomFromFolder(folder, opts = {}) {
   if (!folder) {
     say("choose a folder first", "bad");
@@ -2343,17 +2365,7 @@ async function playRandomFromFolder(folder, opts = {}) {
   try {
     const pick = await folderCommand("random_track", { path: folder });
     if (stale()) return;
-    // Remember what is being left so prev has somewhere to go back to. A
-    // different folder is a different shuffle: what came before it is not
-    // part of this one.
-    const leaving = player.source;
-    if (leaving && leaving.kind === "folder" && leaving.folder === folder) {
-      folderHistory.push(leaving);
-      // A shuffle can run all night; only the recent past is worth keeping.
-      if (folderHistory.length > 50) folderHistory.shift();
-    } else {
-      folderHistory = [];
-    }
+    rememberLeavingTrack(folder);
     play(
       {
         kind: "folder",
@@ -2665,6 +2677,12 @@ function stepFolder(delta) {
       play(back);
       return;
     }
+  }
+  // The backup folder is a marker, not a path a folder scan could open: it
+  // is what a station that gave up falls back to, and it has its own picker.
+  if (player.source.folder === BACKUP) {
+    playBackupTrack("next track from the backup folder", { volume: player.target });
+    return;
   }
   playRandomFromFolder(player.source.folder);
 }
@@ -3467,6 +3485,7 @@ async function playBackupTrack(reason, opts = {}) {
       ? await folderCommand("random_track", { path: state.settings.backupFolder || "" })
       : await invoke("backup_track");
     if (stale()) return false;
+    rememberLeavingTrack(BACKUP);
     const title = pick.name.replace(/\.[^.]+$/, "");
     play(
       {

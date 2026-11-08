@@ -748,3 +748,111 @@ test("Android rebuilds a restored paused station when the user resumes after pro
   assert.equal(replay.args.payload.stationId, "saved");
   assert.equal(h.evaluate("player.source.nativeRestored"), false);
 });
+/** The next of `names`, shaped like the reply from random_track or backup_track. */
+function pickFrom(folder, names) {
+  const name = names.shift();
+  if (!name) throw new Error("the test ran out of tracks in " + folder);
+  return { path: `/${folder}/${name}`, name, total: 3 };
+}
+
+/** Fire the pending reconnect, if failure() scheduled one. */
+async function fireRetry(h) {
+  const retry = h.evaluate("player.retryTimer");
+  if (retry && h.timers.has(retry)) await h.fireTimer(retry);
+  await flush();
+}
+
+test("Next during a station's backup-folder fallback plays another backup track", async () => {
+  const backup = ["one.mp3", "two.mp3"];
+  const h = createHarness({ invoke: (command) => {
+    if (command === "backup_track") return pickFrom("backup", backup);
+    if (command === "random_track") return Promise.reject(new Error("no playable audio files in that folder"));
+    return undefined;
+  } });
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Gone' })");
+  h.evaluate("failure('station is down', { fatal: true })");
+  await flush();
+  assert.equal(h.evaluate("player.source.title"), "one");
+  h.evaluate("step(1)");
+  await flush();
+  assert.equal(h.evaluate("player.source?.title"), "two");
+});
+
+test("Prev during a backup fallback returns to the previous backup track, not an older shuffle", async () => {
+  const music = ["m1.mp3", "m2.mp3"], backup = ["b1.mp3", "b2.mp3"];
+  const h = createHarness({ invoke: (command, args) => {
+    if (command === "random_track") return pickFrom(args.path, music);
+    if (command === "backup_track") return pickFrom("backup", backup);
+    return undefined;
+  } });
+  await h.evaluate("playRandomFromFolder('music')");
+  await h.evaluate("playRandomFromFolder('music')");
+  await flush();
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Gone' })");
+  h.evaluate("failure('station is down', { fatal: true })");
+  await flush();
+  await h.audios[0].dispatch("ended");
+  await flush();
+  assert.equal(h.evaluate("player.source.title"), "b2");
+  h.evaluate("step(-1)");
+  await flush();
+  assert.equal(h.evaluate("player.source.title"), "b1");
+});
+
+test("later reconnects resolve the station's own URL again", async () => {
+  let probes = 0;
+  const h = createHarness({ invoke: (command, args) => command === "probe_stream" && !args.wantTitle
+    ? { url: ++probes === 1 ? "https://node1.radio.test/live" : "https://node2.radio.test/live", hls: false }
+    : undefined });
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Balanced' })");
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    h.evaluate("failure('node went away')");
+    await fireRetry(h);
+  }
+  assert.deepEqual(
+    h.calls.filter(({ command, args }) => command === "probe_stream" && !args.wantTitle).map(({ args }) => args.url),
+    ["https://radio.test/live", "https://radio.test/live"]);
+  assert.deepEqual(
+    h.calls.filter(({ command }) => command === "relay_url").map(({ args }) => args.url),
+    ["https://node1.radio.test/live", "https://node1.radio.test/live", "https://node2.radio.test/live"]);
+});
+
+test("a reconnect that finds the station is no longer HLS leaves hls.js", async () => {
+  let probes = 0;
+  const h = createHarness({ invoke: (command, args) => command === "probe_stream" && !args.wantTitle
+    ? (++probes === 1 ? { url: "https://cdn.test/live.m3u8", hls: true } : { url: "https://radio.test/live.mp3", hls: false })
+    : undefined });
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/listen', title: 'Changed' })");
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    h.evaluate("failure('stream changed')");
+    await fireRetry(h);
+  }
+  assert.equal(h.evaluate("player.hls"), false);
+  assert.equal(h.hlsInstances.at(-1).destroyed, true);
+  assert.equal(h.calls.filter(({ command }) => command === "relay_url").at(-1).args.url, "https://radio.test/live.mp3");
+});
+
+test("an Android reconnect that finds the station is no longer HLS plays it through the relay", async () => {
+  let probes = 0;
+  const h = createHarness({
+    navigator: androidNavigator,
+    invoke: (command, args) => {
+      if (command === "probe_stream" && !args.wantTitle) {
+        return ++probes === 1 ? { url: "https://cdn.test/live.m3u8", hls: true } : { url: "https://radio.test/live.mp3", hls: false };
+      }
+      if (command === "plugin:android-audio|play") {
+        return { status: "buffering", generation: args.payload.generation, sourceUrl: args.payload.sourceUrl, title: args.payload.title, stationId: null, positionMs: 0, volume: 0.8, error: null, trackTitle: null };
+      }
+      return undefined;
+    },
+  });
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/listen', title: 'Changed' })");
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    h.evaluate("failure('stream changed')");
+    await fireRetry(h);
+  }
+  const plays = h.calls.filter(({ command }) => command === "plugin:android-audio|play");
+  assert.equal(plays.length, 3);
+  assert.equal(plays.at(-1).args.payload.isHls, false);
+  assert.equal(plays.at(-1).args.payload.url, "http://127.0.0.1/relay/" + encodeURIComponent("https://radio.test/live.mp3"));
+});

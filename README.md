@@ -151,10 +151,12 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   worked. When the HTTP attempt fails, the request goes out again over a plain
   socket and the head is parsed by hand. Plaintext only: ICY predates TLS and the
   servers still speaking it are `http://` to a one.
-- A dropped stream reconnects four times with a lengthening backoff; from the
-  second attempt it retries through the playlist-resolved URL, unless a probe
-  has already had its say about that station. Brief connections that drop again
-  consume that budget; sustained decoded playback restores it.
+- A dropped stream reconnects four times with a lengthening backoff. The first
+  attempt reuses the address playback started from; from the second, the
+  station's own URL is resolved again, because that address is where its
+  redirects led and can be one node of a load balancer or carry a token that
+  expires. Brief connections that drop again consume that budget; sustained
+  decoded playback restores it.
 - The now-playing poll still talks to the broadcaster directly rather than to
   the relay: it wants a title, not audio, and pointing it at the relay would
   only hand it back the app's own stream.
@@ -426,7 +428,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   Each occurrence keeps the alarm settings it claimed. Edits apply to future
   occurrences; disabling or deleting an alarm still cancels an unresolved source.
 - Ordinary listening still uses the backup folder when a station gives up
-  after four reconnects. The emergency tone is reserved for a ringing alarm.
+  after four reconnects; next and previous then step through the backup
+  folder. The emergency tone is reserved for a ringing alarm.
 - Missed alarms are caught up: if the machine was asleep through the alarm minute,
   it rings on wake as long as it is no more than 15 minutes late. Short sleeps
   that skip the whole alarm minute are caught up too.
