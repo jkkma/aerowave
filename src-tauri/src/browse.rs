@@ -17,9 +17,9 @@ use std::time::Duration;
 use aerowave_core::directory::{
     art_query_urls, bitrate_band_by_key, clean_name, directory_failure_forgets_mirror,
     directory_host_candidates, directory_page_window, directory_tag_buckets, exact_tag_filter,
-    first_tag, image_kind, is_country_code, is_hostname, playable_url, select_directory_host, sort_key,
-    stream_key, stream_matches, tally_directory_facets, DirectoryFacetEntry, DirectoryFailure, BITRATE_BANDS,
-    DIRECTORY_CODECS,
+    first_tag, image_kind, is_country_code, is_directory_host, listen_url, playable_url,
+    select_directory_host, sort_key, stream_key, stream_matches, tally_directory_facets,
+    DirectoryFacetEntry, DirectoryFailure, BITRATE_BANDS, DIRECTORY_CODECS,
 };
 use aerowave_core::network::public_http_destination_allowed;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -38,6 +38,11 @@ const SERVERS_URL: &str = "https://all.api.radio-browser.info/json/servers";
 /// mirror is a worse citizen than asking a chosen one, and a directory that
 /// cannot be searched at all is worse still.
 const FALLBACK_HOST: &str = "de1.api.radio-browser.info";
+/// Every mirror, and the round-robin name itself, lives under this domain. A
+/// mirror list or a redirect naming anywhere else is not the directory.
+const DIRECTORY_DOMAIN: &str = "api.radio-browser.info";
+/// Redirects a directory request may follow before it gives up.
+const MAX_REDIRECTS: usize = 4;
 /// A page of results is tens of kilobytes. Anything running to megabytes is a
 /// broken or hostile mirror, and buffering it whole would let it decide how
 /// much memory this process uses.
@@ -93,6 +98,8 @@ pub(crate) struct DirectoryClient {
     http: reqwest::Client,
     discovery_url: String,
     fallback_host: String,
+    /// The domain every mirror must sit under.
+    domain: String,
     origin_for_host: OriginResolver,
     /// Staying with one host spreads load as requested and keeps paging
     /// coherent when mirrors are at slightly different points in their sync.
@@ -103,22 +110,43 @@ impl DirectoryClient {
     pub(crate) fn with_endpoints(
         discovery_url: impl Into<String>,
         fallback_host: impl Into<String>,
+        domain: impl Into<String>,
         origin_for_host: OriginResolver,
     ) -> Result<Self, String> {
         let fallback_host = fallback_host.into();
-        if !is_hostname(&fallback_host) {
-            return Err("the directory fallback is not a hostname".into());
+        let domain = domain.into().to_ascii_lowercase();
+        if !is_directory_host(&fallback_host, &domain) {
+            return Err("the directory fallback is not one of its own hosts".into());
         }
+        // A redirect is followed only to another of the directory's own hosts
+        // over HTTPS. A mirror answering with a redirect to this machine, its
+        // network or plain HTTP gets an error rather than a request.
+        let redirect_domain = domain.clone();
+        let redirects = reqwest::redirect::Policy::custom(move |attempt| {
+            let allowed = attempt.url().scheme() == "https"
+                && attempt
+                    .url()
+                    .host_str()
+                    .map_or(false, |host| is_directory_host(host, &redirect_domain));
+            if attempt.previous().len() > MAX_REDIRECTS {
+                attempt.error("radio-browser redirected too many times")
+            } else if allowed {
+                attempt.follow()
+            } else {
+                attempt.error("radio-browser redirected away from its own mirrors")
+            }
+        });
         let http = reqwest::Client::builder()
             .user_agent(UA)
             .connect_timeout(Duration::from_secs(8))
-            .redirect(reqwest::redirect::Policy::limited(4))
+            .redirect(redirects)
             .build()
             .map_err(|error| error.to_string())?;
         Ok(Self {
             http,
             discovery_url: discovery_url.into(),
             fallback_host: fallback_host.to_ascii_lowercase(),
+            domain,
             origin_for_host,
             host: Mutex::new(None),
         })
@@ -167,8 +195,10 @@ impl DirectoryClient {
             Ok(mirrors) => mirrors,
             Err(_) => return Vec::new(),
         };
-        let mut names =
-            directory_host_candidates(mirrors.into_iter().filter_map(|mirror| mirror.name));
+        let mut names = directory_host_candidates(
+            mirrors.into_iter().filter_map(|mirror| mirror.name),
+            &self.domain,
+        );
         names.shuffle(&mut rand::thread_rng());
         names
     }
@@ -222,7 +252,7 @@ impl DirectoryClient {
     ) -> Result<T, DirectoryAttemptFailure> {
         // Hostnames remain validated even for the internal fixture seam. Only
         // the origin mapping changes; production always resolves to HTTPS.
-        if !is_hostname(host) {
+        if !is_directory_host(host, &self.domain) {
             return Err(DirectoryAttemptFailure::new(
                 DirectoryFailure::Request,
                 "radio-browser selected an invalid mirror hostname",
@@ -334,6 +364,7 @@ fn directory_client() -> Result<&'static DirectoryClient, String> {
     let built = DirectoryClient::with_endpoints(
         SERVERS_URL,
         FALLBACK_HOST,
+        DIRECTORY_DOMAIN,
         Arc::new(|host| format!("https://{host}")),
     )?;
     Ok(DIRECTORY_CLIENT.get_or_init(|| built))
@@ -468,7 +499,12 @@ pub struct Art {
 pub struct BrowseStation {
     pub uuid: String,
     pub name: String,
+    /// The submitted address: what Listen plays and Save keeps.
     pub url: String,
+    /// Where the directory's checker last ended up, or empty. It identifies
+    /// the stream when duplicates are compared, and it is what older versions
+    /// saved, but it may carry a token or a timestamp that does not last.
+    pub resolved_url: String,
     pub homepage: String,
     /// The first tag, ready to go into a saved station.
     pub tag: String,
@@ -860,8 +896,13 @@ async fn art_candidates(
 
 /// Find artwork only on directory entries for this exact stream.
 ///
-/// The submitted and resolved addresses are both searched and matched. A
-/// station name is not an identity: the directory contains many unrelated
+/// The player's submitted and resolved addresses are both searched and
+/// matched. The directory's by-URL lookup reads only the addresses people
+/// submitted, never its own `url_resolved`, which is one reason Browse saves
+/// the submitted address: a station saved under the resolved one finds artwork
+/// only if somebody happened to submit that exact address too.
+///
+/// A station name is not an identity: the directory contains many unrelated
 /// broadcasters called "Radio One", and borrowing the first one's logo is
 /// worse than leaving the crystal bare. Previously failed or decode-rejected
 /// addresses may be excluded so another submission for the stream can win.
@@ -980,19 +1021,25 @@ pub async fn search(query: Query) -> Result<Page, String> {
     let mut order: Vec<String> = Vec::new();
     let mut best: HashMap<String, BrowseStation> = HashMap::new();
     for entry in raw {
-        let Some(url) = playable_url(text(&entry.url), text(&entry.url_resolved)) else {
+        let Some(url) = listen_url(text(&entry.url), text(&entry.url_resolved)) else {
             continue;
         };
         let name = clean_name(text(&entry.name), 60);
         if name.is_empty() {
             continue;
         }
+        // Duplicates are still told apart by the stream the directory reached,
+        // exactly as the facet tally and the webview's own pass compare them.
+        let key = stream_key(
+            &playable_url(text(&entry.url), text(&entry.url_resolved)).unwrap_or_else(|| url.clone()),
+        );
 
         let tags = clean_name(text(&entry.tags), 120);
         let station = BrowseStation {
             uuid: entry.stationuuid.unwrap_or_default(),
             name,
             url,
+            resolved_url: playable_url(text(&entry.url_resolved), "").unwrap_or_default(),
             homepage: clean_name(text(&entry.homepage), 200),
             tag: first_tag(&tags, 24),
             tags,
@@ -1006,7 +1053,6 @@ pub async fn search(query: Query) -> Result<Page, String> {
             hls: number(&entry.hls) != 0,
         };
 
-        let key = stream_key(&station.url);
         match best.get_mut(&key) {
             Some(kept) if kept.votes >= station.votes => {}
             Some(kept) => *kept = station,

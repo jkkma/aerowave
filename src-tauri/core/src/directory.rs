@@ -71,14 +71,33 @@ pub fn directory_failure_forgets_mirror(failure: DirectoryFailure) -> bool {
     }
 }
 
-/// Valid mirror names, once each and in the order the directory supplied.
+/// Is this one of the directory's own hosts: the domain itself or a name
+/// beneath it?
+///
+/// Being a plain hostname is not enough. `127.0.0.1` and `localhost` are both
+/// plain hostnames, so a mirror list or a redirect naming them would otherwise
+/// turn a directory request into one aimed at this machine.
+pub fn is_directory_host(name: &str, domain: &str) -> bool {
+    if !is_hostname(name) || domain.is_empty() {
+        return false;
+    }
+    let name = name.to_ascii_lowercase();
+    let domain = domain.to_ascii_lowercase();
+    name == domain
+        || name
+            .strip_suffix(&domain)
+            .map_or(false, |rest| rest.ends_with('.'))
+}
+
+/// Valid mirror names under `domain`, once each and in the order the
+/// directory supplied.
 ///
 /// The servers endpoint currently repeats a hostname when both its IPv4 and
 /// IPv6 addresses are healthy. Those are two routes to one mirror, not two
 /// useful retry choices. Hostnames compare without regard to ASCII case, so
 /// normalising here also prevents a differently-cased duplicate from slipping
 /// through.
-pub fn directory_host_candidates<I, S>(names: I) -> Vec<String>
+pub fn directory_host_candidates<I, S>(names: I, domain: &str) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -88,7 +107,7 @@ where
         .into_iter()
         .filter_map(|name| {
             let name = name.as_ref();
-            if !is_hostname(name) {
+            if !is_directory_host(name, domain) {
                 return None;
             }
             let normalised = name.to_ascii_lowercase();
@@ -164,12 +183,29 @@ pub fn first_tag(raw: &str, max: usize) -> String {
     fallback
 }
 
-/// The address to hand the player, preferring the one the directory has
-/// already followed. Anything that is not http(s) - a `file:` entry, or a
-/// scheme the media element has never heard of - is refused rather than
-/// saved as a station that can only ever fail.
+/// The stream a directory entry stands for, preferring the address the
+/// directory has already followed: two submissions that reach the same stream
+/// through different playlists are one station. Anything that is not http(s)
+/// - a `file:` entry, or a scheme the media element has never heard of - is
+/// refused rather than kept as a station that can only ever fail.
 pub fn playable_url(url: &str, resolved: &str) -> Option<String> {
-    [resolved, url]
+    first_http_url([resolved, url])
+}
+
+/// The address to play and to save: the one that was submitted.
+///
+/// `url_resolved` is wherever the directory's checker last ended up, and that
+/// is not always somewhere to come back to. It can carry a short-lived token,
+/// or the time of the check itself, so it changes every time the station is
+/// checked. The submitted address is what the broadcaster published, and the
+/// player follows its playlist or redirect afresh each time. The resolved form
+/// stands in only when the submitted one is not http(s) at all.
+pub fn listen_url(url: &str, resolved: &str) -> Option<String> {
+    first_http_url([url, resolved])
+}
+
+fn first_http_url(candidates: [&str; 2]) -> Option<String> {
+    candidates
         .into_iter()
         .map(str::trim)
         .find(|candidate| {
@@ -948,18 +984,74 @@ mod tests {
     #[test]
     fn mirror_candidates_are_valid_unique_hostnames() {
         assert_eq!(
-            directory_host_candidates([
-                "de1.api.radio-browser.info",
-                "DE1.API.RADIO-BROWSER.INFO",
-                "https://not-a-host.example",
-                "nl1.api.radio-browser.info",
-                "de1.api.radio-browser.info",
-            ]),
+            directory_host_candidates(
+                [
+                    "de1.api.radio-browser.info",
+                    "DE1.API.RADIO-BROWSER.INFO",
+                    "https://not-a-host.example",
+                    "nl1.api.radio-browser.info",
+                    "de1.api.radio-browser.info",
+                ],
+                "api.radio-browser.info",
+            ),
             vec![
                 "de1.api.radio-browser.info".to_string(),
                 "nl1.api.radio-browser.info".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn mirror_candidates_stay_inside_the_directory_domain() {
+        // A plain hostname is not enough: `127.0.0.1` and `localhost` are
+        // both perfectly good hostnames, and a mirror list naming them would
+        // otherwise point the directory client at this machine.
+        assert_eq!(
+            directory_host_candidates(
+                [
+                    "127.0.0.1",
+                    "localhost",
+                    "api.radio-browser.info.elsewhere.example",
+                    "evil-api.radio-browser.info",
+                    "NL1.API.Radio-Browser.info",
+                ],
+                "api.radio-browser.info",
+            ),
+            vec!["nl1.api.radio-browser.info".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_directory_host_is_the_domain_or_beneath_it() {
+        let domain = "api.radio-browser.info";
+        assert!(is_directory_host("all.api.radio-browser.info", domain));
+        assert!(is_directory_host("DE1.API.RADIO-BROWSER.INFO", domain));
+        assert!(is_directory_host("api.radio-browser.info", domain));
+        assert!(!is_directory_host("radio-browser.info", domain));
+        assert!(!is_directory_host("evil-api.radio-browser.info", domain));
+        assert!(!is_directory_host("de1.api.radio-browser.info/../x", domain));
+        assert!(!is_directory_host("", domain));
+    }
+
+    #[test]
+    fn the_address_to_keep_is_the_submitted_one() {
+        // `url_resolved` is wherever the directory's checker last landed. In
+        // November 2026 SBS Power FM's carried a 12-hour token that had already
+        // expired (403) while its submitted playlist answered 200, and laut.fm
+        // stamps the check time into theirs, so it changes with every check.
+        assert_eq!(
+            listen_url(
+                " http://radio.example/listen.pls ",
+                "https://cdn.example/live.m3u8?token=expired"
+            ),
+            Some("http://radio.example/listen.pls".to_string())
+        );
+        // A submission the player cannot open still has a usable resolved form.
+        assert_eq!(
+            listen_url("rtsp://radio.example/live", " https://cdn.example/live "),
+            Some("https://cdn.example/live".to_string())
+        );
+        assert_eq!(listen_url("file:///etc/passwd", "rtsp://example/x"), None);
     }
 
     #[test]

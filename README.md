@@ -130,7 +130,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   media controls receive the same current title and station image as the page.
 - Station artwork is decoded before its address is remembered. A failed saved
   logo can fall back to another directory entry for the same submitted or resolved
-  stream URL; a shared station name alone is not a match. Temporary lookup failures
+  stream URL; a shared station name alone is not a match. The directory's lookup
+  by URL only searches the addresses people submitted, not its own resolved
+  ones, so the fallback works for stations saved under their submitted address. Temporary lookup failures
   retry with a bounded delay. Artwork requests validate public destinations,
   DNS answers and redirects, using the same direct-connection rules as HLS.
 - A short-lived second connection is still opened once when a station starts,
@@ -216,17 +218,39 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - The BROWSE tab searches [radio-browser.info](https://www.radio-browser.info/), a
   community-run directory of tens of thousands of public stations. Type a name, and
   narrow it by country or genre — both dropdowns are the directory's own lists, with
-  station counts beside each entry. Press Listen or a row to try a station, and
+  station counts beside each entry, sorted the way the reader's own system sorts
+  text with a leading "The" set aside. Press Listen or a row to try a station, and
   Save to add it to your stations. Nothing is saved until you press Save, and nothing is
   fetched until you open the tab.
+- **Listen and Save use the address the station was submitted under**, not the
+  directory's `url_resolved`. That second address is wherever the directory's
+  checker last landed, and it is not always somewhere to come back to. In
+  November 2026 SBS Power FM's carried a twelve-hour token that had expired the
+  day before: it answered 403 while the submitted playlist answered 200. laut.fm
+  writes the time of each check into theirs, so it changes every time the
+  station is checked, and a station saved under it stopped showing as saved the
+  next day. Of the 2,000 most-played stations, 162 have a resolved address that
+  differs from the submitted one beyond the scheme. The player follows the
+  submitted playlist or redirect itself, so it gets a fresh address each time.
+  The resolved address still identifies the stream when duplicates are compared.
+  A station saved under it by an earlier version still shows as saved.
 - Country, genre, format and bitrate are directly available beside the search.
   Format and bitrate use separate, side-by-side dropdowns. Applied filters can
   be removed one at a time, and Clear all starts over. The results count says how many stations
   are loaded, not how many exist in the directory. A failed search offers Try
   again without applying unfinished edits in the search field.
+- A dropdown searches once it has stopped changing for a third of a second.
+  WebView2 changes a closed dropdown once per arrow key, and each change
+  otherwise started its own search and facet tally, so arrowing past twenty
+  countries would ask the directory for twenty tallies. Pressing More during that
+  pause runs the new search rather than paging the old one. A dropdown waiting
+  for its counts is disabled unless it has keyboard focus. Chromium moves focus
+  off a focused control that stays disabled and does not give it back, which
+  stranded keyboard users after every filter change.
 - Adding a station shows a pending state until its settings file is written.
   If the write fails, Save becomes available to retry. Failed additions cannot
-  be swept into a later settings save.
+  be swept into a later settings save. A station saved while a genre is chosen
+  takes that genre as its tag, cut to the station editor's 24 characters.
 - Each page is listed by country, and alphabetically inside each one. MORE
   appends the next page without moving the rows already loaded, so stations
   without a country do not keep reappearing at the bottom as though they were
@@ -285,7 +309,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   port and a leading `www.` merged nothing, so neither is stripped. The three
   places that compare streams — the search, the tally, and the webview's own
   pass over what is already on screen — have to read a URL the same way, or a
-  row one of them collapsed reappears from another.
+  row one of them collapsed reappears from another. All three compare the
+  address the directory reached where it has one, and all three fold ASCII case
+  only.
 - **Which duplicate survives is decided by votes**, not by whichever the
   directory sorted first. `radio.plaza.one/ogg` is filed both as "Nightwave
   Plaza" (171 votes) and as "Vaporwave" (379); ordered by name the first won,
@@ -300,13 +326,17 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   two AAC+ stations were "Radio One - Tirana 95.2 FM" and "RadioOne", the same
   stream twice — so the tally collapses duplicate streams and drops nameless or
   unplayable entries exactly as the search does. A count that promises two and
-  delivers one is the thing these counts exist to avoid.
+  delivers one is the thing these counts exist to avoid. This applies to the
+  narrowed lists. Before anything narrows them, the country and genre lists
+  show the directory's own totals, which include duplicate submissions and
+  entries Browse leaves out.
   Each country, genre, format and bitrate bucket counts a stream once. When
   duplicate submissions have different metadata, both classifications remain
   available, because either corresponding filtered search can find the stream.
 - radio-browser publishes no crossed counts, so all of this is tallied from the
-  stations themselves — a megabyte or two — which is why it happens only when a
-  filter changes, and is remembered for the rest of the run. Nothing is tallied
+  stations themselves — up to about six megabytes, since the first 5,000 United
+  States stations came to 5.6 MB — which is why it happens only when a filter
+  changes, and is remembered for the rest of the run. Nothing is tallied
   at all until something is narrowing. For the largest countries the tally reads
   the first five thousand stations, so those counts are a floor rather than a
   total, and say so with a `+`.
@@ -319,7 +349,14 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   A connection failure, server error or malformed response gets one automatic
   retry within the same time limit. The retry prefers another discovered mirror;
   when only one is available, it tries that server again after a short pause.
-- HLS entries are flagged in the row and play through hls.js.
+  Only mirrors under `api.radio-browser.info` are used, and a redirect is
+  followed only to another of them over HTTPS. `127.0.0.1` is a valid hostname,
+  so a mirror list that named it would otherwise point the client at this
+  machine.
+- HLS entries are flagged in the row and play through hls.js. The directory's
+  HLS flag describes the resolved address, so it starts hls.js directly only
+  when that is also the submitted address. A playlist or redirect in front of
+  the manifest is probed first, the same way a saved station is.
 - An added station is an ordinary station — editable, taggable, and usable as an
   alarm source like any other.
 

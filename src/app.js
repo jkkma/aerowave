@@ -2653,9 +2653,7 @@ function step(delta) {
 
 /** Through the browse results, in the order they are shown. */
 function stepBrowse(delta) {
-  const here = browseResults.findIndex(
-    (st) => player.source && sameStream(player.source.url, st.url)
-  );
+  const here = browseResults.findIndex(browsePlaying);
   // Nothing from this list is playing yet, so start at the end the button
   // points at rather than somewhere in the middle.
   const next =
@@ -2717,6 +2715,17 @@ const browseFacets = new Map();
 let browseResults = [];
 /** The text query that produced `browseResults`; edits apply only on Search. */
 let browseName = "";
+/** The genre label of the search that produced `browseResults`, for Save. */
+let browseResultsTagLabel = "";
+/**
+ * How long a dropdown waits for the next change before it searches. WebView2
+ * changes a closed dropdown once per arrow key, and every change would
+ * otherwise start a search and a facet tally of up to several megabytes -
+ * arrowing past twenty countries would ask a volunteer mirror for twenty of
+ * each.
+ */
+const BROWSE_FILTER_SETTLE_MS = 350;
+let browseFilterTimer = null;
 /** Where the next page starts, counted in what the directory offered. */
 let browseOffset = 0;
 let browseMore = false;
@@ -2746,13 +2755,34 @@ const browseNarrows = new Map();
  * a row the search collapsed comes straight back on the next page.
  */
 const sameStream = (a, b) => {
-  const tidy = (u) =>
-    (u || "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  // ASCII case only, as `to_ascii_lowercase` folds it: `/Ö` and `/ö` are two
+  // paths to the backend, so they must be two here too.
+  const tidy = (u) => (u || "").trim().replace(/[A-Z]+/g, (upper) => upper.toLowerCase())
+    .replace(/^https?:\/\//, "").replace(/\/+$/, "");
   return !!tidy(a) && tidy(a) === tidy(b);
 };
 
-const browseSaved = (url) => state.stations.some((s) => sameStream(s.url, url));
-const browseSaving = (url) => Array.from(pendingBrowseAdds).some((s) => sameStream(s.url, url));
+/**
+ * The stream a row stands for, as `playable_url` reads it in Rust: the address
+ * the directory reached where it has one. Duplicates are compared on this, not
+ * on the submitted address the row plays and saves.
+ */
+const browseStreamOf = (st) => st.resolvedUrl || st.url;
+
+/**
+ * Whether a saved or playing address is this row: its submitted address, or
+ * the resolved one that earlier versions saved. A resolved address that
+ * has since moved on - laut.fm stamps the time of each check into theirs -
+ * still matches through the submitted one.
+ */
+const isBrowseRow = (url, st) => sameStream(url, st.url) || (!!st.resolvedUrl && sameStream(url, st.resolvedUrl));
+
+const browseSaved = (st) => state.stations.some((s) => isBrowseRow(s.url, st));
+const browseSaving = (st) => Array.from(pendingBrowseAdds).some((s) => isBrowseRow(s.url, st));
+const browsePlaying = (st) => !!player.source && isBrowseRow(player.source.url, st);
+
+/** A saved station's tag, held to the editor's 24 characters as `first_tag` is. */
+const stationTag = (text) => Array.from(String(text || "").trim()).slice(0, 24).join("").trimEnd();
 
 /**
  * How each new page reads: country first, then the station name.
@@ -2845,9 +2875,26 @@ function clearBrowseFilters() {
   return browseSearch(false);
 }
 
+/** Search once a dropdown has stopped changing; see `BROWSE_FILTER_SETTLE_MS`. */
+function scheduleBrowseSearch() {
+  clearTimeout(browseFilterTimer);
+  browseFilterTimer = setTimeout(() => {
+    browseFilterTimer = null;
+    return browseSearch(false);
+  }, BROWSE_FILTER_SETTLE_MS);
+}
+
 /** Run a search. `more` adds the next page instead of starting over. */
 async function browseSearch(more, nameOverride) {
+  // A dropdown change still settling owns the next request. Paging the old
+  // query from its old offset would fill the list with stations the dropdowns
+  // no longer describe, so More runs the new search instead.
+  if (more && browseFilterTimer !== null) more = false;
   if (more && (browseBusy || !browseMore)) return;
+  if (!more) {
+    clearTimeout(browseFilterTimer);
+    browseFilterTimer = null;
+  }
   const trigger = document.activeElement;
   const restoreListFocus = trigger?.classList.contains("browse-more") || trigger?.classList.contains("browse-retry");
   const firstNewRow = more ? browseResults.length : 0;
@@ -2858,6 +2905,7 @@ async function browseSearch(more, nameOverride) {
   const name = more ? browseName : nameOverride ?? $("#browse-query").value.trim();
   if (!more) {
     browseName = name;
+    browseResultsTagLabel = browseTagLabel;
     browseSearched = false;
     browseResults = [];
     browseOffset = 0;
@@ -2894,7 +2942,7 @@ async function browseSearch(more, nameOverride) {
     // as the backend already does within one page.
     const appendAt = browseResults.length;
     for (const station of page.stations) {
-      const at = browseResults.findIndex((seen) => sameStream(seen.url, station.url));
+      const at = browseResults.findIndex((seen) => sameStream(browseStreamOf(seen), browseStreamOf(station)));
       if (at < 0) browseResults.push(station);
       else if ((Number(station.votes) || 0) > (Number(browseResults[at].votes) || 0)) {
         browseResults[at] = station;
@@ -3056,7 +3104,7 @@ async function refreshBrowseFilters() {
   } else {
     invalidateBrowseNarrow("#browse-tag");
     setBrowseFallback("#browse-tag", [], asTag, browseTag, browseTagLabel);
-    $("#browse-tag").disabled = !!browseFiltersLoading;
+    markBrowseFilterBusy($("#browse-tag"), !!browseFiltersLoading);
   }
 
   if (browseTag || narrowed) {
@@ -3069,7 +3117,7 @@ async function refreshBrowseFilters() {
   } else {
     invalidateBrowseNarrow("#browse-country");
     setBrowseFallback("#browse-country", [], asCountry, browseCountry, browseCountryLabel);
-    $("#browse-country").disabled = !!browseFiltersLoading;
+    markBrowseFilterBusy($("#browse-country"), !!browseFiltersLoading);
   }
 
   // The fixed lists are only worth counting once something else is narrowing
@@ -3122,10 +3170,21 @@ function annotateFixed(selector, buckets, sampled) {
   });
 }
 
+/**
+ * Say a dropdown is waiting for its counts. Disabling is how the others say
+ * it, but the one with keyboard focus stays usable: Chromium blurs a focused
+ * control that stays disabled past a frame and never hands focus back, which
+ * left anyone changing filters from the keyboard stranded on the page.
+ */
+function markBrowseFilterBusy(select, busy) {
+  select.setAttribute("aria-busy", String(busy));
+  select.disabled = busy && document.activeElement !== select;
+}
+
 /** Back to plain labels, for when nothing is narrowing these any more. */
 function invalidateBrowseNarrow(selector) {
   browseNarrows.set(selector, (browseNarrows.get(selector) || 0) + 1);
-  $(selector).disabled = false;
+  markBrowseFilterBusy($(selector), false);
 }
 
 function resetFixed(selector) {
@@ -3145,7 +3204,7 @@ async function narrowFixed(selector, query, pick, what) {
   const mine = (browseNarrows.get(selector) || 0) + 1;
   browseNarrows.set(selector, mine);
   clearFixedCounts(selector);
-  select.disabled = true;
+  markBrowseFilterBusy(select, true);
   try {
     const facets = await facetsFor(query);
     if (browseNarrows.get(selector) !== mine) return;
@@ -3156,7 +3215,7 @@ async function narrowFixed(selector, query, pick, what) {
     clearFixedCounts(selector);
     say(`could not work out which ${what}s are available`, "bad");
   } finally {
-    if (browseNarrows.get(selector) === mine) select.disabled = false;
+    if (browseNarrows.get(selector) === mine) markBrowseFilterBusy(select, false);
   }
 }
 
@@ -3172,7 +3231,7 @@ async function narrow(selector, query, pick, unpack, what) {
   const chosen = filterNow(selector);
   const fallback = selector === "#browse-tag" ? browseTags : browseCountries;
   setBrowseFallback(selector, fallback || [], unpack, chosen.value, chosen.label);
-  select.disabled = true;
+  markBrowseFilterBusy(select, true);
   try {
     const facets = await facetsFor(query);
     if (browseNarrows.get(selector) !== mine) return;
@@ -3187,15 +3246,28 @@ async function narrow(selector, query, pick, unpack, what) {
     setBrowseFallback(selector, currentFallback || [], unpack, current.value, current.label);
     say(`could not work out which ${what}s are available`, "bad");
   } finally {
-    if (browseNarrows.get(selector) === mine) select.disabled = false;
+    if (browseNarrows.get(selector) === mine) markBrowseFilterBusy(select, false);
   }
+}
+
+/**
+ * Filter entries in the reader's alphabet, with a leading "The" set aside as
+ * the country list has always filed it. Rust can only order by bytes, which
+ * put Türkiye after Tuvalu and any accented genre after Z.
+ */
+function inBrowseOrder(entries, unpack) {
+  const key = (name) => {
+    const trimmed = String(name || "").trim();
+    return /^the /i.test(trimmed) ? trimmed.slice(4) : trimmed;
+  };
+  return entries.map(unpack)
+    .sort((a, b) => key(a[1]).localeCompare(key(b[1]), undefined, { sensitivity: "base" }));
 }
 
 function setBrowseFallback(selector, entries, unpack, value, label) {
   const select = $(selector);
   while (select.options.length > 1) select.remove(1);
-  entries.forEach((entry) => {
-    const [optionValue, optionLabel] = unpack(entry);
+  inBrowseOrder(entries, unpack).forEach(([optionValue, optionLabel]) => {
     const option = document.createElement("option");
     option.value = optionValue;
     option.dataset.label = optionLabel;
@@ -3222,8 +3294,7 @@ function setBrowseFallback(selector, entries, unpack, value, label) {
 function setBrowseOptions(selector, entries, unpack, value, label, sampled) {
   const select = $(selector);
   while (select.options.length > 1) select.remove(1);
-  entries.forEach((entry) => {
-    const [optionValue, optionLabel, stations] = unpack(entry);
+  inBrowseOrder(entries, unpack).forEach(([optionValue, optionLabel, stations]) => {
     const option = document.createElement("option");
     option.value = optionValue;
     option.dataset.label = optionLabel;
@@ -3260,7 +3331,11 @@ function previewBrowse(st) {
     logo: st.favicon,
     tag: st.tags || st.tag || "",
     stationId: null,
-    hls: !!st.hls,
+    // The directory's HLS flag describes the address its checker reached. It
+    // can start hls.js directly only when that is also the address played;
+    // behind a playlist or redirect, the probe finds a fresh manifest instead
+    // of handing hls.js something that is not one.
+    hls: !!st.hls && (!st.resolvedUrl || sameStream(st.url, st.resolvedUrl)),
   });
   // Nothing in the saved list is playing any more; both lists should say so.
   renderStations();
@@ -3268,14 +3343,15 @@ function previewBrowse(st) {
 }
 
 function addBrowseStation(st) {
-  if (browseSaved(st.url) || browseSaving(st.url)) return;
+  if (browseSaved(st) || browseSaving(st)) return;
   if (setupRestorePending) {
     say("Wait for settings recovery to finish, then try saving this station again.");
     return Promise.resolve(false);
   }
   // The genre that was searched for beats the directory's own first tag: it
-  // is what this station is to the person keeping it.
-  const tag = browseTagLabel || st.tag;
+  // is what this station is to the person keeping it. That is the genre of
+  // the search that found the row, not a dropdown change still settling.
+  const tag = stationTag(browseResultsTagLabel || st.tag);
   const station = {
     id: newId(),
     name: st.name,
@@ -3290,7 +3366,7 @@ function addBrowseStation(st) {
     extraStation: station,
     onSuccess: () => {
       pendingBrowseAdds.delete(station);
-      if (!browseSaved(station.url)) state.stations.push(station);
+      if (!browseSaved(station)) state.stations.push(station);
       renderStations();
       renderAlarms();
       refreshBrowseIndicators();
@@ -3303,8 +3379,8 @@ function addBrowseStation(st) {
 }
 
 function updateBrowseAddButton(add, station) {
-  const saving = browseSaving(station.url);
-  const saved = !saving && browseSaved(station.url);
+  const saving = browseSaving(station);
+  const saved = !saving && browseSaved(station);
   add.classList.toggle("done", saved);
   add.textContent = saving ? "Saving…" : saved ? "Saved" : "+ Save";
   add.title = saving ? "Saving station" : saved ? "Already in your stations" : "Add to your stations";
@@ -3313,7 +3389,7 @@ function updateBrowseAddButton(add, station) {
 }
 
 function updateBrowseListenButton(button, station) {
-  const selected = !!player.source && sameStream(player.source.url, station.url);
+  const selected = browsePlaying(station);
   button.textContent = selected ? "Selected" : "Listen";
   button.setAttribute("aria-label", `Listen to ${station.name}`);
   button.setAttribute("aria-pressed", String(selected));
@@ -3325,7 +3401,7 @@ function refreshBrowseIndicators() {
   rows.forEach((row, index) => {
     const station = browseResults[index];
     if (!station) return;
-    row.classList.toggle("on", !!player.source && sameStream(player.source.url, station.url));
+    row.classList.toggle("on", browsePlaying(station));
     const listen = row.querySelector(".browse-listen");
     if (listen) updateBrowseListenButton(listen, station);
     const add = row.children[row.children.length - 1];
@@ -3372,7 +3448,7 @@ function renderBrowse() {
     const li = document.createElement("li");
     li.className = "row browse-row";
     li.dataset.url = st.url;
-    if (player.source && sameStream(player.source.url, st.url)) li.classList.add("on");
+    if (browsePlaying(st)) li.classList.add("on");
 
     const mark = document.createElement("span");
     mark.className = "browse-station-mark";
@@ -6271,24 +6347,26 @@ function wire() {
     browseTag = browseTagLabel = "";
     $("#browse-tag").value = "";
   }
+  // A choice takes effect at once - an in-flight count reads it when it lands
+  // - but the search waits for the dropdown to settle.
   $("#browse-country").addEventListener("change", (e) => {
     browseCountry = e.target.value;
     browseCountryLabel = labelOf(e.target);
-    browseSearch(false);
+    scheduleBrowseSearch();
   });
   $("#browse-tag").addEventListener("change", (e) => {
     if (IS_ANDROID) return;
     browseTag = e.target.value;
     browseTagLabel = labelOf(e.target);
-    browseSearch(false);
+    scheduleBrowseSearch();
   });
   $("#browse-codec").addEventListener("change", (e) => {
     browseCodec = e.target.value;
-    browseSearch(false);
+    scheduleBrowseSearch();
   });
   $("#browse-bitrate").addEventListener("change", (e) => {
     browseBitrate = e.target.value;
-    browseSearch(false);
+    scheduleBrowseSearch();
   });
 
   // shuffle folder

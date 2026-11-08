@@ -92,8 +92,13 @@ async fn fixture(
                     if slow_discovery {
                         tokio::time::sleep(Duration::from_secs(3)).await;
                     }
+                    // Loopback and foreign names are plain hostnames too, and
+                    // must be dropped: every request below has to land on
+                    // one of the fixture's own mirrors.
                     let mut mirrors = vec![
+                        serde_json::json!({"name": "127.0.0.1"}),
                         serde_json::json!({"name": "bad.example"}),
+                        serde_json::json!({"name": "elsewhere.test"}),
                         serde_json::json!({"name": "bad.example"}),
                     ];
                     if alternate && number > 0 {
@@ -155,6 +160,7 @@ async fn check_case(
     let client = browse::DirectoryClient::with_endpoints(
         discovery,
         "bad.example".to_string(),
+        "example",
         Arc::new(move |host| format!("{origin}/{host}")),
     )
     .unwrap();
