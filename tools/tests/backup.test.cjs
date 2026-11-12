@@ -204,6 +204,20 @@ test("restore changes setup only after the backend returns the restored data", a
   assert.match(h.el("#backup-status").textContent, /Backup restored/);
 });
 
+test("restore reports the path of an original setup that required a raw recovery copy", async () => {
+  const restored = appData({ stations: [] });
+  const rawRecoveryPath = "C:/Aerowave/data/aerowave.before-restore-raw-20261111-100000-0.json";
+  const h = backupHarness({ invoke: command => {
+    if (command === "read_backup_file") return "restorable backup";
+    if (command === "inspect_backup") return { stationCount: 0, alarmCount: 1, warnings: [] };
+    if (command === "restore_backup") return { ...restored, rawRecoveryPath };
+  } });
+  await h.evaluate("previewSetupRestore()");
+  await h.evaluate("restoreSetup()");
+  assert.deepEqual(jsonClone(h.evaluate("state")), restored);
+  assert.ok(h.el("#backup-status").textContent.includes(rawRecoveryPath));
+});
+
 test("a rejected restore retains current setup and the validated preview for retry", async () => {
   let attempts = 0;
   const restored = appData({ stations: [{ id: "imported", name: "Imported", url: "https://radio.test/imported" }] });

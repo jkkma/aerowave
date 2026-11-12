@@ -208,6 +208,7 @@ audio.preload = "none";
  * fallback, which aborts the first fallback, and so on until it gives up.
  */
 let playGeneration = 0;
+let mediaLoad = null;
 let lastMediaTime = 0;
 
 /** Did something newer take over since this attempt started? */
@@ -236,6 +237,7 @@ const player = {
   lastProgress: 0,    // when audio last actually arrived, for the ring watchdog
   resolved: null,     // the station's own stream URL, after any playlist hop
   probed: false,      // ...and whether a probe, rather than the station, chose it
+  directFallbackUrl: null, // exact route approved by a successful local-station probe
   relayed: false,     // is <audio> playing through the local relay?
   streamTitle: false, // has the stream itself named the track? then stop asking
   triedDirect: false, // ...and have we already fallen back off it?
@@ -325,6 +327,7 @@ function stopPlayback(quiet, { skipNative = false } = {}) {
   // Drop the source first: tearing down the element fires events that would
   // otherwise look like a stream failure and start a reconnect.
   player.source = null;
+  mediaLoad = null;
   audio.pause();
   audio.loop = false;
   audio.removeAttribute("src");
@@ -335,6 +338,7 @@ function stopPlayback(quiet, { skipNative = false } = {}) {
   player.pendingPosition = null;
   player.resolved = null;
   player.probed = false;
+  player.directFallbackUrl = null;
   player.relayed = false;
   player.triedDirect = false;
   player.metadataStarted = false;
@@ -898,7 +902,7 @@ function fadeOut(seconds, now = Date.now) {
  * server answers - plenty of stations serve a perfectly good HTTP response
  * that the media element then refuses. This is the check that counts.
  */
-function canDecode(url, timeoutMs = 9000, { hls = false, signal, source = { kind: "station" } } = {}) {
+function canDecode(url, timeoutMs = 9000, { hls = false, signal, source = { kind: "station" }, directFallbackAllowed = false } = {}) {
   return new Promise((resolve) => {
     const probe = new Audio();
     probe.preload = "auto";
@@ -931,7 +935,7 @@ function canDecode(url, timeoutMs = 9000, { hls = false, signal, source = { kind
     });
     probe.addEventListener("error", () => {
       const code = probe.error ? probe.error.code : 0;
-      if (!settled && code === 4 && relayed) {
+      if (!settled && code === 4 && relayed && directFallbackAllowed === true) {
         relayed = false;
         probe.src = url;
         probe.load();
@@ -969,7 +973,7 @@ function canDecode(url, timeoutMs = 9000, { hls = false, signal, source = { kind
         decoder.loadSource(url);
         decoder.attachMedia(probe);
       } else {
-        const playUrl = await playable(source, url);
+        const playUrl = await playable(source, url, directFallbackAllowed);
         if (settled) return;
         relayed = source.kind === "station" && playUrl !== url;
         probe.src = playUrl;
@@ -1269,6 +1273,7 @@ async function startHls(source, url, generation) {
   });
   hlsPlayer = hls;
   player.hls = true;
+  const load = beginMediaLoad();
 
   hls.on(Hls.Events.ERROR, (_event, data) => {
     if (hlsPlayer !== hls || superseded(generation) || player.source !== source) return;
@@ -1276,7 +1281,7 @@ async function startHls(source, url, generation) {
     // fragment - before it calls anything fatal, so by here it has already
     // tried. Non-fatal errors are its business, not ours.
     if (!data || !data.fatal) return;
-    failure("HLS " + (data.details || data.type || "error"));
+    failMediaLoad(load, "HLS " + (data.details || data.type || "error"));
   });
 
   hls.on(Hls.Events.FRAG_PARSING_METADATA, (_event, data) => {
@@ -1335,10 +1340,10 @@ async function startHls(source, url, generation) {
  *
  * WebKitGTK cannot reliably play files from the asset protocol, so Linux
  * serves files already granted by the picker through the same listener.
- * Other platforms keep the asset URL. Stations can still connect directly
- * when the relay is unavailable.
+ * Other platforms keep the asset URL. Desktop direct playback requires a
+ * successful probe authorizing the submitted local station's resolved route.
  */
-async function playable(source, url) {
+async function playable(source, url, directFallbackAllowed = false) {
   if (source.kind === "folder" && source.path) {
     if (IS_ANDROID) return source.path;
     return await invoke("local_file_url", { path: source.path }) || url;
@@ -1346,9 +1351,11 @@ async function playable(source, url) {
   if (source.kind !== "station") return url;
   try {
     const relayed = await invoke("relay_url", { url });
-    return relayed || url;
-  } catch {
-    return url;
+    if (relayed) return relayed;
+    throw new Error("The station relay is unavailable");
+  } catch (error) {
+    if (IS_ANDROID || directFallbackAllowed === true) return url;
+    throw error;
   }
 }
 
@@ -1472,6 +1479,7 @@ async function play(source, opts = {}) {
       url = info.url;
       player.resolved = info.url;
       player.probed = true;
+      if (!IS_ANDROID && info.directFallbackAllowed === true) player.directFallbackUrl = info.url;
       useHls = !!info.hls;
       source.hls = useHls;
       source.hlsUrl = useHls ? info.url : null;
@@ -1505,7 +1513,7 @@ async function play(source, opts = {}) {
   } else {
     let playUrl;
     try {
-      playUrl = await playable(source, url);
+      playUrl = await playable(source, url, player.directFallbackUrl === url);
     } catch (e) {
       if (!superseded(generation) && !givingUp) failure(String(e));
       return;
@@ -1539,16 +1547,7 @@ async function play(source, opts = {}) {
     renderSleepTimer();
   }
   if (player.paused || givingUp) return;
-  try {
-    await audio.play();
-  } catch (e) {
-    // Autoplay refusals and decode errors land here - but so do aborts from
-    // this code starting something else, which must not count as a failure.
-    if (superseded(generation) || givingUp || isAbort(e)) return;
-    failure(String(e && e.message ? e.message : e));
-    return;
-  }
-  if (superseded(generation) || player.paused || givingUp) return;
+  if (!(await playLoadedAudio(generation))) return;
   if (opts.fadeSecs > 0 && !continuingSleepFade) fadeTo(volume, opts.fadeSecs);
 
   if (source.kind === "station" && !player.hls) startMetadata(source, initialInfo);
@@ -2098,11 +2097,11 @@ function failure(detail, opts = {}) {
     // ever equal itself, so it guarded nothing.
     const generation = playGeneration;
     if (player.source !== source || player.paused || givingUp) return;
-    // The first attempt reuses the address playback resolved. That address
-    // is where the station's redirects led, which can be one node of a load
-    // balancer or carry a token that expires, so from the second attempt the
-    // station's own URL is resolved again and may lead somewhere fresh.
-    if (player.retries >= 2) {
+    // Reuse a successful resolution for the first retry. If the initial
+    // probe failed, retry it before loading so a recovered HLS station can
+    // reach its decoder. Later retries look for a fresh server or token.
+    if (player.retries >= 2 || (!IS_ANDROID && !player.probed && !source.hls)) {
+      if (!IS_ANDROID) player.directFallbackUrl = null;
       try {
         const info = await invoke("probe_stream", { url: source.url, wantTitle: false });
         // A stop during the probe must not write a resolved URL back into a
@@ -2110,6 +2109,7 @@ function failure(detail, opts = {}) {
         if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
         player.resolved = info.url;
         player.probed = true;
+        if (!IS_ANDROID && info.directFallbackAllowed === true) player.directFallbackUrl = info.url;
         source.hls = !!info.hls;
         source.hlsUrl = info.hls ? info.url : null;
       } catch { /* stay with the address already resolved */ }
@@ -2133,15 +2133,23 @@ function failure(detail, opts = {}) {
     if (source.hls) {
       if (!(await startHls(source, upstream, generation))) return;
     } else {
-      const playUrl = player.triedDirect ? upstream : await playable(source, upstream);
+      const directAllowed = player.directFallbackUrl === upstream;
+      let playUrl;
+      try {
+        playUrl = player.triedDirect && directAllowed ? upstream : await playable(source, upstream, directAllowed);
+      } catch (error) {
+        if (!superseded(generation) && player.source === source && !player.paused && !givingUp) {
+          failure(String(error));
+        }
+        return;
+      }
       if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
       player.relayed = playUrl !== upstream;
       setAudioSource(playUrl);
     }
     if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
-    audio.play().then(() => startRecoveredMetadata(source, generation)).catch((e) => {
-      if (superseded(generation) || isAbort(e)) return;
-      failure(String(e && e.message ? e.message : e));
+    playLoadedAudio(generation).then(playing => {
+      if (playing) startRecoveredMetadata(source, generation);
     });
   }, wait);
 }
@@ -2154,8 +2162,10 @@ function failure(detail, opts = {}) {
  * or an ordinary stream works only with the media element's request, that
  * direct connection is worth trying. HLS must still go through hls.js.
  */
-async function fallBackToDirect(source, generation) {
+function fallBackToDirect(source, generation) {
   if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
+  const upstream = player.resolved || source.url;
+  if (player.directFallbackUrl !== upstream) return;
   const hadRelayTitle = player.relayed && player.streamTitle;
   player.triedDirect = true;
   player.relayed = false;
@@ -2165,28 +2175,10 @@ async function fallBackToDirect(source, generation) {
     player.streamTitle = false;
     player.metadataStarted = false;
   }
-  if (!player.probed) {
-    try {
-      const info = await invoke("probe_stream", { url: source.url, wantTitle: false });
-      if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
-      player.resolved = info.url;
-      player.probed = true;
-      source.hls = !!info.hls;
-      source.hlsUrl = info.hls ? info.url : null;
-    } catch { /* the direct request may still work */ }
-  }
-  if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
-  const upstream = player.resolved || source.url;
-  if (source.hls) {
-    if (!(await startHls(source, upstream, generation))) return;
-  } else {
-    setStatus("Trying another connection", "busy");
-    setAudioSource(upstream);
-  }
-  if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
-  audio.play().then(() => startRecoveredMetadata(source, generation)).catch((e) => {
-    if (superseded(generation) || isAbort(e)) return;
-    failure(String(e && e.message ? e.message : e));
+  setStatus("Trying another connection", "busy");
+  setAudioSource(upstream);
+  playLoadedAudio(generation).then(playing => {
+    if (playing) startRecoveredMetadata(source, generation);
   });
 }
 
@@ -2198,9 +2190,49 @@ async function fallBackToDirect(source, generation) {
  * again, so a genuine outside pause after that is still caught.
  */
 let switchingSource = false;
-function setAudioSource(url) {
+function beginMediaLoad() {
   switchingSource = true;
+  mediaLoad = { failed: false, playRequest: null };
+  return mediaLoad;
+}
+
+function setAudioSource(url) {
+  beginMediaLoad();
   audio.src = url;
+}
+
+async function playLoadedAudio(generation) {
+  const load = mediaLoad;
+  if (!load || load.failed) return false;
+  const request = Symbol();
+  load.playRequest = request;
+  const current = () => load === mediaLoad && load.playRequest === request && !load.failed &&
+    !superseded(generation) && !player.paused && !givingUp;
+  try {
+    await audio.play();
+    return current();
+  } catch (error) {
+    if (current() && !isAbort(error)) {
+      const unsupported = audio.error?.code === 4 || error?.name === "NotSupportedError";
+      failMediaLoad(load, String(error?.message || error), unsupported);
+    }
+    return false;
+  }
+}
+
+function failMediaLoad(load, detail, unsupported = false) {
+  const source = player.source;
+  if (!load || load !== mediaLoad || load.failed || !source || player.paused) return;
+  // Browsers can report the same load failure through both the element's
+  // error event and its pending play promise. Either channel owns it once.
+  load.failed = true;
+  const stationRelay = source.kind === "station" && player.relayed && !player.hls;
+  if (unsupported && stationRelay && !player.triedDirect &&
+      player.directFallbackUrl === (player.resolved || source.url) && !givingUp) {
+    fallBackToDirect(source, playGeneration);
+    return;
+  }
+  failure(detail, { fatal: unsupported && !stationRelay });
 }
 
 audio.addEventListener("playing", () => {
@@ -2258,6 +2290,7 @@ audio.addEventListener("waiting", () => player.source && setStatus("Buffering", 
 audio.addEventListener("stalled", () => player.source && setStatus("Waiting for audio", "busy"));
 audio.addEventListener("error", () => {
   const err = audio.error;
+  if (!err) return;
   console.error(
     "aerowave media error:",
     "code=" + (err ? err.code : "?"),
@@ -2265,23 +2298,10 @@ audio.addEventListener("error", () => {
     "src=" + (audio.currentSrc || "(empty)")
   );
   // MEDIA_ERR_SRC_NOT_SUPPORTED. Not only "bad codec": the element reports
-  // it for an error page and for a refused connection too, which is why a
-  // relayed station that lands here is worth one attempt without the relay
-  // before it is written off. Reconnecting on the same URL is not - that part
-  // the engine really will refuse however many times we ask.
-  if (err && err.code === 4) {
-    const source = player.source;
-    // Not while hls.js is driving: the element's source is a MediaSource blob,
-    // and fallBackToDirect would hand it the .m3u8 that WebView2 cannot read
-    // in the first place.
-    if (source && source.kind === "station" && player.relayed && !player.triedDirect && !player.hls) {
-      fallBackToDirect(source, playGeneration);
-      return;
-    }
-    failure("the player could not load or decode this stream", { fatal: true });
-    return;
-  }
-  failure(err ? "media error " + err.code : "unknown media error");
+  // it for an error page and for a refused connection too. Public stations
+  // can still reconnect and resolve a fresh destination through the relay.
+  failMediaLoad(mediaLoad, err.code === 4
+    ? "the player could not load or decode this stream" : "media error " + err.code, err.code === 4);
 });
 audio.addEventListener("ended", () => {
   if (!player.source) return;
@@ -2326,7 +2346,7 @@ function playStation(station, opts) {
     opts
   );
   state.settings.lastStation = station.id;
-  saveSettings();
+  saveSettings(null, "lastStation");
   renderStations();
   refreshBrowseIndicators();
 }
@@ -2495,9 +2515,7 @@ function resumePlayback() {
   if (source.kind === "folder") {
     markPlaying(true);
     setStatus("Playing your music", "on");
-    audio.play().catch((e) => {
-      if (!isAbort(e)) failure(String(e && e.message ? e.message : e));
-    });
+    playLoadedAudio(playGeneration);
     return;
   }
   play(source, { volume: player.target });
@@ -4127,7 +4145,7 @@ function rememberPlayedStation() {
   const history = [entry, ...previous.filter(station => station.id !== entry.id && !sameStream(station.url, entry.url))].slice(0, 20);
   if (JSON.stringify(history) === JSON.stringify(previous)) return;
   state.settings.recentStations = history;
-  saveSettings();
+  saveSettings(null, "recentStations");
   renderStations();
 }
 
@@ -4756,34 +4774,66 @@ function showFolderCounts(info, selector) {
   );
 }
 
+const folderLabelRequests = new Map();
+const folderPickerRequests = new Map();
+
 /** Fill in the folder rows from what is stored, with a fresh file count. */
 async function refreshFolderLabels() {
   // An unset backup folder skips the music fallback. Desktop alarms still
   // have their native emergency tone, but ordinary listening does not.
   const rows = [
-    { path: state.settings.shuffleFolder, selector: "#folder-path", critical: false },
-    { path: state.settings.backupFolder, selector: "#backup-path", critical: true },
+    { key: "shuffleFolder", selector: "#folder-path", critical: false },
+    { key: "backupFolder", selector: "#backup-path", critical: true },
   ];
+  const settings = state.settings;
+  const request = Symbol();
+  for (const row of rows) folderLabelRequests.set(row.key, request);
   for (const row of rows) {
+    if (folderLabelRequests.get(row.key) !== request || state.settings !== settings) continue;
+    const path = settings[row.key];
+    const current = () => folderLabelRequests.get(row.key) === request &&
+      state.settings === settings && settings[row.key] === path;
     const el = $(row.selector);
-    if (!row.path) {
+    if (!path) {
       el.textContent = row.critical
         ? "No backup folder chosen"
         : "No folder chosen";
       el.classList.toggle("warn", row.critical);
+      el.title = "";
       continue;
     }
     try {
-      const info = await folderCommand("folder_info", { path: row.path });
+      const info = await folderCommand("folder_info", { path });
+      if (!current()) continue;
       el.textContent = info.count
-        ? `${info.name || row.path}  —  ${info.count} playable file${info.count === 1 ? "" : "s"}`
-        : `${info.name || row.path}  —  nothing playable in here`;
+        ? `${info.name || path}  —  ${info.count} playable file${info.count === 1 ? "" : "s"}`
+        : `${info.name || path}  —  nothing playable in here`;
       el.classList.toggle("warn", row.critical && !info.count);
-      el.title = row.path;
+      el.title = path;
     } catch (error) {
-      el.textContent = IS_ANDROID ? "Choose this folder again: " + String(error) : row.path + "  —  unreadable";
+      if (!current()) continue;
+      el.textContent = IS_ANDROID ? "Choose this folder again: " + String(error) : path + "  —  unreadable";
       el.classList.toggle("warn", row.critical);
+      el.title = path;
     }
+  }
+}
+
+async function pickSettingsFolder(key, selector) {
+  const request = Symbol();
+  const epoch = setupRestoreEpoch;
+  folderPickerRequests.set(key, request);
+  const current = () => folderPickerRequests.get(key) === request &&
+    epoch === setupRestoreEpoch && !setupRestorePending;
+  try {
+    const info = await folderCommand("pick_folder");
+    if (!info || !current()) return;
+    folderLabelRequests.delete(key);
+    state.settings[key] = info.path;
+    saveSettings(null, key);
+    showFolderCounts(info, selector);
+  } catch (error) {
+    if (current()) say(String(error), "bad");
   }
 }
 
@@ -4850,7 +4900,7 @@ function saveStations({ extraStation = null, move = null, patch = null, removeId
     } catch (error) {
       stationSaveFailures++;
       try {
-        if (onFailure) onFailure();
+        if (onFailure) onFailure(error);
       } catch (callbackError) {
         say(String(callbackError), "bad");
       }
@@ -4950,10 +5000,14 @@ let settingsSaveTimer = null;
 let settingsAutostartIntent = null;
 let settingsDirty = false;
 let settingsRevision = 0;
+const settingEditRevisions = new Map();
+let settingsAutostartRevision = 0;
+let settingsReadRequest = 0;
+let settingsReadback = null;
 let settingsSaveTail = Promise.resolve();
 let pendingSettingsSave = null;
 let settingsSaveFailures = 0;
-function saveSettings(explicitAutostart = null) {
+function saveSettings(explicitAutostart = null, key = null) {
   if (setupRestorePending) return;
   if (configLoadError) {
     say("Settings are protected while recovery is needed. See Settings storage.", "bad", true);
@@ -4962,10 +5016,13 @@ function saveSettings(explicitAutostart = null) {
   if (explicitAutostart !== null) {
     settingsAutostartIntent = explicitAutostart;
     state.settings.startWithWindows = explicitAutostart;
+    settingsAutostartRevision = settingsRevision + 1;
+    key = "startWithWindows";
   }
   settingsDirty = true;
   alarmReadiness.invalidate();
   settingsRevision++;
+  settingEditRevisions.set(key, settingsRevision);
   clearTimeout(settingsSaveTimer);
   settingsSaveTimer = setTimeout(() => {
     settingsSaveTimer = null;
@@ -4978,10 +5035,27 @@ function queueSettingsSave() {
   const revision = settingsRevision;
   const explicitAutostart = settingsAutostartIntent;
   settingsAutostartIntent = null;
-  const settings = { ...state.settings };
+  const snapshot = { ...state.settings };
+  const localFields = new Set(settingEditRevisions.keys());
+  const queuedReadback = settingsReadback;
+  const autostartRevision = settingsAutostartRevision;
   const save = async () => {
+    const settings = { ...snapshot };
+    if (settingsReadback && settingsReadback !== queuedReadback && !localFields.has(null)) {
+      for (const [key, value] of Object.entries(settingsReadback)) {
+        if (!localFields.has(key)) settings[key] = value;
+      }
+    }
+    if (explicitAutostart === null && settingsAutostartRevision === autostartRevision) {
+      settings.startWithWindows = state.settings.startWithWindows;
+    }
     try {
-      await invoke("save_settings", { settings, explicitAutostart });
+      const reflectedAutostart = await invoke("save_settings", { settings, explicitAutostart });
+      ++settingsReadRequest;
+      if (reflectedAutostart === false && settingsAutostartRevision === autostartRevision) {
+        state.settings.startWithWindows = false;
+        $("#setting-startup").setAttribute("aria-pressed", "false");
+      }
     } catch (error) {
       settingsSaveFailures++;
       say(String(error), "bad");
@@ -4995,6 +5069,13 @@ function queueSettingsSave() {
         }
       }
       return false;
+    } finally {
+      // Keep older failed edits in the live draft if a newer save can still
+      // carry them. A confirmed write retires only the fields it captured.
+      if (settingsRevision === revision) settingEditRevisions.clear();
+    }
+    for (const [key, editedAt] of settingEditRevisions) {
+      if (editedAt <= revision) settingEditRevisions.delete(key);
     }
     if (IS_ANDROID) syncAndroidAlarms().catch((error) => say(String(error), "bad"));
     else refreshPowerStatus();
@@ -5028,6 +5109,7 @@ async function loadState(expectedSettingsRevision = null) {
   const setupRequest = setupRestoreEpoch;
   const alarmRequest = ++alarmStateRequest;
   const stationRevision = stationStateRevision;
+  const settingsRequest = ++settingsReadRequest;
   const loaded = await invoke("get_state");
   if (!loaded || !Array.isArray(loaded.stations) || !Array.isArray(loaded.alarms) || !loaded.settings) {
     throw new Error("The saved settings response was incomplete");
@@ -5037,6 +5119,18 @@ async function loadState(expectedSettingsRevision = null) {
   if (alarmRequest !== alarmStateRequest || (IS_ANDROID && androidAlarmSnapshot?.initialized))
     loaded.alarms = state.alarms;
   if (stationRevision !== stationStateRevision) loaded.stations = state.stations;
+  if (settingsRequest !== settingsReadRequest) {
+    loaded.settings = state.settings;
+  } else {
+    settingsReadback = { ...loaded.settings };
+    if (expectedSettingsRevision === null && settingEditRevisions.size) {
+      loaded.settings = { ...settingsReadback };
+      for (const key of settingEditRevisions.keys()) {
+        if (key === null) Object.assign(loaded.settings, state.settings);
+        else loaded.settings[key] = state.settings[key];
+      }
+    }
+  }
   state = loaded;
   renderStations();
   refreshBrowseIndicators();
@@ -5107,6 +5201,7 @@ async function settleSetupWrites({ recovery = false } = {}) {
     settingsSaveTimer = null;
     settingsDirty = false;
     settingsAutostartIntent = null;
+    settingEditRevisions.clear();
     await settingsSaveTail;
   } else if (!(await flushSettings())) throw new Error("Save your current settings successfully before continuing.");
   await stationSaveTail;
@@ -5178,7 +5273,7 @@ async function restoreSetup() {
   try {
     await settleSetupWrites({ recovery: !!configLoadError });
     if (ringing || $("#power-countdown").open) throw new Error("Finish the active alarm or power countdown before restoring.");
-    const restored = await invoke("restore_backup", { content: backupRestoreContent });
+    const { rawRecoveryPath, ...restored } = await invoke("restore_backup", { content: backupRestoreContent });
     if (IS_ANDROID) {
       // Recovery can replace unreadable native state at a lower revision.
       // Replies from the previous store must not outrank the restored store.
@@ -5202,7 +5297,8 @@ async function restoreSetup() {
     refreshFolderLabels();
     backupRestoreContent = null;
     $("#backup-preview").close();
-    backupMessage("Backup restored. Review your alarms and folders before switching alarms on.");
+    backupMessage("Backup restored. Review your alarms and folders before switching alarms on." +
+      (rawRecoveryPath ? " Original settings were kept at " + rawRecoveryPath + "." : ""));
     say("Backup restored; imported alarms are off.", "good");
     $("#backup-import").focus();
   } catch (error) {
@@ -5342,7 +5438,10 @@ async function saveStationEditorChange(change, message) {
   editor.inert = true;
   editor.setAttribute("aria-busy", "true");
   let saved;
-  try { saved = await saveStations(change); }
+  let saveError = null;
+  try {
+    saved = await saveStations({ ...change, onFailure: error => { saveError = error; } });
+  }
   finally {
     stationEditorSaving = false;
     editor.inert = false;
@@ -5350,7 +5449,9 @@ async function saveStationEditorChange(change, message) {
   }
   if (!saved) {
     stationEditorSaveFailed = true;
-    $("#st-note").textContent = "Could not save. Your draft is still here; try again.";
+    $("#st-note").textContent = saveError
+      ? "Could not save. " + String(saveError)
+      : "Could not save. Your draft is still here; try again.";
     $("#st-note").className = "editor-note bad";
     return;
   }
@@ -5373,6 +5474,7 @@ let alarmCopySourceId = null;
 let alarmEditorSaving = false;
 let editorDays = [];
 let editorKind = "station";
+let editorFolderRequest = 0;
 let editorFolder = null;
 let editorReturnFocus = null;
 const ALARM_REPEATS = { once: [], weekdays: [0, 1, 2, 3, 4], weekends: [5, 6], daily: [0, 1, 2, 3, 4, 5, 6] };
@@ -5497,6 +5599,7 @@ function updateDayHint() {
 }
 
 function setKind(kind) {
+  ++editorFolderRequest;
   editorKind = kind;
   $$("#al-kind .chip").forEach((c) => {
     c.classList.toggle("on", c.dataset.kind === kind);
@@ -5719,13 +5822,14 @@ function rememberAlarmSetup(alarm) {
     autoStopMins: alarm.autoStopMins,
     autoSnoozes: alarm.autoSnoozes,
   };
-  saveSettings();
+  saveSettings(null, "alarmDefaults");
 }
 
 function closeAlarmEditor(savedId = null) {
   if (alarmEditorSaving) return;
   closeAlarmNameDialog(false, false);
   ++editorTimeRequest;
+  ++editorFolderRequest;
   const wasOpen = !$("#alarm-editor").classList.contains("hidden");
   if (wasOpen) dismissAndroidKeyboard();
   const editedId = savedId || editingAlarm?.id || alarmCopySourceId;
@@ -6126,7 +6230,7 @@ function wire() {
           });
       }
     }
-    saveSettings();
+    saveSettings(null, "volume");
   });
 
   $$("#sleep-chips .chip").forEach((chip) =>
@@ -6136,7 +6240,7 @@ function wire() {
     $("#sleep-action").addEventListener("change", () => {
       if (activeWindowActions.size) return;
       state.settings.sleepTimerAction = $("#sleep-action").value;
-      saveSettings();
+      saveSettings(null, "sleepTimerAction");
       renderSleepTimer();
     });
     $("#power-cancel").addEventListener("click", () => setSleep(0));
@@ -6314,6 +6418,7 @@ function wire() {
       note.textContent = "Server answered — checking the player can decode it…";
       const decoded = await canDecode(info.url, info.hls ? 15000 : 9000, {
         hls: !!info.hls,
+        directFallbackAllowed: info.directFallbackAllowed === true,
         signal: test.signal,
       });
       if (stale()) return;
@@ -6370,24 +6475,12 @@ function wire() {
   });
 
   // shuffle folder
-  $("#btn-pick-folder").addEventListener("click", async () => {
-    const info = await folderCommand("pick_folder").catch(e => { say(String(e), "bad"); return null; });
-    if (!info) return;
-    state.settings.shuffleFolder = info.path;
-    saveSettings();
-    showFolderCounts(info, "#folder-path");
-  });
+  $("#btn-pick-folder").addEventListener("click", () => pickSettingsFolder("shuffleFolder", "#folder-path"));
   $("#btn-play-folder").addEventListener("click", async () => {
     await playRandomFromFolder(shuffleFolder());
   });
 
-  $("#btn-pick-backup").addEventListener("click", async () => {
-    const info = await folderCommand("pick_folder").catch(e => { say(String(e), "bad"); return null; });
-    if (!info) return;
-    state.settings.backupFolder = info.path;
-    saveSettings();
-    showFolderCounts(info, "#backup-path");
-  });
+  $("#btn-pick-backup").addEventListener("click", () => pickSettingsFolder("backupFolder", "#backup-path"));
 
   // alarms
   $("#btn-add-alarm").addEventListener("click", () => openAlarmEditor(null));
@@ -6466,8 +6559,14 @@ function wire() {
   $$("#al-kind .chip").forEach((chip) => chip.addEventListener("click", () => setKind(chip.dataset.kind)));
 
   $("#al-folderbtn").addEventListener("click", async () => {
-    const info = await folderCommand("pick_folder").catch(e => { say(String(e), "bad"); return null; });
-    if (!info) return;
+    const request = ++editorFolderRequest;
+    const epoch = setupRestoreEpoch;
+    const current = () => request === editorFolderRequest && epoch === setupRestoreEpoch && !setupRestorePending;
+    const info = await folderCommand("pick_folder").catch(error => {
+      if (current()) say(String(error), "bad");
+      return null;
+    });
+    if (!info || !current()) return;
     editorFolder = info.path;
     showEditorFolder(info.name);
     const note = $("#al-sourcenote");
@@ -6612,7 +6711,7 @@ function wire() {
           applyClockMode(was.hour, was.minute);
         }
       }
-      saveSettings(row.dataset.setting === "startWithWindows" ? next : null);
+      saveSettings(row.dataset.setting === "startWithWindows" ? next : null, row.dataset.setting);
     });
   });
 
@@ -6731,6 +6830,7 @@ async function retrySettingsStorage() {
     settingsSaveTimer = null;
     settingsDirty = false;
     settingsAutostartIntent = null;
+    settingEditRevisions.clear();
   }
   try {
     if (!recovering && !(await flushSettings())) throw new Error("The current settings could not be saved");
@@ -6796,7 +6896,6 @@ async function boot() {
   }
 
   await listen("alarm-fire", (event) => onAlarmFire(event.payload));
-  // Windows can turn autostart off behind our back; the backend says when.
   await listen("alarms-updated", async () => {
     try {
       await refreshDesktopAlarms();

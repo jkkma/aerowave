@@ -208,7 +208,7 @@ fn save_settings(
     state: State<AppState>,
     mut settings: Settings,
     explicit_autostart: Option<bool>,
-) -> Result<(), String> {
+) -> Result<Option<bool>, String> {
     let _power_update = state.power_updates.lock().unwrap();
     scheduler::ensure_power_idle(&app)?;
     if let Some(want) = explicit_autostart {
@@ -234,7 +234,9 @@ fn save_settings(
     #[cfg(desktop)]
     scheduler::refresh(&app);
     // Never let this lose the rest of the settings - they are saved already.
-    sync_autostart(&app, &state, want_autostart, explicit_autostart)
+    sync_autostart(&app, &state, want_autostart, explicit_autostart)?;
+    let saved_autostart = state.store.data.lock().unwrap().settings.start_with_windows;
+    Ok((saved_autostart != want_autostart).then_some(saved_autostart))
 }
 
 /// What Windows would actually run at logon, and whether the user has said no
@@ -338,7 +340,7 @@ mod logon {
 /// reads ON, and settings are written on every volume nudge, so acting on a
 /// bare mismatch would quietly overturn the user's own choice every time.
 #[cfg(windows)]
-fn sync_autostart(app: &AppHandle, state: &AppState, want: bool, explicit: Option<bool>) -> Result<(), String> {
+fn sync_autostart(_app: &AppHandle, state: &AppState, want: bool, explicit: Option<bool>) -> Result<(), String> {
     use aerowave_core::settings::{autostart_action, AutostartAction};
     let result = match autostart_action(want, explicit, logon::entry_is_this_exe(), logon::switched_off_by_user()) {
         AutostartAction::Enable => logon::enable_for_this_exe().and_then(|_| {
@@ -347,9 +349,7 @@ fn sync_autostart(app: &AppHandle, state: &AppState, want: bool, explicit: Optio
         AutostartAction::ReflectDisabled => {
             // Present, correct, and disabled outside the app. That is the
             // user's decision; make our toggle agree rather than fight it.
-            let _ = state.store.update(|d| d.settings.start_with_windows = false);
-            let _ = app.emit("settings-updated", ());
-            return Ok(());
+            state.store.update(|d| d.settings.start_with_windows = false)
         }
         AutostartAction::Disable => logon::disable().and_then(|_| logon::clear_override()),
         AutostartAction::Keep => Ok(()),

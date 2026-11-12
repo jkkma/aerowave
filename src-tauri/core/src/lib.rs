@@ -11,6 +11,7 @@ pub mod clock;
 pub mod backup;
 pub mod directory;
 pub mod emergency_tone;
+pub mod hls;
 pub mod icy;
 pub mod local_media;
 pub mod network;

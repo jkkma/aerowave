@@ -540,7 +540,14 @@ impl Store {
         let _writing = self.write_lock.lock().unwrap();
         self.ensure_writable()?;
         let (mut staged, receipts) = self.snapshot_and_receipts();
+        #[cfg(desktop)]
+        let before = serde_json::to_value(&staged).map_err(|error| error.to_string())?;
         change(&mut staged)?;
+        #[cfg(desktop)]
+        {
+            let after = serde_json::to_value(&staged).map_err(|error| error.to_string())?;
+            aerowave_core::backup::validate_live_edit(&before, &after)?;
+        }
         aerowave_core::persistence::update_with(
             &mut staged,
             |_| {},
@@ -575,23 +582,7 @@ impl Store {
     {
         let _writing = self.write_lock.lock().unwrap();
         let was_blocked = self.load_error().is_some();
-        // A restore is an explicit recovery action, but may not destroy the
-        // unreadable/invalid originals that normal saves are protecting.
-        if was_blocked { self.preserve_blocked_originals()?; }
         let current = self.snapshot();
-        let mut recovery = current.clone();
-        if let Some(alarms) = recovery_alarms { recovery.alarms = alarms; }
-        let recovery_data = serde_json::to_value(&recovery).map_err(|e| e.to_string())?;
-        let recovery_content = aerowave_core::backup::encode(&recovery_data)?;
-        let recovery_path = self.write_recovery(&recovery_content)?;
-        // The clock may move backward between restores. Record creation order
-        // durably before changing either store, and never rely on file names
-        // to find the latest completed recovery copy.
-        self.write_latest_recovery_pointer(&recovery_path).map_err(|e| format!(
-            "{e}. Restore stopped before changing settings or alarms. Recovery backup: {}",
-            recovery_path.display()
-        ))?;
-
         for alarm in &mut imported.alarms {
             alarm.enabled = false;
             alarm.skip_date = None;
@@ -600,6 +591,37 @@ impl Store {
         imported.settings.start_with_windows = current.settings.start_with_windows;
         imported.settings.wake_for_alarms = current.settings.wake_for_alarms;
         imported.settings.sleep_timer_action = current.settings.sleep_timer_action;
+        #[cfg(desktop)]
+        {
+            let final_data = serde_json::to_value(&imported).map_err(|error| error.to_string())?;
+            aerowave_core::backup::validate_restore_size(&final_data)?;
+        }
+
+        // A restore is an explicit recovery action, but may not destroy the
+        // unreadable/invalid originals that normal saves are protecting.
+        if was_blocked { self.preserve_blocked_originals()?; }
+        let mut recovery = current.clone();
+        if let Some(alarms) = recovery_alarms { recovery.alarms = alarms; }
+        let recovery_data = serde_json::to_value(&recovery).map_err(|e| e.to_string())?;
+        #[cfg(desktop)]
+        let recovery_path = {
+            use aerowave_core::backup::{recovery_copy, RecoveryCopy};
+            match recovery_copy(&recovery_data, || fs::read(&self.path)
+                .map_err(|error| format!("{}: {error}", self.path.display())))? {
+                RecoveryCopy::Backup(content) => self.write_recovery(content.as_bytes(), false)?,
+                RecoveryCopy::Original(bytes) => self.write_recovery(&bytes, true)?,
+            }
+        };
+        #[cfg(mobile)]
+        let recovery_path = self.write_recovery(aerowave_core::backup::encode(&recovery_data)?.as_bytes(), false)?;
+        // The clock may move backward between restores. Record creation order
+        // durably before changing either store, and never rely on file names
+        // to find the latest completed recovery copy.
+        self.write_latest_recovery_pointer(&recovery_path).map_err(|e| format!(
+            "{e}. Restore stopped before changing settings or alarms. Recovery backup: {}",
+            recovery_path.display()
+        ))?;
+
         let staged_path = self.stage_snapshot(&imported).map_err(|e| format!(
             "Restore could not stage settings ({e}). Settings and alarms are unchanged. Recovery backup: {}",
             recovery_path.display()
@@ -661,17 +683,18 @@ impl Store {
         Ok(())
     }
 
-    fn write_recovery(&self, content: &str) -> Result<PathBuf, String> {
+    fn write_recovery(&self, content: &[u8], raw: bool) -> Result<PathBuf, String> {
         let stamp = Local::now().format("%Y%m%d-%H%M%S");
+        let kind = if raw { "raw-" } else { "" };
         for suffix in 0..100 {
-            let path = self.path.with_file_name(format!("aerowave.before-restore-{stamp}-{suffix}.json"));
+            let path = self.path.with_file_name(format!("aerowave.before-restore-{kind}{stamp}-{suffix}.json"));
             let file = OpenOptions::new().write(true).create_new(true).open(&path);
             let mut file = match file {
                 Ok(file) => file,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(format!("Could not create recovery backup: {e}")),
             };
-            file.write_all(content.as_bytes()).and_then(|_| file.sync_all())
+            file.write_all(content).and_then(|_| file.sync_all())
                 .map_err(|e| format!("Could not finish recovery backup {}: {e}", path.display()))?;
             return Ok(path);
         }
@@ -702,6 +725,7 @@ impl Store {
                 .map_err(|e| format!("Could not sync recovery pointer: {e}"))?;
             fs::rename(&staged, &pointer)
                 .map_err(|e| format!("Could not record latest recovery backup: {e}"))?;
+            self.sync_directory()?;
             return Ok(());
         }
         Err("Could not choose a unique recovery pointer name".into())

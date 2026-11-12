@@ -7,13 +7,16 @@
 //! `resolve` hands back the live response it already opened rather than just
 //! its URL, so a probe does not fetch the same stream twice.
 
-use std::sync::OnceLock;
+use std::io;
+use std::net::SocketAddr;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use aerowave_core::icy::{
     decode_text, first_url_in_playlist, head_end, is_hls, is_playable_type, looks_like_playlist,
     metadata_interval, parse_head, socket_host, Head, MetaStrip,
 };
+use aerowave_core::network::StationNetwork;
 use aerowave_core::stream_tags::StreamTags;
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -43,41 +46,75 @@ const MAX_HEAD_BYTES: usize = 8 * 1024;
 const MAX_PLAYLIST_BYTES: usize = 256 * 1024;
 pub(crate) const RELAY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const ICY_HEAD_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_REDIRECTS: usize = 6;
 
-static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-static RELAY_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static PROBE_CLIENTS: OnceLock<StationClients> = OnceLock::new();
+static RELAY_CLIENTS: OnceLock<StationClients> = OnceLock::new();
 
-fn build_client(read_timeout: Option<Duration>) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder()
-        .user_agent(UA)
-        .connect_timeout(Duration::from_secs(8))
-        .redirect(reqwest::redirect::Policy::limited(6));
-    if let Some(t) = read_timeout {
-        builder = builder.read_timeout(t);
-    }
-    builder.build().map_err(|e| e.to_string())
+struct StationClients {
+    public: reqwest::Client,
+    lan: reqwest::Client,
 }
 
-pub fn client() -> Result<reqwest::Client, String> {
-    if let Some(existing) = CLIENT.get() {
-        return Ok(existing.clone());
+impl StationClients {
+    fn get(&self, network: StationNetwork) -> &reqwest::Client {
+        match network {
+            StationNetwork::Lan => &self.lan,
+            StationNetwork::Public => &self.public,
+        }
     }
-    // A body that simply stops arriving must not swallow the whole
-    // twelve-second deadline while a caller waits on it.
-    let built = build_client(Some(Duration::from_secs(5)))?;
-    Ok(CLIENT.get_or_init(|| built).clone())
 }
 
-/// The relay holds one connection open for as long as the station plays, so
-/// the probe's five-second read timeout would cut it off at the first quiet
-/// stretch. Longer, but not infinite: a broadcaster that stops sending should
-/// still end the connection so the player's reconnect can take over.
-fn relay_client() -> Result<reqwest::Client, String> {
-    if let Some(existing) = RELAY_CLIENT.get() {
-        return Ok(existing.clone());
+struct LanDns;
+
+impl reqwest::dns::Resolve for LanDns {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let addrs = tokio::time::timeout(
+                Duration::from_secs(8),
+                checked_addresses(name.as_str(), 0, StationNetwork::Lan),
+            )
+            .await??;
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
     }
-    let built = build_client(Some(RELAY_READ_TIMEOUT))?;
-    Ok(RELAY_CLIENT.get_or_init(|| built).clone())
+}
+
+async fn checked_addresses(
+    host: &str,
+    port: u16,
+    network: StationNetwork,
+) -> io::Result<Vec<SocketAddr>> {
+    let addresses: Vec<_> = tokio::net::lookup_host((host, port)).await?.collect();
+    if !network.addresses_allowed(&addresses) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "that station hostname resolves outside its permitted network",
+        ));
+    }
+    Ok(addresses)
+}
+
+fn station_clients(
+    cache: &'static OnceLock<StationClients>,
+    read_timeout: Duration,
+) -> Result<&'static StationClients, String> {
+    if let Some(clients) = cache.get() {
+        return Ok(clients);
+    }
+    // Follow redirects here so HTTP, playlist resolution and raw ICY share
+    // the same policy. A chain that leaves the LAN cannot come back via ICY.
+    let builder = || {
+        crate::hls::client_builder()
+            .read_timeout(read_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+    };
+    let public = builder().build().map_err(|e| e.to_string())?;
+    let lan = builder()
+        .dns_resolver(Arc::new(LanDns))
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(cache.get_or_init(|| StationClients { public, lan }))
 }
 
 /// reqwest's own Display is the outer wrapper - "error sending request for
@@ -119,6 +156,8 @@ pub struct StreamInfo {
     pub warning: Option<String>,
     /// An HLS playlist. Not a warning any more - it is which player to use.
     pub hls: bool,
+    /// Only a successfully resolved ordinary LAN source may bypass the relay.
+    pub direct_fallback_allowed: bool,
 }
 
 /// What `resolve` arrived at. The stream arm carries the open response, so the
@@ -140,16 +179,76 @@ enum Resolved {
 /// rather than necessarily the wrapper address the user supplied.
 struct ResolveError {
     message: String,
-    raw_url: String,
+    raw_url: Option<String>,
 }
 
 impl ResolveError {
     fn new(message: impl Into<String>, raw_url: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            raw_url: raw_url.into(),
+            raw_url: Some(raw_url.into()),
         }
     }
+
+    fn refused(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            raw_url: None,
+        }
+    }
+}
+
+async fn station_response(
+    clients: &StationClients,
+    url: &str,
+    want_metadata: bool,
+    network: &mut StationNetwork,
+) -> Result<reqwest::Response, ResolveError> {
+    use reqwest::StatusCode;
+
+    let mut current = reqwest::Url::parse(url.trim())
+        .map_err(|error| ResolveError::refused(format!("invalid station URL: {error}")))?;
+    for redirects in 0..=MAX_REDIRECTS {
+        network.admit(&current).map_err(ResolveError::refused)?;
+        let mut request = clients.get(*network).get(current.clone());
+        if want_metadata {
+            request = request.header("Icy-MetaData", "1");
+        }
+        let response = request.send().await.map_err(|error| {
+            ResolveError::new(format!("{current}: {}", describe(&error)), current.as_str())
+        })?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        if !matches!(
+            status,
+            StatusCode::MOVED_PERMANENTLY
+                | StatusCode::FOUND
+                | StatusCode::SEE_OTHER
+                | StatusCode::TEMPORARY_REDIRECT
+                | StatusCode::PERMANENT_REDIRECT
+        ) {
+            return Err(ResolveError::new(
+                format!("HTTP {status} from {current}"),
+                current.as_str(),
+            ));
+        }
+        if redirects == MAX_REDIRECTS {
+            return Err(ResolveError::refused("too many station redirects"));
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|location| location.to_str().ok())
+            .ok_or_else(|| {
+                ResolveError::refused("the stream redirect had no valid Location header")
+            })?;
+        current = current
+            .join(location)
+            .map_err(|error| ResolveError::refused(format!("invalid stream redirect: {error}")))?;
+    }
+    unreachable!("the redirect limit returns before another request")
 }
 
 /// Read a playlist body, refusing to buffer more than the cap.
@@ -189,31 +288,15 @@ fn content_type_of(resp: &reqwest::Response) -> String {
 /// audio. Only a caller that will take them back out again may say yes - see
 /// `open_for_relay`.
 async fn resolve(
-    client: &reqwest::Client,
+    clients: &StationClients,
     url: &str,
     want_metadata: bool,
+    network: &mut StationNetwork,
 ) -> Result<Resolved, ResolveError> {
     let mut current = url.trim().to_string();
 
     for _ in 0..3 {
-        let mut request = client.get(&current);
-        if want_metadata {
-            request = request.header("Icy-MetaData", "1");
-        }
-        let resp = request.send().await.map_err(|e| {
-            let raw_url = e
-                .url()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| current.clone());
-            ResolveError::new(format!("{current}: {}", describe(&e)), raw_url)
-        })?;
-        if !resp.status().is_success() {
-            let raw_url = resp.url().to_string();
-            return Err(ResolveError::new(
-                format!("HTTP {} from {current}", resp.status()),
-                raw_url,
-            ));
-        }
+        let resp = station_response(clients, &current, want_metadata, network).await?;
         let content_type = content_type_of(&resp);
         let final_url = resp.url().to_string();
 
@@ -239,16 +322,14 @@ async fn resolve(
         match first_url_in_playlist(&body, &final_url, &content_type) {
             Some(next) => current = next,
             None => {
-                return Err(ResolveError::new(
-                    format!("{final_url} is a playlist with no stream URL in it"),
-                    final_url,
-                ))
+                return Err(ResolveError::refused(format!(
+                    "{final_url} is a playlist with no stream URL in it"
+                )))
             }
         }
     }
-    Err(ResolveError::new(
+    Err(ResolveError::refused(
         "playlist links went round in circles",
-        current,
     ))
 }
 
@@ -273,20 +354,32 @@ fn header(resp: &reqwest::Response, key: &str) -> Option<String> {
 /// WebView2 plays quite happily would otherwise have no bitrate, no genre and
 /// no now-playing title, and would fail its TEST for a reason that has
 /// nothing to do with whether it plays.
-async fn probe_inner(url: &str, want_title: bool, skip_resolve: bool) -> Result<StreamInfo, String> {
-    match http_probe(url, want_title, skip_resolve).await {
+async fn probe_inner(
+    url: &str,
+    want_title: bool,
+    skip_resolve: bool,
+) -> Result<StreamInfo, String> {
+    let parsed =
+        reqwest::Url::parse(url.trim()).map_err(|e| format!("invalid station URL: {e}"))?;
+    let mut network = StationNetwork::for_source(&parsed);
+    match http_probe(url, want_title, skip_resolve, &mut network).await {
         Ok(info) => Ok(info),
-        Err(http_error) => match icy_probe(&http_error.raw_url, want_title).await {
-            Ok(info) => Ok(info),
-            // Past the head, the server has shown it really is speaking ICY
-            // and has said something specific - "ICY 401", the station is
-            // full. That beats hyper's complaint about a status line it could
-            // not read, which is true of every one of these servers.
-            Err(icy) if icy.proven => Err(icy.message),
-            // Before that point it has proved nothing, so the HTTP error is
-            // still the one worth showing.
-            Err(_) => Err(http_error.message),
-        },
+        Err(http_error) => {
+            let Some(raw_url) = http_error.raw_url else {
+                return Err(http_error.message);
+            };
+            match icy_probe(&raw_url, want_title, &mut network).await {
+                Ok(info) => Ok(info),
+                // Past the head, the server has shown it really is speaking ICY
+                // and has said something specific - "ICY 401", the station is
+                // full. That beats hyper's complaint about a status line it could
+                // not read, which is true of every one of these servers.
+                Err(icy) if icy.proven => Err(icy.message),
+                // Before that point it has proved nothing, so the HTTP error is
+                // still the one worth showing.
+                Err(_) => Err(http_error.message),
+            }
+        }
     }
 }
 
@@ -314,11 +407,13 @@ fn unproven(message: impl Into<String>) -> IcyFailure {
 async fn icy_connect_once(
     url: &str,
     want_metadata: bool,
+    network: &mut StationNetwork,
 ) -> Result<(tokio::net::TcpStream, Head, Vec<u8>), IcyFailure> {
     let parsed = reqwest::Url::parse(url.trim()).map_err(|e| unproven(format!("{url}: {e}")))?;
     if parsed.scheme() != "http" {
         return Err(unproven("only a plaintext URL can be read this way"));
     }
+    network.admit(&parsed).map_err(unproven)?;
     let host = parsed
         .host_str()
         .ok_or_else(|| unproven("that URL has no host in it"))?;
@@ -333,10 +428,10 @@ async fn icy_connect_once(
         target.push_str(query);
     }
 
-    let mut socket = tokio::time::timeout(
-        Duration::from_secs(6),
-        tokio::net::TcpStream::connect((connect_host.as_str(), port)),
-    )
+    let mut socket = tokio::time::timeout(Duration::from_secs(6), async {
+        let addresses = checked_addresses(&connect_host, port, *network).await?;
+        tokio::net::TcpStream::connect(addresses.as_slice()).await
+    })
     .await
     .map_err(|_| unproven(format!("timed out connecting to {host}")))?
     .map_err(|e| unproven(format!("could not connect to {host}: {e}")))?;
@@ -394,10 +489,11 @@ async fn icy_connect_once(
 async fn icy_connect(
     url: &str,
     want_metadata: bool,
+    network: &mut StationNetwork,
 ) -> Result<(tokio::net::TcpStream, Head, Vec<u8>, String), IcyFailure> {
     let mut current = url.trim().to_string();
-    for _ in 0..=6 {
-        let (socket, head, body) = icy_connect_once(&current, want_metadata).await?;
+    for _ in 0..=MAX_REDIRECTS {
+        let (socket, head, body) = icy_connect_once(&current, want_metadata, network).await?;
         if head.icy {
             // Past this point the server has shown what it is, so what it says
             // about itself is worth reporting over the HTTP client's guess.
@@ -488,8 +584,12 @@ fn metadata_updates(
 
 /// The Shoutcast v1 probe: connect as above, then read far enough into the
 /// audio to catch either an ICY title or the container's initial native tags.
-async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure> {
-    let (mut socket, head, mut body, final_url) = icy_connect(url, true).await?;
+async fn icy_probe(
+    url: &str,
+    want_title: bool,
+    network: &mut StationNetwork,
+) -> Result<StreamInfo, IcyFailure> {
+    let (mut socket, head, mut body, final_url) = icy_connect(url, true, network).await?;
 
     let content_type = head
         .get("content-type")
@@ -504,6 +604,7 @@ async fn icy_probe(url: &str, want_title: bool) -> Result<StreamInfo, IcyFailure
         title: None,
         warning: None,
         hls: false,
+        direct_fallback_allowed: *network == StationNetwork::Lan,
     };
 
     if !want_title {
@@ -567,31 +668,17 @@ async fn http_probe(
     url: &str,
     want_title: bool,
     skip_resolve: bool,
+    network: &mut StationNetwork,
 ) -> Result<StreamInfo, ResolveError> {
+    let clients =
+        station_clients(&PROBE_CLIENTS, Duration::from_secs(5)).map_err(ResolveError::refused)?;
     let (resp, direct, content_type) = if skip_resolve {
-        let http_client = client().map_err(|message| ResolveError::new(message, url.trim()))?;
-        let resp = http_client
-            .get(url.trim())
-            .header("Icy-MetaData", "1")
-            .send()
-            .await
-            .map_err(|e| {
-                let raw_url = e
-                    .url()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| url.trim().to_string());
-                ResolveError::new(describe(&e), raw_url)
-            })?;
-        if !resp.status().is_success() {
-            let raw_url = resp.url().to_string();
-            return Err(ResolveError::new(format!("HTTP {}", resp.status()), raw_url));
-        }
+        let resp = station_response(clients, url, true, network).await?;
         let content_type = content_type_of(&resp);
         let final_url = resp.url().to_string();
         (resp, final_url, content_type)
     } else {
-        let http_client = client().map_err(|message| ResolveError::new(message, url.trim()))?;
-        match resolve(&http_client, url, true).await? {
+        match resolve(clients, url, true, network).await? {
             Resolved::Hls {
                 final_url,
                 content_type,
@@ -615,7 +702,7 @@ async fn http_probe(
         return Err(ResolveError::new(
             format!(
                 "that address answers with {content_type}, not audio - the station \
-                 is probably down, full, or has moved"
+             is probably down, full, or has moved"
             ),
             direct,
         ));
@@ -630,6 +717,7 @@ async fn http_probe(
         title: None,
         warning: None,
         hls: false,
+        direct_fallback_allowed: *network == StationNetwork::Lan,
     };
 
     if !want_title {
@@ -716,8 +804,13 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
     // Stripping is what a player is supposed to do with them, and it is worth
     // the care: it is the connection the audio is already on, so a title
     // changes when the song does rather than whenever a poll next came round.
-    let relay_http_client = relay_client()?;
-    let http = match resolve(&relay_http_client, url, true).await {
+    let parsed =
+        reqwest::Url::parse(url.trim()).map_err(|e| format!("invalid station URL: {e}"))?;
+    let mut network = StationNetwork::for_source(&parsed);
+    // An established radio stream gets longer to recover from a quiet stretch
+    // than a short probe, but a dead connection still ends on its own.
+    let clients = station_clients(&RELAY_CLIENTS, RELAY_READ_TIMEOUT)?;
+    let http = match resolve(clients, url, true, &mut network).await {
         Ok(Resolved::Stream {
             resp,
             final_url,
@@ -748,7 +841,10 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
     };
     // Same order as `probe_inner`: HTTP first, and the hand-rolled ICY path
     // only once the HTTP client has failed.
-    match icy_connect(&http.raw_url, true).await {
+    let Some(raw_url) = http.raw_url else {
+        return Err(http.message);
+    };
+    match icy_connect(&raw_url, true, &mut network).await {
         Ok((socket, head, primed, final_url)) => Ok(RelaySource {
             content_type: head
                 .get("content-type")
@@ -824,5 +920,113 @@ pub async fn probe(url: &str, want_title: bool, skip_resolve: bool) -> Result<St
     {
         Ok(result) => result,
         Err(_) => Err("timed out talking to the stream".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    async fn public_wrapper_cannot_reach_loopback(redirect: bool) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let target = format!("http://{address}/private");
+        let wrapper = if redirect {
+            format!("HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        } else {
+            format!("HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{target}", target.len())
+        };
+        let server = tokio::spawn(async move {
+            let mut connections = 0;
+            loop {
+                let Ok(Ok((mut socket, _))) =
+                    tokio::time::timeout(Duration::from_secs(1), listener.accept()).await
+                else {
+                    break;
+                };
+                let mut head = Vec::new();
+                while head_end(&head).is_none() {
+                    let mut buf = [0; 1024];
+                    let read = socket.read(&mut buf).await.unwrap();
+                    assert!(read > 0);
+                    head.extend_from_slice(&buf[..read]);
+                }
+                connections += 1;
+                let response = if head.starts_with(b"GET /private ") {
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsong"
+                } else {
+                    &wrapper
+                };
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            connections
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve("station.test", address)
+            .build()
+            .unwrap();
+        let clients = StationClients {
+            public: client.clone(),
+            lan: client,
+        };
+        let url = format!("http://station.test:{}/stream", address.port());
+        let mut network = StationNetwork::Public;
+        let result = resolve(&clients, &url, false, &mut network).await;
+        let error = result.err().expect("private hop was accepted");
+        assert!(
+            error.raw_url.is_none(),
+            "denied hop was eligible for raw ICY"
+        );
+        assert_eq!(server.await.unwrap(), 1, "contacted a private destination");
+    }
+
+    #[tokio::test]
+    async fn rejects_private_redirect_before_connecting() {
+        public_wrapper_cannot_reach_loopback(true).await;
+    }
+
+    #[tokio::test]
+    async fn rejects_private_playlist_entry_before_connecting() {
+        public_wrapper_cannot_reach_loopback(false).await;
+    }
+
+    #[tokio::test]
+    async fn raw_icy_rejects_a_private_target_and_private_dns_in_public_scope() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(icy_connect_once(
+            &format!("http://127.0.0.1:{port}/stream"),
+            true,
+            &mut StationNetwork::Public,
+        )
+        .await
+        .is_err());
+        assert!(checked_addresses("localhost", port, StationNetwork::Public)
+            .await
+            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_lan_probe_allows_a_direct_browser_fallback() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsong").await.unwrap();
+        });
+        let info = probe(&format!("http://{address}/stream"), false, false)
+            .await.unwrap();
+        assert!(info.direct_fallback_allowed);
+        server.await.unwrap();
     }
 }

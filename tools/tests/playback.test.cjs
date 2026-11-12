@@ -76,33 +76,6 @@ for (const stage of ["probe", "relay", "HLS session"]) {
   }
 }
 
-for (const rejects of [false, true]) {
-  test(`Pause discards an awaited direct-fallback probe ${rejects ? "failure" : "reply"}`, async () => {
-    const pending = deferred();
-    let probes = 0, plays = 0;
-    const h = createHarness({
-      onPlay: () => { plays++; },
-      invoke: command => command === "probe_stream"
-        ? ++probes === 1 ? Promise.reject(new Error("initial timeout")) : pending.promise : undefined,
-    });
-    h.evaluate("state.settings.showMetadata=false");
-    await h.evaluate("play({kind:'station',url:'https://radio.test/live',title:'Live'})");
-    const fallback = h.evaluate("fallBackToDirect(player.source,playGeneration)");
-    await flush();
-    h.evaluate("pausePlayback()");
-    if (rejects) pending.reject(new Error("late probe failure"));
-    else pending.resolve({ url: "https://radio.test/resolved", hls: false });
-    await fallback;
-    await flush();
-
-    assert.equal(plays, 1);
-    assert.equal(h.audios[0].paused, true);
-    assert.equal(h.evaluate("player.paused"), true);
-    assert.equal(h.evaluate("player.retryTimer"), null);
-    assert.equal(h.el("#statusline").textContent, "Paused");
-  });
-}
-
 test("a reconnect play rejection after Pause cannot schedule another attempt", async () => {
   const pending = deferred();
   let plays = 0;
@@ -199,10 +172,10 @@ test("a direct fallback starts metadata polling after the relayed load failed", 
   let plays = 0;
   const h = createHarness({
     onPlay: () => ++plays === 1 ? firstPlay.promise : undefined,
-    invoke: (command, args) => command === "probe_stream" && args.wantTitle
-      ? { url: args.url, hls: false, title: "Recovered song" } : undefined,
+    invoke: (command, args) => command === "probe_stream"
+      ? { url: args.url, hls: false, directFallbackAllowed: true, title: args.wantTitle ? "Recovered song" : null } : undefined,
   });
-  const first = h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Live' })");
+  const first = h.evaluate("play({ kind: 'station', url: 'http://192.168.1.22/live', title: 'Live' })");
   await flush();
   h.audios[0].error = { code: 4 };
   await h.audios[0].dispatch("error");
@@ -210,38 +183,134 @@ test("a direct fallback starts metadata polling after the relayed load failed", 
   await first;
   await flush();
   assert.equal(plays, 2);
-  assert.equal(h.audios[0].src, "https://radio.test/live");
+  assert.equal(h.audios[0].src, "http://192.168.1.22/live");
   assert.equal(h.evaluate("!!player.metaTimer"), true);
   assert.equal(h.calls.filter(({ command, args }) => command === "probe_stream" && args.wantTitle).length, 1);
   assert.equal(h.el("#np-track").textContent, "Recovered song");
 });
 
+test("a superseded relay play rejection leaves the direct attempt alone", async () => {
+  const relayPlay = deferred();
+  const directPlay = deferred();
+  let plays = 0;
+  const h = createHarness({
+    onPlay: () => [relayPlay.promise, directPlay.promise][plays++],
+    invoke: (command, args) => command === "probe_stream"
+      ? { url: args.url, hls: false, directFallbackAllowed: true } : undefined,
+  });
+  const starting = h.evaluate("play({ kind: 'station', url: 'http://192.168.1.22/live', title: 'Live' })");
+  await flush();
+  h.audios[0].error = { code: 4 };
+  await h.audios[0].dispatch("error");
+  assert.equal(h.audios[0].src, "http://192.168.1.22/live");
+
+  relayPlay.reject(new Error("relay decode failed"));
+  await starting;
+  assert.equal(h.evaluate("player.retryTimer"), null);
+  assert.equal(h.evaluate("player.retries"), 0);
+
+  h.audios[0].error = { code: 2 };
+  await h.audios[0].dispatch("error");
+  directPlay.reject(new Error("direct connection dropped"));
+  await flush();
+  assert.equal(h.evaluate("player.retries"), 1);
+  await h.fireTimer(h.evaluate("player.retryTimer"));
+  await flush();
+  assert.equal(plays, 3);
+  assert.equal(h.audios[0].src, "http://192.168.1.22/live");
+});
+
+test("a public relay media error never loads the public URL in the audio element", async () => {
+  let plays = 0;
+  const h = createHarness({ onPlay: () => { plays++; } });
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Public radio' })");
+  h.audios[0].error = { code: 4 };
+  await h.audios[0].dispatch("error");
+  await flush();
+  assert.equal(plays, 1);
+  assert.notEqual(h.audios[0].src, "https://radio.test/live");
+});
+
+for (const relayReply of ["missing", "rejected"]) {
+  test(`a ${relayReply} relay route does not bypass the public station guard`, async () => {
+    let plays = 0;
+    const h = createHarness({
+      onPlay: () => { plays++; },
+      invoke: command => {
+        if (command === "probe_stream") throw new Error("destination could not be verified");
+        if (command === "relay_url") {
+          if (relayReply === "rejected") throw new Error("relay unavailable");
+          return null;
+        }
+      },
+    });
+    await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Public radio' })");
+    assert.equal(plays, 0);
+    assert.notEqual(h.audios[0].src, "https://radio.test/live");
+    await h.fireTimer(h.evaluate("player.retryTimer"));
+    assert.equal(plays, 0);
+    assert.notEqual(h.audios[0].src, "https://radio.test/live");
+  });
+}
+
+test("an approved local station still plays if relay registration is unavailable", async () => {
+  const h = createHarness({ invoke: (command, args) => {
+    if (command === "probe_stream") return { url: args.url, hls: false, directFallbackAllowed: true };
+    if (command === "relay_url") return null;
+  } });
+  await h.evaluate("play({ kind: 'station', url: 'http://192.168.1.22/live', title: 'Local radio' })");
+  assert.equal(h.audios[0].src, "http://192.168.1.22/live");
+  assert.equal(h.audios[0].paused, false);
+});
+
+test("a reconnect routes the newly resolved public URL through the relay after local direct playback", async () => {
+  let probes = 0;
+  const h = createHarness({ invoke: (command, args) => {
+    if (command === "probe_stream") return ++probes === 1
+      ? { url: args.url, hls: false, directFallbackAllowed: true }
+      : { url: "https://radio.test/new", hls: false, directFallbackAllowed: false };
+  } });
+  h.evaluate("state.settings.showMetadata=false");
+  await h.evaluate("play({ kind: 'station', url: 'http://192.168.1.22/live', title: 'Local radio' })");
+  h.audios[0].error = { code: 4 };
+  await h.audios[0].dispatch("error");
+  assert.equal(h.audios[0].src, "http://192.168.1.22/live");
+  for (let retry = 0; retry < 2; retry++) {
+    h.audios[0].error = { code: 2 };
+    await h.audios[0].dispatch("error");
+    await h.fireTimer(h.evaluate("player.retryTimer"));
+  }
+  assert.match(h.audios[0].src, /^http:\/\/127\.0\.0\.1\/relay\//);
+  assert.equal(h.calls.filter(({ command }) => command === "relay_url").at(-1).args.url, "https://radio.test/new");
+});
+
 test("a direct fallback resumes polling after a relay title and ignores late relay titles", async () => {
-  const h = createHarness({ invoke: (command, args) => command === "probe_stream" && args.wantTitle
-    ? { url: args.url, hls: false, title: "Direct song" } : undefined });
-  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Live' })");
-  h.evaluate("onStreamTitle({ url: 'https://radio.test/live', title: 'Relay song' })");
+  const h = createHarness({ invoke: (command, args) => command === "probe_stream"
+    ? { url: args.url, hls: false, directFallbackAllowed: true, title: args.wantTitle ? "Direct song" : null } : undefined });
+  await h.evaluate("play({ kind: 'station', url: 'http://192.168.1.22/live', title: 'Live' })");
+  h.evaluate("onStreamTitle({ url: 'http://192.168.1.22/live', title: 'Relay song' })");
   assert.equal(h.evaluate("player.metaTimer"), null);
   h.audios[0].error = { code: 4 };
   await h.audios[0].dispatch("error");
   await flush();
-  assert.equal(h.audios[0].src, "https://radio.test/live");
+  assert.equal(h.audios[0].src, "http://192.168.1.22/live");
   assert.equal(h.calls.filter(({ command, args }) => command === "probe_stream" && args.wantTitle).length, 1);
   assert.equal(h.el("#np-track").textContent, "Direct song");
-  h.evaluate("onStreamTitle({ url: 'https://radio.test/live', title: 'Late relay song' })");
+  h.evaluate("onStreamTitle({ url: 'http://192.168.1.22/live', title: 'Late relay song' })");
   assert.equal(h.el("#np-track").textContent, "Direct song");
 });
 
 test("a direct fallback does not restart polling after three titleless polls", async () => {
-  const h = createHarness();
-  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Live' })");
+  const h = createHarness({ invoke: (command, args) => command === "probe_stream"
+    ? { url: args.url, hls: false, directFallbackAllowed: true } : undefined });
+  await h.evaluate("play({ kind: 'station', url: 'http://192.168.1.22/live', title: 'Live' })");
   const pollTimer = h.evaluate("player.metaTimer");
   for (let i = 0; i < 3; i++) await h.fireTimer(pollTimer);
   assert.equal(h.evaluate("player.metaTimer"), null);
   h.audios[0].error = { code: 4 };
   await h.audios[0].dispatch("error");
   await flush();
-  assert.equal(h.audios[0].src, "https://radio.test/live");
+  assert.equal(h.audios[0].src, "http://192.168.1.22/live");
   assert.equal(h.evaluate("player.metaTimer"), null);
   assert.equal(h.calls.filter(({ command, args }) => command === "probe_stream" && args.wantTitle).length, 3);
 });
@@ -411,7 +480,9 @@ test("HLS discovered after the initial probe fails still avoids a direct media l
   } });
   h.evaluate("state.settings.showMetadata = false");
   await h.evaluate("play({ kind: 'station', url: 'https://radio.test/listen', title: 'Live' })");
-  await h.evaluate("fallBackToDirect(player.source, playGeneration)");
+  h.audios[0].error = { code: 4 };
+  await h.audios[0].dispatch("error");
+  await h.fireTimer(h.evaluate("player.retryTimer"));
   assert.equal(h.evaluate("player.hls"), true);
   assert.equal(h.hlsInstances[0].url, "https://radio.test/live.m3u8");
   assert.notEqual(h.audios[0].src, "https://radio.test/live.m3u8");
@@ -488,16 +559,27 @@ test("metadata-only station decode times out", async () => {
   assert.equal((await result).ok, false);
 });
 
-test("ordinary station TEST tries direct once when the relay cannot serve it", async () => {
+test("ordinary station TEST tries direct once for an approved local route", async () => {
+  const h = createHarness();
+  const result = h.evaluate("canDecode('http://192.168.1.22/live', 9000, { directFallbackAllowed: true })");
+  await flush();
+  const probe = h.audios[1];
+  probe.error = { code: 4 };
+  await probe.dispatch("error");
+  assert.equal(probe.src, "http://192.168.1.22/live");
+  await probe.dispatch("canplay");
+  assert.equal((await result).ok, true);
+});
+
+test("ordinary station TEST cannot fall back to an unapproved route", async () => {
   const h = createHarness();
   const result = h.evaluate("canDecode('https://radio.test/live')");
   await flush();
   const probe = h.audios[1];
   probe.error = { code: 4 };
   await probe.dispatch("error");
-  assert.equal(probe.src, "https://radio.test/live");
-  await probe.dispatch("canplay");
-  assert.equal((await result).ok, true);
+  assert.notEqual(probe.src, "https://radio.test/live");
+  assert.equal((await result).ok, false);
 });
 
 test("HLS TEST checks decoder readiness and closes its own session", async () => {

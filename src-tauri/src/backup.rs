@@ -29,6 +29,15 @@ pub struct BackupPreview {
     warnings: Vec<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupRestoreResult {
+    #[serde(flatten)]
+    data: AppData,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_recovery_path: Option<String>,
+}
+
 fn parsed(content: &str) -> Result<(AppData, Vec<String>), String> {
     let (value, warnings) = aerowave_core::backup::inspect(content)?;
     let data: AppData = serde_json::from_value(value).map_err(|e| format!("Backup data is invalid: {e}"))?;
@@ -114,7 +123,7 @@ pub fn read_recovery_backup(state: State<AppState>) -> Result<Option<String>, St
             if file.take(129).read_to_end(&mut bytes).is_ok() && bytes.len() <= 128 {
                 if let Ok(target) = std::str::from_utf8(&bytes) {
                     if let Some(name) = aerowave_core::backup::recovery_pointer_target(target) {
-                        if let Some(content) = read_valid_recovery(&dir.join(name)) {
+                        if let Some(content) = read_valid_recovery(&dir.join(name))? {
                             return Ok(Some(content));
                         }
                     }
@@ -129,18 +138,29 @@ pub fn read_recovery_backup(state: State<AppState>) -> Result<Option<String>, St
         if !entry.file_type().is_ok_and(|kind| kind.is_file()) { continue; }
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue; };
-        let Some((stamp, number)) = aerowave_core::backup::recovery_name(name) else { continue; };
+        let Some((stamp, number)) = aerowave_core::backup::recovery_name(name)
+            .or_else(|| aerowave_core::backup::raw_recovery_name(name)) else { continue; };
         copies.push((stamp.to_string(), number, entry.path()));
     }
     copies.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
     for (_, _, path) in copies {
-        if let Some(content) = read_valid_recovery(&path) { return Ok(Some(content)); }
+        if let Some(content) = read_valid_recovery(&path)? { return Ok(Some(content)); }
     }
     Ok(None)
 }
 
-fn read_valid_recovery(path: &Path) -> Option<String> {
-    if !fs::symlink_metadata(path).ok()?.file_type().is_file() { return None; }
+fn read_valid_recovery(path: &Path) -> Result<Option<String>, String> {
+    if !fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file()) {
+        return Ok(None);
+    }
+    if path.file_name().and_then(|name| name.to_str())
+        .and_then(aerowave_core::backup::raw_recovery_name).is_some() {
+        return Err(format!("The previous setup could not be exported as a backup. The original settings were kept at {}.", path.display()));
+    }
+    Ok(read_backup_content(path))
+}
+
+fn read_backup_content(path: &Path) -> Option<String> {
     let file = fs::File::open(path).ok()?;
     let mut bytes = Vec::new();
     file.take((aerowave_core::backup::MAX_BYTES + 1) as u64)
@@ -175,7 +195,7 @@ pub async fn save_backup_file(app: AppHandle, content: String) -> Result<Option<
 }
 
 #[tauri::command]
-pub fn restore_backup(app: AppHandle, state: State<AppState>, content: String) -> Result<AppData, String> {
+pub fn restore_backup(app: AppHandle, state: State<AppState>, content: String) -> Result<BackupRestoreResult, String> {
     let value = aerowave_core::backup::prepare_restore(&content)?;
     let imported: AppData = serde_json::from_value(value).map_err(|e| format!("Backup data is invalid: {e}"))?;
     let _power_update = state.power_updates.lock().unwrap();
@@ -192,7 +212,7 @@ pub fn restore_backup(app: AppHandle, state: State<AppState>, content: String) -
     #[cfg(mobile)]
     let recovery_alarms = Some(recovery_alarms);
 
-    let (restored, _) = state.store.restore_with(imported, recovery_alarms, |candidate, recovery_path| {
+    let (restored, recovery_path) = state.store.restore_with(imported, recovery_alarms, |candidate, recovery_path| {
         state.sched.lock().unwrap().ensure_restore_idle()?;
         #[cfg(mobile)]
         {
@@ -223,5 +243,8 @@ pub fn restore_backup(app: AppHandle, state: State<AppState>, content: String) -
     let _ = app.emit("alarms-updated", ());
     let _ = app.emit("settings-updated", ());
     let _ = app.emit("storage-status-updated", state.store.storage_status());
-    Ok(restored)
+    let raw_recovery_path = recovery_path.file_name().and_then(|name| name.to_str())
+        .and_then(aerowave_core::backup::raw_recovery_name)
+        .map(|_| recovery_path.to_string_lossy().into_owned());
+    Ok(BackupRestoreResult { data: restored, raw_recovery_path })
 }

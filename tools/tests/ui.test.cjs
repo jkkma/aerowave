@@ -400,6 +400,124 @@ test("a delayed settings readback cannot erase a newer saved station", async () 
   assert.equal(saved.map(station => station.id).join(","), "saved,new");
 });
 
+test("a save reflecting disabled startup preserves and persists a newer volume edit", async () => {
+  const first = deferred();
+  let writes = 0;
+  const h = createHarness({ invoke: command => command === "save_settings" && ++writes === 1
+    ? first.promise : undefined });
+  h.evaluate("state.settings.startWithWindows=true; wire()");
+  h.el("#volume").value = "41";
+  await h.el("#volume").dispatch("input");
+  await h.fireTimer(h.evaluate("settingsSaveTimer"));
+  await flush();
+  h.el("#volume").value = "83";
+  await h.el("#volume").dispatch("input");
+  const saving = h.evaluate("flushSettings()");
+  first.resolve(false);
+  assert.equal(await saving, true);
+  const saves = h.calls.filter(({ command }) => command === "save_settings");
+  assert.equal(saves[1].args.settings.volume, 0.83);
+  assert.equal(saves[1].args.settings.startWithWindows, false);
+  assert.equal(h.evaluate("state.settings.startWithWindows"), false);
+  assert.equal(h.audios[0].volume, 0.83);
+});
+
+test("a delayed settings refresh preserves a newer debounced input", async () => {
+  const oldRead = deferred();
+  const h = createHarness({ invoke: command => command === "get_state" ? oldRead.promise : undefined });
+  h.evaluate("wire()");
+  const loading = h.evaluate("loadState()");
+  h.el("#volume").value = "83";
+  await h.el("#volume").dispatch("input");
+  oldRead.resolve({ stations: [], alarms: [], settings: { volume: 0.41, clock24h: false } });
+  await loading;
+  assert.equal(h.el("#volume").value, 83);
+  assert.equal(await h.evaluate("flushSettings()"), true);
+  const saved = h.calls.find(({ command }) => command === "save_settings").args.settings;
+  assert.equal(saved.volume, 0.83);
+  assert.equal(saved.clock24h, false);
+});
+
+test("a queued settings save takes refreshed untouched fields and respects a later startup choice", async () => {
+  const first = deferred();
+  const read = deferred();
+  let writes = 0;
+  const h = createHarness({ invoke: command => {
+    if (command === "save_settings" && ++writes === 1) return first.promise;
+    if (command === "get_state") return read.promise;
+  } });
+  h.evaluate("state.settings.startWithWindows=true; state.settings.clock24h=true; wire()");
+  h.el("#volume").value = "41";
+  await h.el("#volume").dispatch("input");
+  await h.fireTimer(h.evaluate("settingsSaveTimer"));
+  await flush();
+  h.el("#volume").value = "83";
+  await h.el("#volume").dispatch("input");
+  const draining = h.evaluate("flushSettings()");
+  const refreshing = h.evaluate("loadState()");
+  read.resolve({ stations: [], alarms: [], settings: { clock24h: false, volume: 0.41, startWithWindows: false } });
+  await refreshing;
+  h.evaluate("saveSettings(true)");
+  first.resolve(false);
+  assert.equal(await draining, true);
+
+  const saves = h.calls.filter(({ command }) => command === "save_settings").map(({ args }) =>
+    [args.settings.volume, args.settings.clock24h, args.explicitAutostart]);
+  assert.deepEqual(saves, [[0.41, true, null], [0.83, false, null], [0.83, false, true]]);
+  assert.equal(h.evaluate("state.settings.startWithWindows"), true);
+});
+
+test("a delayed failed-save readback cannot erase a newer slider edit", async () => {
+  const oldRead = deferred();
+  let writes = 0;
+  const h = createHarness({ invoke: command => {
+    if (command === "save_settings" && ++writes === 1) throw new Error("disk unavailable");
+    if (command === "get_state") return oldRead.promise;
+  } });
+  h.evaluate("wire()");
+  h.el("#volume").value = "41";
+  await h.el("#volume").dispatch("input");
+  await h.fireTimer(h.evaluate("settingsSaveTimer"));
+  await flush();
+  h.el("#volume").value = "83";
+  await h.el("#volume").dispatch("input");
+  const saving = h.evaluate("flushSettings()");
+  oldRead.resolve({ stations: [], alarms: [], settings: { volume: 0.8 } });
+  await saving;
+  assert.equal(h.calls.filter(({ command }) => command === "save_settings").at(-1).args.settings.volume, 0.83);
+  assert.equal(h.evaluate("state.settings.volume"), 0.83);
+  assert.equal(h.audios[0].volume, 0.83);
+});
+
+test("an old backup scan cannot replace the status for a new selection", async () => {
+  const oldScan = deferred();
+  const h = createHarness({ invoke: command => {
+    if (command === "folder_info") return oldScan.promise;
+    if (command === "pick_folder") return { path: "C:/new", count: 7 };
+  } });
+  h.evaluate("state.settings.backupFolder='C:/old'; wire()");
+  const refreshing = h.evaluate("refreshFolderLabels()");
+  await h.el("#btn-pick-backup").dispatch("click");
+  oldScan.resolve({ path: "C:/old", count: 0 });
+  await refreshing;
+  assert.equal(h.el("#backup-path").title, "C:/new");
+  assert.match(h.el("#backup-path").textContent, /7 playable files/);
+  assert.equal(h.el("#backup-path").classList.contains("warn"), false);
+});
+
+test("a cancelled alarm draft cannot receive an earlier folder selection", async () => {
+  const oldPick = deferred();
+  const h = createHarness({ invoke: command => command === "pick_folder" ? oldPick.promise : undefined });
+  h.evaluate(`wire();
+    openAlarmEditor({ id: "old", hour: 7, minute: 0, source: { kind: "folder", path: "C:/old" } });`);
+  const picking = h.el("#al-folderbtn").dispatch("click");
+  h.evaluate(`closeAlarmEditor();
+    openAlarmEditor({ id: "new", hour: 8, minute: 0, source: { kind: "folder", path: "C:/new" } });`);
+  oldPick.resolve({ path: "C:/stale", name: "stale", count: 0 });
+  await picking;
+  assert.equal(h.el("#al-folderpath").title, "C:/new");
+  assert.doesNotMatch(h.el("#al-sourcenote").textContent, /No playable audio/);
+});
 test("a failed close waits for settings readback before it is cancelled", async () => {
   const readback = deferred();
   const h = createHarness({ invoke: command => {

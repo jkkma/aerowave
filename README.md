@@ -62,9 +62,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   a station that looks undecodable usually is not — of a 24-station sample
   across MP3, AAC, AAC+ and Ogg, every failure that had a fixable cause was the
   server declining to answer, and none was a codec WebView2 lacked. AAC+ in
-  particular plays perfectly well. A relayed station that still fails gets one
-  attempt without the relay before it is written off; reconnecting on the same
-  URL does not, because that part the engine really will refuse every time.
+  particular plays perfectly well. On desktop, a LAN station whose probe stays
+  on the LAN can get one direct browser attempt when relayed playback fails.
+  Public stations use the guarded relay for ordinary playback and reconnects.
 - The TEST button in the station editor does a two-part check, because the
   server answering and the player playing are still different questions: the
   Rust side proves the server answers, then a hidden media element proves the
@@ -78,6 +78,13 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   now, so a playlist that does not admit to being one in its file name is
   followed just the same. Relative entries resolve against the playlist's final
   address after redirects; ASX references can point to ordinary MP3 streams.
+- Ordinary station discovery and relaying check the destination of each request,
+  including redirects, playlist entries and the raw ICY fallback. Private and
+  loopback IP literals, `localhost`, `.local` and `.home.arpa` names, and single-label
+  hostnames allow ordinary LAN radio. Once a chain reaches a public broadcaster,
+  its later connections require public addresses. The probe and relay connect
+  directly so the address check applies to the socket they open. Networks that
+  require a system proxy cannot use these paths.
 - **HLS plays**, which is about 6% of the radio-browser directory — some 3,700
   stations, France Inter and RTL among them. WebView2 will not play an `.m3u8`
   itself: it reads the playlist, reports metadata, and then sits at
@@ -94,10 +101,12 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   A session will only fetch from origins the app has itself seen — the
   redirects it followed and the playlist bodies it served — because segments
   routinely live on a different host from the playlist, so same-origin scoping
-  would break a fifth of them. Every redirect and the actual DNS answers are
-  checked to keep those requests off loopback and private networks. HLS connects
-  directly instead of using system proxies so a proxy cannot bypass that check;
-  networks that require an outbound proxy cannot use this HLS path.
+  would break a fifth of them. Playlist variables can name those origins, and
+  declared variants can import definitions from their master playlist. Query
+  variables come from the master and its declared variant URLs. Every
+  redirect and the actual DNS answers are checked to keep those requests off
+  loopback and private networks. HLS connects directly so the checks apply to
+  the socket it opens. Networks that require a system proxy cannot use this path.
 - Now-playing for an HLS station is read from the ID3 tags inside the segments
   and queued against the playback clock, since a segment is parsed up to half a
   minute before it is audible. The tags are parsed here rather than by hls.js,
@@ -633,11 +642,17 @@ tidying):
 cd src-tauri && cargo test --workspace
 ```
 
-They live in the `aerowave-core` crate. On Windows the app crate links WebView2 and
-the Win32 GUI stack, and a test binary built from it will not load outside a real
-app process, so its harness is switched off in `Cargo.toml` and anything worth
-testing lives in `core/` instead. Linux uses WebKitGTK and GStreamer; a successful
-core test run does not establish native playback on either platform.
+Pure logic tests live in `aerowave-core`. On Windows the app crate links WebView2
+and the Win32 GUI stack, so its test harness is switched off in `Cargo.toml`.
+From the repository root, the standalone example tests the stream and HLS
+adapters without opening the app:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --locked --example networkcheck
+```
+
+Native decoding and audio output require separate playback checks on Windows
+and Linux.
 
 ## How it is put together
 
@@ -697,8 +712,10 @@ at, and prints its SHA-256.
   file and previews its counts before replacing the setup. Imported alarms
   start off and skipped occurrences are cleared; review folders and alarms
   before enabling them. Startup, PC wake, and sleep-action choices stay local.
-  A recovery copy is kept before replacement and can be previewed with
-  **Previous setup**. Export uses a new file so older backups are preserved.
+  A validated recovery backup is kept before replacement and can be previewed
+  with **Previous setup**. If an older setup cannot be exported as a valid backup,
+  Restore saves the original settings file byte for byte and reports its recovery
+  path. Export uses a new file so older backups are preserved.
   Android uses its system document picker; folder access does not transfer
   between devices. Its alarm store and settings file are separate: if the
   final settings commit fails after native restore, the error gives the
