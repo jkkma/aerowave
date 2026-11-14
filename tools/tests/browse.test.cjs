@@ -1444,6 +1444,24 @@ test("later pages collapse two submissions the directory resolved to one stream"
   assert.equal(h.evaluate("browseResults[0].name"), "Direct");
 });
 
+test("a higher-voted Browse submission keeps a prior submission marked Saved", async () => {
+  let request = 0;
+  const first = { ...directoryStation("First", "https://a.test/listen.pls", 1), resolvedUrl: "https://cdn.test/live" };
+  const winner = { ...directoryStation("Winner", "https://b.test/other.m3u", 9), resolvedUrl: "http://cdn.test/live/" };
+  const h = browseHarness(() => ++request === 1
+    ? { offered: 40, hasMore: true, stations: [first] }
+    : { offered: 40, hasMore: false, stations: [winner] });
+  seedSelects(h);
+  await h.evaluate("browseSearch(false)");
+  await h.el("#browse-list").children[0].querySelector(".browse-save").dispatch("click");
+  await h.el("#browse-list").children.at(-1).children[0].dispatch("click");
+
+  const row = h.el("#browse-list").children[0];
+  assert.equal(row.dataset.url, winner.url);
+  assert.equal(row.querySelector(".browse-save").textContent, "Saved");
+  assert.equal(h.evaluate("state.stations[0].url"), first.url);
+});
+
 function filterHarness(stationQueries, reply = () => ({ offered: 0, hasMore: false, stations: [] })) {
   const h = createHarness({ invoke(command, args) {
     if (command === "browse_countries" || command === "browse_tags") return [];

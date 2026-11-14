@@ -25,6 +25,7 @@ pub struct Playlist {
 /// Retain the order and encoding of the station's own query parameters.
 pub fn playlist_identity(url: &Url) -> Url {
     let mut key = url.clone();
+    crate::network::clear_userinfo(&mut key);
     key.set_fragment(None);
     if let Some(query) = url.query() {
         let query = query

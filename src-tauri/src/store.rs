@@ -29,6 +29,9 @@ pub struct Station {
     pub logo: String,
     #[serde(default)]
     pub favorite: bool,
+    /// Links a promoted history entry without reusing its ID for alarms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_id: Option<String>,
 }
 
 /// Where an alarm gets its sound from. When a station will not play, the
@@ -540,14 +543,13 @@ impl Store {
         let _writing = self.write_lock.lock().unwrap();
         self.ensure_writable()?;
         let (mut staged, receipts) = self.snapshot_and_receipts();
-        #[cfg(desktop)]
         let before = serde_json::to_value(&staged).map_err(|error| error.to_string())?;
         change(&mut staged)?;
+        let after = serde_json::to_value(&staged).map_err(|error| error.to_string())?;
         #[cfg(desktop)]
-        {
-            let after = serde_json::to_value(&staged).map_err(|error| error.to_string())?;
-            aerowave_core::backup::validate_live_edit(&before, &after)?;
-        }
+        aerowave_core::backup::validate_live_edit(&before, &after)?;
+        #[cfg(mobile)]
+        aerowave_core::backup::validate_live_station_urls(&before, &after)?;
         aerowave_core::persistence::update_with(
             &mut staged,
             |_| {},

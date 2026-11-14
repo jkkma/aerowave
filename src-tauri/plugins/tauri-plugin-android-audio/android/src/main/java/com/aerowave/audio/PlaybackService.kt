@@ -18,15 +18,14 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
-import androidx.media3.datasource.DataSource
-import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import java.util.concurrent.Executors
+import java.util.concurrent.Executor
+import java.util.concurrent.FutureTask
+import java.util.concurrent.RejectedExecutionException
 
 class PlaybackService : MediaSessionService(), Player.Listener {
   private val handler = Handler(Looper.getMainLooper())
@@ -37,6 +36,11 @@ class PlaybackService : MediaSessionService(), Player.Listener {
   private val pendingMetadataUpdates = mutableSetOf<Runnable>()
   private var reconnectAttempts = 0
   private var pendingReconnect: Runnable? = null
+  private var reconnectResolution: FutureTask<Unit>? = null
+  private var reconnectDeadline: Runnable? = null
+  internal var stationResolver: (String, String) -> ResolvedAlarmStream = AlarmStreamResolver::resolve
+  internal var stationLookupExecutor: Executor = reconnectExecutor
+  private lateinit var userAgent: String
   private val reconnectProgress = SustainedMediaProgress(SystemClock::elapsedRealtime)
   private val reconnectProgressTick = object : Runnable {
     override fun run() {
@@ -84,27 +88,14 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     } catch (_: Exception) {
       "0.0.0"
     }
-    val userAgent = "Aerowave/$version"
-
-    // The stream mode is captured when Media3 asks for each data source. HLS
-    // stays public-only across its manifest, redirect, key and segment fetches;
-    // the ordinary radio path additionally admits Aerowave's loopback relay.
-    val networkDataSourceFactory = DataSource.Factory {
-      val allowLoopback = currentRequest?.isHls == false
-      OkHttpDataSource.Factory(NetworkGuard.client(allowLoopback, userAgent))
-        .setUserAgent(userAgent)
-        .setDefaultRequestProperties(mapOf("Icy-MetaData" to "1"))
-        .createDataSource()
-    }
-    val dataSourceFactory = DefaultDataSource.Factory(this, networkDataSourceFactory)
+    userAgent = "Aerowave/$version"
     val extractors = ChainedOpusExtractorsFactory(onStreamMetadata = { metadata ->
       handler.post { scheduleOpusMetadata(metadata) }
     })
-    val mediaSourceFactory = DefaultMediaSourceFactory(this, extractors)
-      .setDataSourceFactory(dataSourceFactory)
-      // Reconnection is owned here so the attempt budget covers the whole
-      // live stream rather than being reset independently for every segment.
-      .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(0))
+    // The service owns reconnects for the whole station across media sources.
+    val mediaSourceFactory = RadioMediaSourceFactory.create(
+      this, userAgent, allowRelay = true, extractors, DefaultLoadErrorHandlingPolicy(0),
+    )
     val audioAttributes = AudioAttributes.Builder()
       .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
       .setUsage(C.USAGE_MEDIA)
@@ -207,6 +198,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
         status = STATUS_BUFFERING,
         generation = request.generation,
         sourceUrl = request.sourceUrl,
+        stationUrl = request.stationUrl,
         title = request.title,
         stationId = request.stationId,
         positionMs = 0,
@@ -416,6 +408,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       )
     ) {
       wantsPlayback = false
+      cancelReconnect()
     }
     trace("pwr=$playWhenReady/$reason")
     updateStateFromPlayer()
@@ -437,7 +430,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
   }
 
   override fun onPlayerError(error: PlaybackException) {
-    scheduleReconnect(error.message ?: "The stream could not be played")
+    scheduleReconnect("The stream could not be played (${error.errorCodeName})")
   }
 
   override fun onTracksChanged(tracks: Tracks) {
@@ -591,7 +584,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
 
   private fun updateStateFromPlayer() {
     if (expireSleepTimerIfNeeded()) return
-    if (currentRequest == null || player.playerError != null || pendingReconnect != null) return
+    if (currentRequest == null || player.playerError != null || pendingReconnect != null || reconnectResolution != null) return
     if (player.playbackState == Player.STATE_ENDED && wantsPlayback) return
     val status = when {
       player.isPlaying -> STATUS_PLAYING
@@ -637,18 +630,18 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       pendingReconnect = null
       if (expireSleepTimerIfNeeded()) return@Runnable
       val state = AudioStateStore.snapshot(this)
-      if (currentRequest?.generation != expectedGeneration ||
+      val active = currentRequest
+      if (active?.generation != expectedGeneration || !wantsPlayback || isAlarmActive() ||
         state.status == STATUS_IDLE || state.status == STATUS_PAUSED
       ) {
         return@Runnable
       }
-      // prepare() alone is a no-op after a live source reaches ENDED. Replace
-      // the item so every bounded attempt opens a fresh relay connection and
-      // can either recover, fail into the next attempt, or reach the backup.
-      trace("retry=$reconnectAttempts")
-      player.setMediaItem(mediaItem(request, explicitTrackTitle))
-      player.prepare()
-      player.play()
+      val stationUrl = active.stationUrl
+      if (attempt > 0 && active.isHls && !stationUrl.isNullOrBlank()) {
+        refreshHlsStation(stationUrl, expectedGeneration)
+      } else {
+        reopenStation(active)
+      }
     }
     pendingReconnect = retry
     handler.postDelayed(retry, RECONNECT_DELAYS_MS[attempt])
@@ -657,6 +650,58 @@ class PlaybackService : MediaSessionService(), Player.Listener {
   private fun cancelReconnect() {
     pendingReconnect?.let(handler::removeCallbacks)
     pendingReconnect = null
+    reconnectResolution?.cancel(true)
+    reconnectResolution = null
+    reconnectDeadline?.let(handler::removeCallbacks)
+    reconnectDeadline = null
+  }
+
+  private fun reopenStation(request: PlayRequest) {
+    // prepare() alone is a no-op after EOF. A fresh item starts a fresh link.
+    trace("retry=$reconnectAttempts")
+    player.setMediaItem(mediaItem(request, explicitTrackTitle))
+    player.prepare()
+    player.play()
+  }
+
+  private fun refreshHlsStation(stationUrl: String, expectedGeneration: Long) {
+    lateinit var job: FutureTask<Unit>
+    job = FutureTask<Unit>({
+      val result = runCatching { stationResolver(stationUrl, userAgent) }
+      handler.post {
+        if (reconnectResolution !== job) return@post
+        cancelReconnect()
+        val active = currentRequest ?: return@post
+        if (active.generation != expectedGeneration || !wantsPlayback ||
+          isAlarmActive() || expireSleepTimerIfNeeded()) return@post
+        result.fold(
+          onSuccess = { resolved ->
+            if (!resolved.isHls) {
+              scheduleReconnect("The station no longer serves HLS")
+            } else {
+              val updated = active.copy(url = resolved.url)
+              currentRequest = updated
+              AudioStateStore.update(this) {
+                it.copy(playableUrl = resolved.url)
+              }
+              reopenStation(updated)
+            }
+          },
+          onFailure = { scheduleReconnect(it.message ?: "The station could not be resolved again") },
+        )
+      }
+    }, Unit)
+    reconnectResolution = job
+    val timeout = Runnable {
+      if (reconnectResolution === job) scheduleReconnect("Resolving the station again took too long")
+    }
+    reconnectDeadline = timeout
+    handler.postDelayed(timeout, AlarmStreamResolver.MAX_TOTAL_DURATION_MS + 1_000L)
+    try {
+      stationLookupExecutor.execute(job)
+    } catch (_: RejectedExecutionException) {
+      scheduleReconnect("Station lookup is busy")
+    }
   }
 
   private fun cancelReconnectProgress() {
@@ -710,6 +755,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
                 isHls = false,
                 sourceFolder = folder,
                 stationId = null,
+                stationUrl = null,
               ),
               resetReconnects = true,
               resetFolderFailures = false,
@@ -842,6 +888,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
         status = STATUS_BUFFERING,
         generation = restoredRequest.generation,
         sourceUrl = restoredRequest.sourceUrl,
+        stationUrl = restoredRequest.stationUrl,
         title = restoredRequest.title,
         stationId = restoredRequest.stationId,
         positionMs = interruption.positionMs,
@@ -866,7 +913,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     val status = when {
       stored.status == STATUS_ERROR -> STATUS_ERROR
       resolvingFolder -> STATUS_BUFFERING
-      pendingReconnect != null -> STATUS_BUFFERING
+      pendingReconnect != null || reconnectResolution != null -> STATUS_BUFFERING
       player.isPlaying -> STATUS_PLAYING
       player.playbackState == Player.STATE_BUFFERING && player.playWhenReady -> STATUS_BUFFERING
       else -> STATUS_PAUSED
@@ -912,6 +959,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     const val EXTRA_VOLUME = "volume"
     private const val EXTRA_URL = "url"
     private const val EXTRA_SOURCE_URL = "sourceUrl"
+    private const val EXTRA_STATION_URL = "stationUrl"
     private const val EXTRA_TITLE = "title"
     private const val EXTRA_STATION_ID = "stationId"
     private const val EXTRA_GENERATION = "generation"
@@ -932,6 +980,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
     private const val MAX_METADATA_CHARS = 512
     private const val RECOVERY_WAKE_TIMEOUT_MS = 45_000L
     private val RECONNECT_DELAYS_MS = longArrayOf(1_000, 2_000, 4_000, 8_000)
+    private val reconnectExecutor = AlarmSourceTaskPool()
 
     @Volatile
     private var instance: PlaybackService? = null
@@ -1136,6 +1185,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       if (request != null) {
         putExtra(EXTRA_URL, request.url)
         putExtra(EXTRA_SOURCE_URL, request.sourceUrl)
+        putExtra(EXTRA_STATION_URL, request.stationUrl)
         putExtra(EXTRA_TITLE, request.title)
         putExtra(EXTRA_HAS_STATION_ID, request.stationId != null)
         putExtra(EXTRA_STATION_ID, request.stationId)
@@ -1162,6 +1212,7 @@ class PlaybackService : MediaSessionService(), Player.Listener {
       return PlayRequest(
         url = url,
         sourceUrl = sourceUrl,
+        stationUrl = intent.getStringExtra(EXTRA_STATION_URL),
         title = title,
         stationId = if (intent.getBooleanExtra(EXTRA_HAS_STATION_ID, false)) {
           intent.getStringExtra(EXTRA_STATION_ID)

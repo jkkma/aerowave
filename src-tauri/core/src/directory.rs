@@ -8,6 +8,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::network::StationNetwork;
+
 /// Formats the Browse tab can hand to the player.
 pub const DIRECTORY_CODECS: [&str; 5] = ["MP3", "AAC", "AAC+", "OGG", "FLAC"];
 
@@ -199,9 +201,31 @@ pub fn playable_url(url: &str, resolved: &str) -> Option<String> {
 /// or the time of the check itself, so it changes every time the station is
 /// checked. The submitted address is what the broadcaster published, and the
 /// player follows its playlist or redirect afresh each time. The resolved form
-/// stands in only when the submitted one is not http(s) at all.
+/// stands in only when the submitted one is not a valid HTTP(S) URL.
 pub fn listen_url(url: &str, resolved: &str) -> Option<String> {
-    first_http_url([url, resolved])
+    let address = url.trim();
+    if let Some(parsed) = parse_http_url(address) {
+        // A directory entry cannot grant the LAN access reserved for a URL
+        // the listener entered. Playback still checks DNS and every hop.
+        return StationNetwork::Public.admit(&parsed).ok().map(|()| address.to_string());
+    }
+    resolved_directory_url(resolved)
+}
+
+pub fn resolved_directory_url(resolved: &str) -> Option<String> {
+    let address = resolved.trim();
+    let parsed = parse_http_url(address)?;
+    StationNetwork::Public.admit(&parsed).ok().map(|()| address.to_string())
+}
+
+fn parse_http_url(address: &str) -> Option<url::Url> {
+    let (scheme, _) = address.split_once("://")?;
+    let parsed = url::Url::parse(address).ok()?;
+    (matches!(parsed.scheme(), "http" | "https")
+        && scheme.eq_ignore_ascii_case(parsed.scheme())
+        && parsed.host_str().is_some()
+        && !address.chars().any(char::is_control))
+        .then_some(parsed)
 }
 
 fn first_http_url(candidates: [&str; 2]) -> Option<String> {
@@ -328,16 +352,16 @@ pub struct ArtQueryUrls {
 pub fn art_query_urls(url: &str, resolved_url: &str) -> ArtQueryUrls {
     let mut exact = Vec::new();
     for candidate in [url.trim(), resolved_url.trim()] {
-        let Some((scheme, _)) = candidate.split_once("://") else {
+        let Some(parsed) = parse_http_url(candidate) else {
             continue;
         };
-        let Ok(parsed) = url::Url::parse(candidate) else {
-            continue;
-        };
-        if !matches!(parsed.scheme(), "http" | "https")
-            || !scheme.eq_ignore_ascii_case(parsed.scheme())
-            || parsed.host_str().is_none()
-            || candidate.chars().any(char::is_control)
+        // The volunteer directory receives the literal URL as a query value.
+        // Credentials and tokens belong only at the broadcaster.
+        if StationNetwork::Public.admit(&parsed).is_err()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
         {
             continue;
         }
@@ -446,13 +470,13 @@ pub fn tally_directory_facets<'a>(
     let mut seen_bitrates: HashSet<(String, usize)> = HashSet::new();
 
     for entry in entries {
-        let Some(url) = playable_url(entry.url, entry.resolved_url) else {
+        let Some(url) = listen_url(entry.url, entry.resolved_url) else {
             continue;
         };
         if clean_name(entry.name, 60).is_empty() {
             continue;
         }
-        let stream = stream_key(&url);
+        let stream = stream_key(resolved_directory_url(entry.resolved_url).as_deref().unwrap_or(&url));
 
         let codec = clean_name(entry.codec, 16).to_ascii_uppercase();
         if let Some(slot) = DIRECTORY_CODECS.iter().position(|known| *known == codec) {
@@ -685,21 +709,21 @@ mod tests {
     #[test]
     fn artwork_queries_try_both_exact_urls_before_their_other_schemes() {
         let queries = art_query_urls(
-            " https://radio.example:8443/Path/Live.mp3?token=A%2Fb&n=1 ",
-            "http://cdn.example:8000/Stream?quality=192",
+            " https://radio.example:8443/Path/Live.mp3 ",
+            "http://cdn.example:8000/Stream",
         );
         assert_eq!(
             queries.exact,
             [
-                "https://radio.example:8443/Path/Live.mp3?token=A%2Fb&n=1",
-                "http://cdn.example:8000/Stream?quality=192",
+                "https://radio.example:8443/Path/Live.mp3",
+                "http://cdn.example:8000/Stream",
             ]
         );
         assert_eq!(
             queries.fallback,
             [
-                "http://radio.example:8443/Path/Live.mp3?token=A%2Fb&n=1",
-                "https://cdn.example:8000/Stream?quality=192",
+                "http://radio.example:8443/Path/Live.mp3",
+                "https://cdn.example:8000/Stream",
             ]
         );
         for (exact, fallback) in queries.exact.iter().zip(&queries.fallback) {
@@ -726,6 +750,48 @@ mod tests {
         assert_eq!(queries.fallback, ["http://radio.example/live"]);
         assert!(art_query_urls("https://", "rtsp://radio.example/live").exact.is_empty());
         assert!(art_query_urls("http:/radio.example/live", "").exact.is_empty());
+    }
+
+    #[test]
+    fn artwork_queries_never_share_private_or_secret_bearing_urls() {
+        for private in [
+            "http://user:secret@radio.home.arpa/live?token=demo",
+            "http://secret@radio.example/live",
+            "http://user:secret@radio.example/live",
+            "https://radio.example/live?X-Amz-Signature=demo",
+            "https://radio.example/live#token=demo",
+            "http://127.1:8000/live",
+            "http://[::ffff:192.168.1.2]/live",
+            "http://receiver.local./live",
+        ] {
+            let public = "https://radio.example/live";
+            let queries = art_query_urls(private, public);
+            assert_eq!(queries.exact, [public], "{private}");
+            assert_eq!(queries.fallback, ["http://radio.example/live"], "{private}");
+            assert_eq!(art_query_urls(public, private), queries, "{private}");
+        }
+    }
+
+    #[test]
+    fn directory_station_addresses_cannot_enter_the_lan() {
+        let public = "https://radio.example/live";
+        for local in [
+            "http://127.0.0.1:8000/live",
+            "http://0x7f000001/live",
+            "http://192.168.1.2/live",
+            "http://169.254.169.254/live",
+            "http://[::1]/live",
+            "http://[::ffff:192.168.1.2]/live",
+            "http://localhost./live",
+            "http://player.local/live",
+            "http://radio.home.arpa/live",
+            "http://intranet/live",
+        ] {
+            assert_eq!(listen_url(local, public), None, "{local}");
+            assert_eq!(listen_url("", local), None, "{local}");
+            assert_eq!(listen_url(public, local).as_deref(), Some(public), "{local}");
+        }
+        assert_eq!(listen_url("https://[abc]", public).as_deref(), Some(public));
     }
 
     #[test]

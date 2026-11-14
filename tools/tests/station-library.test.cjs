@@ -277,6 +277,79 @@ test("a deleted station kept in Recent can be saved again with a new identity", 
   assert.notEqual(h.evaluate("state.stations[0].id"), "deleted");
 });
 
+test("saving from Recent keeps the new station linked after retuning and reopening", async () => {
+  const discovery = station("discovered", "Heard in Browse");
+  const h = libraryHarness({ recentStations: [discovery] });
+  await h.el("#station-recent").dispatch("click");
+  await rows(h)[0].querySelector(".station-save-recent").dispatch("click");
+  await h.evaluate("stationSaveTail");
+  await flush();
+
+  await rows(h)[0].querySelector(".station-edit").dispatch("click");
+  h.el("#st-name").value = "Retuned station";
+  h.el("#st-url").value = "https://radio.test/retuned";
+  await h.el("#station-editor").dispatch("submit");
+  const saved = jsonClone(stationWrites(h).at(-1).args.stations);
+  const reopened = libraryHarness({ stations: [station("other", "Other"), ...saved], recentStations: [discovery] });
+  reopened.evaluate('state.settings.lastStation = "discovered"');
+  await reopened.el("#station-recent").dispatch("click");
+  assert.deepEqual(rowNames(reopened), ["Retuned station"]);
+  reopened.evaluate("togglePlay()");
+  await flush();
+  assert.equal(reopened.calls.find(({ command }) => command === "probe_stream").args.url, "https://radio.test/retuned");
+});
+
+test("retuning a previously promoted station links its legacy Recent entry after saving", async () => {
+  const discovery = station("legacy-history-id", "Old discovery");
+  const saved = station("saved-station-id", "Saved discovery", { url: discovery.url });
+  let fail = true;
+  const h = libraryHarness({ stations: [saved], recentStations: [discovery], invoke(command) {
+    if (command === "save_stations" && fail) throw new Error("temporary failure");
+  } });
+  await h.el("#station-recent").dispatch("click");
+  assert.deepEqual(rowNames(h), ["Saved discovery"]);
+  await rows(h)[0].querySelector(".station-edit").dispatch("click");
+  h.el("#st-name").value = "Retuned discovery";
+  h.el("#st-url").value = "https://radio.test/retuned";
+  await h.el("#station-editor").dispatch("submit");
+  assert.equal(h.evaluate("state.stations[0].recentId"), undefined);
+  assert.equal(h.evaluate("state.stations[0].url"), discovery.url);
+
+  fail = false;
+  await h.el("#station-editor").dispatch("submit");
+  assert.deepEqual(rowNames(h), ["Retuned discovery"]);
+  assert.equal(h.evaluate('stationById("legacy-history-id")'), null);
+  const persisted = jsonClone(stationWrites(h).at(-1).args.stations);
+  assert.equal(persisted[0].id, saved.id);
+  const reopened = libraryHarness({ stations: persisted, recentStations: [discovery] });
+  await reopened.el("#station-recent").dispatch("click");
+  assert.deepEqual(rowNames(reopened), ["Retuned discovery"]);
+});
+
+test("a newly played retuned station replaces its Recent discovery while a settings save is pending", async () => {
+  const discovery = station("discovered", "Heard in Browse");
+  const pending = deferred();
+  const h = libraryHarness({ recentStations: [discovery], invoke(command) {
+    if (command === "save_settings") return pending.promise;
+  } });
+  h.evaluate('state.settings.volume=0.5; saveSettings(null, "volume")');
+  const savingSettings = h.evaluate("flushSettings()");
+  await flush();
+  await h.el("#station-recent").dispatch("click");
+  await rows(h)[0].querySelector(".station-save-recent").dispatch("click");
+  await h.evaluate("stationSaveTail");
+  await flush();
+  await rows(h)[0].querySelector(".station-edit").dispatch("click");
+  h.el("#st-url").value = "https://radio.test/retuned";
+  await h.el("#station-editor").dispatch("submit");
+
+  h.evaluate('player.source={kind:"station", url:state.stations[0].url, stationId:state.stations[0].id}; rememberPlayedStation()');
+  pending.resolve(null);
+  await savingSettings;
+  assert.deepEqual(jsonClone(h.evaluate("recentStations().map(station => station.url)")), ["https://radio.test/retuned"]);
+  assert.deepEqual(jsonClone(h.calls.filter(({ command }) => command === "save_settings").at(-1).args.settings.recentStations.map(station => station.url)), ["https://radio.test/retuned"]);
+});
+
 test("saving an unsaved recent station waits in the station write queue and uses the latest library", async () => {
   const firstWrite = deferred();
   const secondWrite = deferred();

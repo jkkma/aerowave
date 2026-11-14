@@ -2,12 +2,14 @@ package com.aerowave.audio
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.io.IOException
 import java.io.InputStream
 import okhttp3.OkHttpClient
+import okhttp3.Credentials
 import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody
@@ -136,6 +138,37 @@ class AlarmStreamResolverTest {
     } catch (_: AlarmStreamResolutionException) {
       assertTrue(visited.isEmpty())
     }
+  }
+
+  @Test fun refreshedManifestKeepsCredentialsOnlyOnTheSubmittedOrigin() {
+    val urls = mutableListOf<String>()
+    val authorizations = mutableListOf<String?>()
+    val client = OkHttpClient.Builder().addInterceptor { chain ->
+      val request = chain.request()
+      urls += request.url.toString()
+      authorizations += request.header("Authorization")
+      val location = when (request.url.encodedPath) {
+        "/listen" -> "https://radio.test/manifest.m3u8?token=fresh"
+        "/manifest.m3u8" -> "https://cdn.test/manifest.m3u8"
+        else -> error("Unexpected request")
+      }
+      Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+        .code(if (request.url.host == "radio.test") 302 else 200).message("Fixture")
+        .header("Location", location).header("Content-Type", "application/vnd.apple.mpegurl")
+        .body("#EXTM3U\n#EXT-X-VERSION:3\nsegment.ts".toResponseBody()).build()
+    }.build()
+    val resolved = AlarmStreamResolver.resolveWithClient("https://user:pass@radio.test/listen", client)
+
+    assertTrue(resolved.isHls)
+    assertEquals("https://cdn.test/manifest.m3u8", resolved.url)
+    assertEquals(listOf(
+      "https://user:pass@radio.test/listen",
+      "https://user:pass@radio.test/manifest.m3u8?token=fresh",
+      "https://cdn.test/manifest.m3u8",
+    ), urls)
+    assertEquals(Credentials.basic("user", "pass"), authorizations[0])
+    assertEquals(authorizations[0], authorizations[1])
+    assertNull(authorizations[2])
   }
 
   @Test

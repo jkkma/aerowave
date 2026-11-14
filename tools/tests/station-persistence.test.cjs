@@ -80,6 +80,19 @@ test("a pending station save keeps the editor busy and rejects a duplicate submi
   assert.equal(h.el("#station-editor").inert, false);
 });
 
+test("Android keeps a malformed HTTP station draft open and never writes it", async () => {
+  const h = createHarness({ navigator: { userAgent: "Mozilla/5.0 (Linux; Android 15; Mobile)" } });
+  h.evaluate("wire(); openStationEditor(null)");
+  h.el("#st-name").value = "Radio";
+  h.el("#st-url").value = "https://[abc]";
+  await h.el("#station-editor").dispatch("submit");
+
+  assert.equal(h.calls.some(({ command }) => command === "save_stations"), false);
+  assert.equal(h.el("#station-editor").classList.contains("hidden"), false);
+  assert.equal(h.el("#st-url").value, "https://[abc]");
+  assert.match(h.el("#st-note").textContent, /valid.*URL/i);
+});
+
 test("an accepted station edit preserves artwork queued while its write was pending", async () => {
   const pending = deferred();
   let writes = 0;

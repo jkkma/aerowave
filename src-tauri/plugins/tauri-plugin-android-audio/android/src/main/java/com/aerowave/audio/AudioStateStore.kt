@@ -15,6 +15,7 @@ internal data class PlayRequest(
   val sleepRevision: Long? = null,
   val sourceFolder: String? = null,
   val backupFolder: String? = null,
+  val stationUrl: String? = null,
 )
 
 internal data class PlaybackSnapshot(
@@ -41,6 +42,7 @@ internal data class PlaybackSnapshot(
   // Sleep state deliberately stays in process memory. Persisting elapsed
   // realtime deadlines would leave a stale timer after service/process death.
   val sleepTimer: SleepTimerSnapshot = SleepTimerSnapshot(),
+  val stationUrl: String? = null,
 ) {
   fun requestOrNull(): PlayRequest? = playableUrl.takeIf { it.isNotBlank() }?.let {
     PlayRequest(
@@ -56,6 +58,7 @@ internal data class PlaybackSnapshot(
       sleepTimer.revision,
       sourceFolder,
       backupFolder,
+      stationUrl,
     )
   }
 
@@ -79,6 +82,7 @@ internal object AudioStateStore {
       status = STATUS_BUFFERING,
       generation = request.generation,
       sourceUrl = request.sourceUrl,
+      stationUrl = request.stationUrl,
       title = request.title,
       stationId = request.stationId,
       volume = request.volume,
@@ -123,6 +127,7 @@ internal object AudioStateStore {
       trackTitle = null,
       hiddenTrackTitle = null,
       playableUrl = "",
+      stationUrl = null,
       isHls = false,
       showMetadata = true,
       artworkDataUrl = null,
@@ -139,6 +144,7 @@ internal object AudioStateStore {
       status = prefs.getString("status", STATUS_IDLE) ?: STATUS_IDLE,
       generation = prefs.getLong("generation", 0),
       sourceUrl = prefs.getString("sourceUrl", "") ?: "",
+      stationUrl = prefs.getString("stationUrl", null),
       title = prefs.getString("title", "") ?: "",
       stationId = prefs.getString("stationId", null),
       positionMs = prefs.getLong("positionMs", 0),
@@ -161,6 +167,7 @@ internal object AudioStateStore {
       .putString("status", state.status)
       .putLong("generation", state.generation)
       .putString("sourceUrl", state.sourceUrl)
+      .putString("stationUrl", state.stationUrl)
       .putString("title", state.title)
       .putString("stationId", state.stationId)
       .putLong("positionMs", state.positionMs)

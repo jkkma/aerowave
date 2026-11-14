@@ -49,6 +49,24 @@ pub fn public_addresses(addrs: &[SocketAddr]) -> bool {
     !addrs.is_empty() && addrs.iter().all(|addr| is_public_address(&addr.ip()))
 }
 
+/// Drop a URL's Basic Auth credentials while preserving its destination.
+pub fn clear_userinfo(url: &mut Url) {
+    let _ = url.set_password(None);
+    let _ = url.set_username("");
+}
+
+/// A relative link normally inherits userinfo. An absolute link on the same
+/// origin should work too, but an origin change must leave this login behind.
+pub fn inherit_userinfo(source: &Url, target: &mut Url) {
+    if source.origin() == target.origin()
+        && target.username().is_empty()
+        && target.password().is_none()
+    {
+        let _ = target.set_username(source.username());
+        let _ = target.set_password(source.password());
+    }
+}
+
 /// An ordinary station may be entered on a LAN. A public station cannot use
 /// redirects, playlists or DNS to acquire that permission for itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +139,30 @@ fn lan_address(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn userinfo_inheritance_requires_the_same_scheme_host_and_effective_port() {
+        let source = Url::parse("https://user:p%40ss@station.example:8443/radio").unwrap();
+        for (url, inherited) in [
+            ("https://station.example:8443/next", true),
+            ("http://station.example:8443/next", false),
+            ("https://station.example/next", false),
+            ("https://cdn.example:8443/next", false),
+        ] {
+            let mut target = Url::parse(url).unwrap();
+            inherit_userinfo(&source, &mut target);
+            assert_eq!(target.password(), inherited.then_some("p%40ss"));
+            clear_userinfo(&mut target);
+            assert_eq!(target.as_str(), url);
+        }
+        let source = Url::parse("https://user:secret@station.example:443/radio").unwrap();
+        let mut target = Url::parse("https://station.example/next").unwrap();
+        inherit_userinfo(&source, &mut target);
+        assert_eq!(target.username(), "user");
+        let mut own = Url::parse("https://other:new@station.example/next").unwrap();
+        inherit_userinfo(&source, &mut own);
+        assert_eq!(own.password(), Some("new"));
+    }
 
     #[test]
     fn local_and_special_destinations_are_refused() {

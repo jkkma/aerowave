@@ -135,6 +135,14 @@ internal object AlarmStreamResolver {
     private val visited = mutableSetOf<String>()
     private var requests = 0
 
+    private fun resolveReference(parent: HttpUrl, value: String): HttpUrl? {
+      val child = parent.resolve(value) ?: return null
+      if (!NetworkGuard.sameOrigin(parent, child)) return child
+      if (child.encodedUsername.isNotEmpty() || child.encodedPassword.isNotEmpty()) return child
+      return child.newBuilder().encodedUsername(parent.encodedUsername)
+        .encodedPassword(parent.encodedPassword).build()
+    }
+
     fun resolve(url: HttpUrl, hop: Int): ResolvedAlarmStream {
       if (hop > MAX_HOPS) {
         throw CandidateFailure("The station playlist contains too many redirects")
@@ -162,6 +170,7 @@ internal object AlarmStreamResolver {
       val request = Request.Builder()
         .url(url)
         .header("Accept", "audio/*,application/vnd.apple.mpegurl,application/x-mpegurl,*/*;q=0.1")
+        .apply { NetworkGuard.basicAuthorization(url)?.let { header("Authorization", it) } }
         .build()
 
       val response = try {
@@ -209,7 +218,7 @@ internal object AlarmStreamResolver {
 
         var lastFailure: Throwable? = null
         for (entry in entries) {
-          val candidate = finalUrl.resolve(entry)
+          val candidate = resolveReference(finalUrl, entry)
           if (candidate == null) {
             lastFailure = CandidateFailure("The station playlist contains an invalid stream address")
             continue
@@ -235,7 +244,7 @@ internal object AlarmStreamResolver {
       }
       val location = response.header("Location")
         ?: throw CandidateFailure("The station returned a redirect without a destination")
-      val next = response.request.url.resolve(location)
+      val next = resolveReference(response.request.url, location)
         ?: throw CandidateFailure("The station returned an invalid redirect")
       return resolve(next, hop + 1)
     }
@@ -268,6 +277,7 @@ internal object AlarmStreamResolver {
     }
 
     private fun remainingMs(): Long {
+      if (Thread.currentThread().isInterrupted) throw AlarmStreamResolutionException("Station lookup cancelled")
       val remaining = remainingMsOrZero()
       if (remaining <= 0) throw AlarmStreamResolutionException("Resolving that station took too long")
       return remaining

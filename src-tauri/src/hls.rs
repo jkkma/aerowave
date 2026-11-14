@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use aerowave_core::hls::{parse_playlist, playlist_identity, Variables};
-use aerowave_core::network::{public_addresses, public_http_destination_allowed};
+use aerowave_core::network::{inherit_userinfo, public_addresses, public_http_destination_allowed};
 use rand::Rng;
 
 use crate::stream;
@@ -48,6 +48,8 @@ struct Session {
     /// then grown only from what we have observed ourselves.
     origins: HashSet<String>,
     manifest: reqwest::Url,
+    /// This URL's userinfo belongs to the station origin only.
+    station: reqwest::Url,
     variables: Variables,
     variants: HashSet<reqwest::Url>,
     last_seen: Instant,
@@ -132,7 +134,11 @@ fn client() -> Result<reqwest::Client, String> {
     if let Some(existing) = CLIENT.get() {
         return Ok(existing.clone());
     }
-    let built = client_builder().build().map_err(|e| e.to_string())?;
+    // The HLS fetch loop reapplies Basic auth only within one exact origin.
+    let built = client_builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
     Ok(CLIENT.get_or_init(|| built).clone())
 }
 
@@ -162,6 +168,7 @@ impl Hls {
             Session {
                 origins: HashSet::from([origin]),
                 manifest: playlist_identity(&parsed),
+                station: parsed,
                 variables: Variables::new(),
                 variants: HashSet::new(),
                 last_seen: now,
@@ -176,8 +183,9 @@ impl Hls {
         self.sessions.lock().unwrap().remove(session);
     }
 
-    /// Is this session allowed to fetch this URL, and has it any budget left?
-    fn admit(&self, session: &str, url: &reqwest::Url) -> Result<(), String> {
+    /// Admit an observed origin and use its explicit login or the station's
+    /// login when the request stays on the same origin.
+    fn admit(&self, session: &str, url: &reqwest::Url) -> Result<reqwest::Url, String> {
         let origin = origin_of(url).ok_or("that URL has no origin")?;
         let mut sessions = self.sessions.lock().unwrap();
         let Some(s) = sessions.get_mut(session) else {
@@ -194,7 +202,9 @@ impl Hls {
         }
         s.requests += 1;
         s.last_seen = Instant::now();
-        Ok(())
+        let mut target = url.clone();
+        inherit_userinfo(&s.station, &mut target);
+        Ok(target)
     }
 
     /// Record what a fetch taught us: where it ended up, and - if it handed
@@ -254,15 +264,22 @@ impl Hls {
         url: &str,
         range: Option<(u64, u64)>,
     ) -> Result<Fetched, String> {
-        let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("{url}: {e}"))?;
+        self.fetch_with_client(&client()?, session, url, range).await
+    }
+
+    async fn fetch_with_client(
+        &self,
+        client: &reqwest::Client,
+        session: &str,
+        url: &str,
+        range: Option<(u64, u64)>,
+    ) -> Result<Fetched, String> {
+        let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("invalid HLS URL: {e}"))?;
         if !matches!(parsed.scheme(), "http" | "https") {
             return Err("only http and https can be fetched".into());
         }
-        self.admit(session, &parsed)?;
-        if !public_http_destination_allowed(parsed.scheme(), parsed.host_str().unwrap_or("")) {
-            return Err("that address is not one to fetch on a page's say-so".into());
-        }
-        let fetched = stream::fetch_once(&client()?, parsed.as_str(), range, MAX_BODY).await?;
+        let target = self.admit(session, &parsed)?;
+        let fetched = stream::fetch_once(client, target.as_str(), range, MAX_BODY).await?;
         if let Ok(base) = reqwest::Url::parse(&fetched.final_url) {
             self.learn(
                 session,
@@ -291,6 +308,119 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn request_head(socket: &mut TcpStream) -> String {
+        let mut head = Vec::new();
+        while aerowave_core::icy::head_end(&head).is_none() {
+            let mut chunk = [0; 1024];
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert!(read > 0 && head.len() < 8192);
+            head.extend_from_slice(&chunk[..read]);
+        }
+        String::from_utf8(head).unwrap()
+    }
+
+    #[tokio::test]
+    async fn authenticated_manifest_authorizes_same_origin_segments_only() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let redirect = format!("http://cdn.test:{}/piece.ts", addr.port());
+        let server = tokio::spawn(async move {
+            for index in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let head = request_head(&mut socket).await.to_ascii_lowercase();
+                assert_eq!(head.contains("authorization: basic dtpw"), index != 2);
+                assert!(head.contains("range: bytes=0-3"));
+                let answer = match index {
+                    0 | 2 => "HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsong".to_string(),
+                    _ => format!("HTTP/1.1 302 Found\r\nLocation: {redirect}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                };
+                socket.write_all(answer.as_bytes()).await.unwrap();
+            }
+        });
+        let hls = Hls::default();
+        let manifest = format!("http://u:p@station.test:{}/live.m3u8", addr.port());
+        let session = hls.open(&manifest).unwrap();
+        let base = format!("http://station.test:{}", addr.port());
+        let client = client_builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve("station.test", addr)
+            .resolve("cdn.test", addr)
+            .build()
+            .unwrap();
+        for path in ["piece.ts", "other.ts"] {
+            let url = format!("{base}/{path}");
+            let got = hls
+                .fetch_with_client(&client, &session, &url, Some((0, 3)))
+                .await
+                .unwrap();
+            assert_eq!(got.body, b"song");
+            assert!(!got.final_url.contains('@'));
+        }
+        server.await.unwrap();
+    }
+
+    async fn explicit_segment_credentials(host: &str) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let segment_base = format!("http://{host}:{}", addr.port());
+        let redirect = format!("{segment_base}/piece.ts");
+        let server = tokio::spawn(async move {
+            for (path, response) in [
+                ("/redirect", format!("HTTP/1.1 302 Found\r\nLocation: {redirect}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")),
+                ("/piece.ts", "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsong".into()),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let head = request_head(&mut socket).await;
+                assert_eq!(head.split_whitespace().nth(1), Some(path));
+                let authorized = head.lines().any(|line| {
+                    line.split_once(':').is_some_and(|(name, value)| {
+                        name.eq_ignore_ascii_case("authorization") && value.trim() == "Basic dTpjaGlsZA=="
+                    })
+                });
+                if !authorized {
+                    socket.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                    return;
+                }
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let hls = Hls::default();
+        let manifest =
+            reqwest::Url::parse(&format!("http://u:p@station.test:{}/live.m3u8", addr.port()))
+                .unwrap();
+        let session = hls.open(manifest.as_str()).unwrap();
+        let segment = format!("http://u:child@{host}:{}/redirect", addr.port());
+        let playlist = format!("#EXTM3U\n#EXTINF:4,\n{segment}\n");
+        hls.learn(&session, &manifest, &manifest, playlist.as_bytes(), true);
+        let client = client_builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve("station.test", addr)
+            .resolve("cdn.test", addr)
+            .build()
+            .unwrap();
+        let got = hls
+            .fetch_with_client(&client, &session, &segment, None)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(got.status, 200);
+        assert_eq!(got.body, b"song");
+        assert_eq!(got.final_url, format!("{segment_base}/piece.ts"));
+    }
+
+    #[tokio::test]
+    async fn hls_uses_explicit_credentials_for_an_admitted_cross_origin_segment() {
+        explicit_segment_credentials("cdn.test").await;
+    }
+
+    #[tokio::test]
+    async fn hls_explicit_segment_credentials_override_station_credentials() {
+        explicit_segment_credentials("station.test").await;
+    }
 
     #[test]
     fn learns_only_the_expanded_variant_origin_from_a_playlist() {

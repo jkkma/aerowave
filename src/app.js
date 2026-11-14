@@ -210,6 +210,7 @@ audio.preload = "none";
 let playGeneration = 0;
 let mediaLoad = null;
 let lastMediaTime = 0;
+const STATION_PROGRESS_TIMEOUT_MS = 30_000;
 
 /** Did something newer take over since this attempt started? */
 function superseded(generation) {
@@ -228,6 +229,7 @@ const player = {
   source: null,       // { kind, url, path, title, subtitle, stationId }
   target: 0.8,        // volume we are heading for
   fadeTimer: null,
+  pendingFadeSeconds: 0,
   metaTimer: null,
   metadataStarted: false, // keep retries from reopening a titleless poll
   retries: 0,
@@ -245,6 +247,7 @@ const player = {
   paused: false,      // held, with the source still on the element, so it can resume
   pendingPosition: null, // local position until its media URL has arrived
   nativeGeneration: null, // Android Media3 session this page is currently showing
+  nativeSourceUrl: null,
   trackTitle: null,
   artwork: null,
   get playing() {
@@ -324,6 +327,7 @@ function stopPlayback(quiet, { skipNative = false } = {}) {
   player.lastProgress = 0;
   lastMediaTime = 0;
   clearTimers();
+  clearMediaProgressWatchdog();
   // Drop the source first: tearing down the element fires events that would
   // otherwise look like a stream failure and start a reconnect.
   player.source = null;
@@ -333,6 +337,7 @@ function stopPlayback(quiet, { skipNative = false } = {}) {
   audio.removeAttribute("src");
   audio.load();
   player.retries = 0;
+  player.pendingFadeSeconds = 0;
   player.retryProgressSeconds = 0;
   player.paused = false;
   player.pendingPosition = null;
@@ -344,6 +349,7 @@ function stopPlayback(quiet, { skipNative = false } = {}) {
   player.metadataStarted = false;
   stopHls();
   player.nativeGeneration = null;
+  player.nativeSourceUrl = null;
   player.trackTitle = null;
   player.artwork = null;
   if (!IS_ANDROID && "mediaSession" in navigator) navigator.mediaSession.metadata = null;
@@ -374,7 +380,7 @@ function restoreAndroidSource(nativeState) {
   const stored = local ? null : stationById(nativeState.stationId);
   const source = {
     kind: local ? "folder" : "station",
-    url: stored?.url || nativeState.sourceUrl || "",
+    url: stored?.url || nativeState.stationUrl || nativeState.sourceUrl || "",
     path: local ? nativeState.sourceUrl : undefined,
     folder: nativeState.sourceFolder || null,
     title: nativeState.title || stored?.name || "Live radio",
@@ -382,7 +388,7 @@ function restoreAndroidSource(nativeState) {
     stationId: nativeState.stationId || stored?.id || null,
     logo: local ? "" : stored?.logo || "",
     hls: nativeState.isHls ?? stored?.hls ?? /\.m3u8(?:\?|$)/i.test(nativeState.sourceUrl || ""),
-    hlsUrl: nativeState.isHls ? nativeState.sourceUrl : stored?.hlsUrl,
+    hlsUrl: nativeState.isHls ? nativeState.manifestUrl || nativeState.sourceUrl : stored?.hlsUrl,
     nativeRestored: true,
   };
   if (!source.url) return false;
@@ -391,9 +397,11 @@ function restoreAndroidSource(nativeState) {
   resetAndroidPositionSample();
   player.source = source;
   player.nativeGeneration = generation;
+  player.nativeSourceUrl = nativeState.sourceUrl;
   androidPlaybackStatus = nativeState.status;
-  player.resolved = nativeState.sourceUrl || source.url;
+  player.resolved = nativeState.manifestUrl || nativeState.sourceUrl || source.url;
   player.hls = source.hls;
+  player.relayed = !local && !source.hls;
   player.target = Number.isFinite(nativeState.volume) ? nativeState.volume : (state.settings.volume ?? 0.8);
   player.paused = nativeState.status === "paused";
   player.retries = 0;
@@ -421,6 +429,11 @@ function applyAndroidPlaybackState(nativeState, { allowRestore = false } = {}) {
   if (nativeState.sourceUrl && nativeState.sourceUrl !== player.source.url &&
       nativeState.sourceUrl.startsWith("content://") && androidActiveStatus(nativeState.status)) {
     restoreAndroidSource(nativeState);
+  }
+  player.nativeSourceUrl = nativeState.sourceUrl || player.nativeSourceUrl;
+  if (player.source.kind === "station" && nativeState.isHls === true && nativeState.manifestUrl) {
+    player.resolved = nativeState.manifestUrl;
+    player.source.hlsUrl = nativeState.manifestUrl;
   }
   androidPlaybackStatus = nativeState.status;
 
@@ -997,6 +1010,18 @@ function showTrackText(text) {
   track.title = track.textContent;
 }
 
+function displayStationUrl(value) {
+  const text = String(value || "");
+  try {
+    const url = new URL(text);
+    if (url.username || url.password) {
+      url.username = url.password = "";
+      return url.href;
+    }
+  } catch { /* A failed browser source need not be a valid URL. */ }
+  return text;
+}
+
 function showNowPlaying(title, sub, meta) {
   $("#np-station").textContent = title || "";
   showTrackText(sub);
@@ -1024,7 +1049,7 @@ function setTrackTitle(title) {
   const source = player.source;
   if (!source) return;
   showTrackText(source.kind === "station" && state.settings.showMetadata === false
-    ? source.url : player.trackTitle);
+    ? displayStationUrl(source.url) : player.trackTitle);
   updateMediaMetadata();
   if (IS_ANDROID) renderAndroidMiniPlayer();
 }
@@ -1035,7 +1060,7 @@ function refreshMetadataPreference() {
   setTrackTitle(player.trackTitle);
   if (IS_ANDROID && player.nativeGeneration !== null) {
     androidCommand("set_metadata_enabled", {
-      generation: player.nativeGeneration, sourceUrl: player.resolved || source.url,
+      generation: player.nativeGeneration, sourceUrl: player.nativeSourceUrl || source.url,
       enabled: state.settings.showMetadata !== false,
     }).catch(() => {});
   }
@@ -1350,7 +1375,7 @@ async function playable(source, url, directFallbackAllowed = false) {
   }
   if (source.kind !== "station") return url;
   try {
-    const relayed = await invoke("relay_url", { url });
+    const relayed = await invoke("relay_url", { url: source.url || url });
     if (relayed) return relayed;
     throw new Error("The station relay is unavailable");
   } catch (error) {
@@ -1374,6 +1399,7 @@ async function startAndroidPlayback(source, sourceUrl, useHls, generation, volum
   player.relayed = !useHls && playUrl !== sourceUrl;
   player.hls = useHls;
   player.nativeGeneration = generation;
+  player.nativeSourceUrl = player.relayed ? source.url : sourceUrl;
   androidPlayPendingGeneration = generation;
   androidHandledErrorGeneration = null;
   resetAndroidPositionSample();
@@ -1381,7 +1407,8 @@ async function startAndroidPlayback(source, sourceUrl, useHls, generation, volum
   try {
     const nativeState = await androidCommand("play", {
       url: playUrl,
-      sourceUrl,
+      sourceUrl: player.nativeSourceUrl,
+      stationUrl: source.kind === "station" ? source.url : null,
       title: source.title || "Live radio",
       stationId: source.stationId || null,
       volume,
@@ -1495,10 +1522,9 @@ async function play(source, opts = {}) {
     }
   }
 
-  // Remember the station's own URL. The metadata poll talks to the
-  // broadcaster directly - it wants a title, not audio - so it must not be
-  // pointed at the relay, which would only hand it back its own stream. It
-  // is also what an `icy-title` event is matched against.
+  // Keep the resolved broadcaster address for direct fallback and metadata.
+  // The relay uses the submitted address so each connection can follow a
+  // fresh playlist or redirect from the original station.
   if (source.kind === "station") player.resolved = url;
   setOrbArt(source);
   if (IS_ANDROID) {
@@ -1540,6 +1566,7 @@ async function play(source, opts = {}) {
   audio.volume = continuingSleepFade
     ? Math.min(audio.volume, opts.fadeSecs > 0 ? 0.02 : volume)
     : opts.fadeSecs > 0 ? 0.02 : volume;
+  player.pendingFadeSeconds = continuingSleepFade ? 0 : opts.fadeSecs || 0;
   if (continuingSleepFade) {
     // Source resolution may have taken most of the time left. Resume from its
     // faded level only when the replacement can actually start making sound.
@@ -1548,7 +1575,6 @@ async function play(source, opts = {}) {
   }
   if (player.paused || givingUp) return;
   if (!(await playLoadedAudio(generation))) return;
-  if (opts.fadeSecs > 0 && !continuingSleepFade) fadeTo(volume, opts.fadeSecs);
 
   if (source.kind === "station" && !player.hls) startMetadata(source, initialInfo);
 }
@@ -1808,7 +1834,7 @@ function syncAndroidArtwork(source) {
       || player.nativeGeneration === null) return;
   androidCommand("update_artwork", {
     generation: player.nativeGeneration,
-    sourceUrl: player.resolved || source.url,
+    sourceUrl: player.nativeSourceUrl || source.url,
     artworkDataUrl: player.artwork,
   }).catch(() => {});
 }
@@ -1993,13 +2019,11 @@ function onStreamTitle(payload) {
   if (!payload || typeof payload.title !== "string") return;
   const source = player.source;
   if (!source || source.kind !== "station") return;
-  // A relay socket may send one last title after desktop audio switches to a
-  // direct URL. Android can restore native relay playback without this page's
-  // relayed flag; its service checks the active source independently.
-  if (!IS_ANDROID && !player.relayed) return;
+  // A relay socket can send one last title after switching to direct audio.
+  if (!player.relayed || player.hls) return;
   // A relay connection outlives by a moment the station that opened it, so a
   // title from the one we are no longer listening to is not ours.
-  const mine = String(player.resolved || source.url || "").trim();
+  const mine = String((IS_ANDROID ? player.nativeSourceUrl : source.url) || "").trim();
   const from = String(payload.url || "").trim();
   if (!mine || !from || mine !== from) return;
 
@@ -2191,9 +2215,17 @@ function fallBackToDirect(source, generation) {
  */
 let switchingSource = false;
 function beginMediaLoad() {
+  clearMediaProgressWatchdog();
   switchingSource = true;
-  mediaLoad = { failed: false, playRequest: null };
+  lastMediaTime = 0;
+  mediaLoad = { failed: false, playRequest: null, progressWatchdog: null, progressedAt: 0 };
   return mediaLoad;
+}
+
+function clearMediaProgressWatchdog() {
+  if (!mediaLoad) return;
+  clearInterval(mediaLoad.progressWatchdog);
+  mediaLoad.progressWatchdog = null;
 }
 
 function setAudioSource(url) {
@@ -2208,9 +2240,24 @@ async function playLoadedAudio(generation) {
   load.playRequest = request;
   const current = () => load === mediaLoad && load.playRequest === request && !load.failed &&
     !superseded(generation) && !player.paused && !givingUp;
+  if (player.source?.kind === "station" && !ringing) {
+    clearMediaProgressWatchdog();
+    load.progressedAt = Date.now();
+    load.progressWatchdog = setInterval(() => {
+      if (!current() || Date.now() - load.progressedAt < STATION_PROGRESS_TIMEOUT_MS) return;
+      // An old load can still be waiting on play(). Disconnect it before
+      // retrying so a late buffer cannot start playing during the backoff.
+      failMediaLoad(load, "the stream stopped delivering playable audio", false, { disconnect: true });
+    }, 1000);
+  }
   try {
     await audio.play();
-    return current();
+    if (!current()) return false;
+    if (player.pendingFadeSeconds > 0) {
+      fadeTo(player.target, player.pendingFadeSeconds);
+      player.pendingFadeSeconds = 0;
+    }
+    return true;
   } catch (error) {
     if (current() && !isAbort(error)) {
       const unsupported = audio.error?.code === 4 || error?.name === "NotSupportedError";
@@ -2220,13 +2267,21 @@ async function playLoadedAudio(generation) {
   }
 }
 
-function failMediaLoad(load, detail, unsupported = false) {
+function failMediaLoad(load, detail, unsupported = false, { disconnect = false } = {}) {
   const source = player.source;
   if (!load || load !== mediaLoad || load.failed || !source || player.paused) return;
   // Browsers can report the same load failure through both the element's
   // error event and its pending play promise. Either channel owns it once.
   load.failed = true;
+  clearMediaProgressWatchdog();
   const stationRelay = source.kind === "station" && player.relayed && !player.hls;
+  if (disconnect) {
+    switchingSource = true;
+    stopHls();
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+  }
   if (unsupported && stationRelay && !player.triedDirect &&
       player.directFallbackUrl === (player.resolved || source.url) && !givingUp) {
     fallBackToDirect(source, playGeneration);
@@ -2249,6 +2304,7 @@ audio.addEventListener("timeupdate", () => {
   if (!audio.paused && !audio.seeking && audio.readyState >= 3 && now > lastMediaTime) {
     const progressedAt = Date.now();
     player.lastProgress = progressedAt;
+    if (mediaLoad && !mediaLoad.failed) mediaLoad.progressedAt = progressedAt;
     // A connection can briefly enter `playing` and then drop. Give a
     // reconnect its full budget until it has delivered sustained audio.
     if (player.source.kind === "station" && player.retries > 0) {
@@ -2295,7 +2351,7 @@ audio.addEventListener("error", () => {
     "aerowave media error:",
     "code=" + (err ? err.code : "?"),
     "net=" + audio.networkState,
-    "src=" + (audio.currentSrc || "(empty)")
+    "src=" + (displayStationUrl(audio.currentSrc) || "(empty)")
   );
   // MEDIA_ERR_SRC_NOT_SUPPORTED. Not only "bad codec": the element reports
   // it for an error page and for a refused connection too. Public stations
@@ -2320,7 +2376,7 @@ audio.addEventListener("ended", () => {
       stopPlayback();
     }
   } else {
-    failure("stream ended");
+    failMediaLoad(mediaLoad, "stream ended");
   }
 });
 
@@ -2337,7 +2393,7 @@ function playStation(station, opts) {
       kind: "station",
       url: station.url,
       title: station.name,
-      subtitle: state.settings.showMetadata === false ? station.url : "…",
+      subtitle: state.settings.showMetadata === false ? displayStationUrl(station.url) : "…",
       logo: station.logo,
       tag: station.tag,
       stationId: station.id,
@@ -2432,6 +2488,7 @@ function pausePlayback() {
     // Resuming radio rebuilds its live connection. Retire any recovery already
     // waiting on IPC or play(), so even its late failure cannot restart audio.
     playGeneration += 1;
+    clearMediaProgressWatchdog();
     clearInterval(player.metaTimer);
     player.metaTimer = null;
   }
@@ -2530,9 +2587,10 @@ function togglePlay() {
     stopPlayback();
     return;
   }
+  const recent = recentStations().find(station => station.id === state.settings.lastStation);
   const last = stationById(state.settings.lastStation)
-    || recentStations().find(station => station.id === state.settings.lastStation)
-    || state.stations[0] || recentStations()[0];
+    || (recent && resolveRecentStation(recent))
+    || state.stations[0] || currentRecentStations()[0];
   if (last) playStation(last);
   else say("no stations yet — add one", "bad");
 }
@@ -2793,7 +2851,8 @@ const browseStreamOf = (st) => st.resolvedUrl || st.url;
  * has since moved on - laut.fm stamps the time of each check into theirs -
  * still matches through the submitted one.
  */
-const isBrowseRow = (url, st) => sameStream(url, st.url) || (!!st.resolvedUrl && sameStream(url, st.resolvedUrl));
+const isBrowseRow = (url, st) => sameStream(url, st.url) || sameStream(url, st.resolvedUrl) ||
+  (st.aliases || []).some(alias => sameStream(url, alias));
 
 const browseSaved = (st) => state.stations.some((s) => isBrowseRow(s.url, st));
 const browseSaving = (st) => Array.from(pendingBrowseAdds).some((s) => isBrowseRow(s.url, st));
@@ -2962,8 +3021,13 @@ async function browseSearch(more, nameOverride) {
     for (const station of page.stations) {
       const at = browseResults.findIndex((seen) => sameStream(browseStreamOf(seen), browseStreamOf(station)));
       if (at < 0) browseResults.push(station);
-      else if ((Number(station.votes) || 0) > (Number(browseResults[at].votes) || 0)) {
-        browseResults[at] = station;
+      else {
+        const seen = browseResults[at];
+        const [winner, other] = (Number(station.votes) || 0) > (Number(seen.votes) || 0)
+          ? [station, seen] : [seen, station];
+        const aliases = new Set([...(winner.aliases || []), other.url, ...(other.aliases || [])]);
+        aliases.delete(winner.url);
+        browseResults[at] = { ...winner, aliases: [...aliases] };
       }
     }
     const added = browseResults.splice(appendAt).sort(byCountryThenName);
@@ -4069,10 +4133,15 @@ function recentStations() {
   return Array.isArray(state.settings.recentStations) ? state.settings.recentStations : [];
 }
 
+function resolveRecentStation(recent) {
+  return stationById(recent.id) || state.stations.find(saved => saved.recentId === recent.id) ||
+    state.stations.find(saved => sameStream(saved.url, recent.url)) || recent;
+}
+
 function currentRecentStations() {
   const current = [];
   for (const recent of recentStations()) {
-    const station = stationById(recent.id) || state.stations.find(saved => sameStream(saved.url, recent.url)) || recent;
+    const station = resolveRecentStation(recent);
     // An edit can make separate history snapshots converge on one saved row or
     // stream. Keep its newest position without changing the stored snapshots.
     if (!current.some(item => item.id === station.id || sameStream(item.url, station.url))) current.push(station);
@@ -4142,7 +4211,8 @@ function rememberPlayedStation() {
     id: old?.id || source.stationId || newId(), name: source.title || "Live radio", url: source.url,
     tag: source.tag || old?.tag || "", logo: source.logo || old?.logo || "", favorite: false,
   };
-  const history = [entry, ...previous.filter(station => station.id !== entry.id && !sameStream(station.url, entry.url))].slice(0, 20);
+  const history = [entry, ...previous.filter(station => resolveRecentStation(station).id !== entry.id &&
+    station.id !== entry.id && !sameStream(station.url, entry.url))].slice(0, 20);
   if (JSON.stringify(history) === JSON.stringify(previous)) return;
   state.settings.recentStations = history;
   saveSettings(null, "recentStations");
@@ -4151,7 +4221,9 @@ function rememberPlayedStation() {
 
 async function saveRecentStation(station) {
   if (recentStationSaves.has(station.id)) return;
-  const saved = { ...station, id: newId(), favorite: false };
+  // A settings write already in flight can still contain the old history ID.
+  // Keep the link with the station, where it saves atomically with the new ID.
+  const saved = { ...station, id: newId(), recentId: station.id, favorite: false };
   recentStationSaves.add(station.id);
   renderStations();
   try {
@@ -4873,10 +4945,19 @@ function saveStations({ extraStation = null, move = null, patch = null, removeId
   ++stationStateRevision;
   const run = async () => {
     const stations = state.stations.map((station) => ({ ...station }));
+    const changes = { ...patch?.changes };
     if (patch) {
       const station = stations.find(item => item.id === patch.id);
-      if (station) Object.assign(station, patch.changes);
-      else if (patch.create) stations.push({ id: patch.id, ...patch.changes });
+      if (station) {
+        // Older promotions matched Recent only by URL. Preserve that link
+        // before an edit replaces the address, without changing the station ID.
+        if (!station.recentId && changes.url && !sameStream(station.url, changes.url)) {
+          const recent = recentStations().find(item => item.id !== station.id &&
+            sameStream(item.url, station.url) && resolveRecentStation(item).id === station.id);
+          if (recent) changes.recentId = recent.id;
+        }
+        Object.assign(station, changes);
+      } else if (patch.create) stations.push({ id: patch.id, ...changes });
       else { say("This station was removed. Cancel this edit and add it again.", "bad"); return false; }
     }
     if (removeId !== null) {
@@ -4892,8 +4973,14 @@ function saveStations({ extraStation = null, move = null, patch = null, removeId
       const [station] = stations.splice(index, 1);
       stations.splice(target, 0, station);
     }
-    if (extraStation && !stations.some((station) => sameStream(station.url, extraStation.url))) {
-      stations.push({ ...extraStation });
+    let linkedStationId = null;
+    if (extraStation) {
+      const existing = stations.find(station => sameStream(station.url, extraStation.url));
+      if (!existing) stations.push({ ...extraStation });
+      else if (extraStation.recentId && !existing.recentId) {
+        existing.recentId = extraStation.recentId;
+        linkedStationId = existing.id;
+      }
     }
     try {
       await invoke("save_stations", { stations });
@@ -4913,13 +5000,17 @@ function saveStations({ extraStation = null, move = null, patch = null, removeId
       // this write was pending and has its own queued save.
       if (patch) {
         const station = state.stations.find(item => item.id === patch.id);
-        if (station) Object.assign(station, patch.changes);
-        else if (patch.create) state.stations.push({ id: patch.id, ...patch.changes });
+        if (station) Object.assign(station, changes);
+        else if (patch.create) state.stations.push({ id: patch.id, ...changes });
       }
       if (removeId !== null) state.stations = state.stations.filter(station => station.id !== removeId);
       if (move) {
         const order = new Map(stations.map((station, index) => [station.id, index]));
         state.stations.sort((a, b) => (order.get(a.id) ?? stations.length) - (order.get(b.id) ?? stations.length));
+      }
+      if (linkedStationId !== null) {
+        const linked = state.stations.find(station => station.id === linkedStationId);
+        if (linked) linked.recentId = extraStation.recentId;
       }
       if (onSuccess) onSuccess();
     } catch (error) {
@@ -6368,6 +6459,13 @@ function wire() {
       note.className = "editor-note bad";
       return;
     }
+    try { new URL(url); }
+    catch {
+      const note = $("#st-note");
+      note.textContent = "Enter a valid stream URL.";
+      note.className = "editor-note bad";
+      return;
+    }
     const changes = { name, url, tag: $("#st-tag").value.trim() };
     if (!editingStation) changes.favorite = false;
     else if (editingStation.url !== url) Object.assign(changes, { logo: "", hls: false });
@@ -6400,31 +6498,33 @@ function wire() {
       const bits = [info.contentType, info.bitrate ? info.bitrate + " kbps" : null, info.name, info.title]
         .filter(Boolean)
         .join("  ·  ");
+      const description = bits || displayStationUrl(info.url);
       if (!$("#st-name").value.trim() && info.name) $("#st-name").value = info.name;
 
       if (info.warning) {
         note.className = "editor-note bad";
-        note.textContent = "⚠ " + info.warning + " — " + (bits || info.url);
+        note.textContent = "⚠ " + info.warning + " — " + description;
         return;
       }
 
       if (IS_ANDROID) {
         note.className = "editor-note good";
         note.textContent = "✓ stream answered" + (info.hls ? " (HLS)" : "") +
-          ". Play it to confirm audio on this phone — " + (bits || info.url);
+          ". Play it to confirm audio on this phone — " + description;
         return;
       }
 
       note.textContent = "Server answered — checking the player can decode it…";
       const decoded = await canDecode(info.url, info.hls ? 15000 : 9000, {
         hls: !!info.hls,
+        source: { kind: "station", url },
         directFallbackAllowed: info.directFallbackAllowed === true,
         signal: test.signal,
       });
       if (stale()) return;
       note.className = "editor-note " + (decoded.ok ? "good" : "bad");
       note.textContent = decoded.ok
-        ? "✓ live and playable" + (info.hls ? " (HLS)" : "") + " — " + (bits || info.url)
+        ? "✓ live and playable" + (info.hls ? " (HLS)" : "") + " — " + description
         : "✕ the server answers but nothing plays: " + decoded.reason;
     } catch (e) {
       if (stale()) return;

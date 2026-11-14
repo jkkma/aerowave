@@ -16,7 +16,7 @@ use aerowave_core::icy::{
     decode_text, first_url_in_playlist, head_end, is_hls, is_playable_type, looks_like_playlist,
     metadata_interval, parse_head, socket_host, Head, MetaStrip,
 };
-use aerowave_core::network::StationNetwork;
+use aerowave_core::network::{clear_userinfo, inherit_userinfo, StationNetwork};
 use aerowave_core::stream_tags::StreamTags;
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -141,6 +141,33 @@ pub fn describe(e: &reqwest::Error) -> String {
     out
 }
 
+fn without_userinfo(url: &reqwest::Url) -> String {
+    let mut clean = url.clone();
+    clear_userinfo(&mut clean);
+    clean.into()
+}
+
+fn redirect_target(current: &reqwest::Url, location: &str) -> Result<reqwest::Url, String> {
+    let mut target = current
+        .join(location)
+        .map_err(|error| format!("invalid stream redirect: {error}"))?;
+    inherit_userinfo(current, &mut target);
+    Ok(target)
+}
+
+fn is_redirect(status: reqwest::StatusCode) -> bool {
+    use reqwest::StatusCode;
+
+    matches!(
+        status,
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
+    )
+}
+
 #[derive(Serialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamInfo {
@@ -203,9 +230,7 @@ async fn station_response(
     url: &str,
     want_metadata: bool,
     network: &mut StationNetwork,
-) -> Result<reqwest::Response, ResolveError> {
-    use reqwest::StatusCode;
-
+) -> Result<(reqwest::Response, reqwest::Url), ResolveError> {
     let mut current = reqwest::Url::parse(url.trim())
         .map_err(|error| ResolveError::refused(format!("invalid station URL: {error}")))?;
     for redirects in 0..=MAX_REDIRECTS {
@@ -215,22 +240,22 @@ async fn station_response(
             request = request.header("Icy-MetaData", "1");
         }
         let response = request.send().await.map_err(|error| {
-            ResolveError::new(format!("{current}: {}", describe(&error)), current.as_str())
+            ResolveError::new(
+                format!(
+                    "{}: {}",
+                    without_userinfo(&current),
+                    describe(&error.without_url())
+                ),
+                current.as_str(),
+            )
         })?;
         let status = response.status();
         if status.is_success() {
-            return Ok(response);
+            return Ok((response, current));
         }
-        if !matches!(
-            status,
-            StatusCode::MOVED_PERMANENTLY
-                | StatusCode::FOUND
-                | StatusCode::SEE_OTHER
-                | StatusCode::TEMPORARY_REDIRECT
-                | StatusCode::PERMANENT_REDIRECT
-        ) {
+        if !is_redirect(status) {
             return Err(ResolveError::new(
-                format!("HTTP {status} from {current}"),
+                format!("HTTP {status} from {}", without_userinfo(&current)),
                 current.as_str(),
             ));
         }
@@ -244,9 +269,7 @@ async fn station_response(
             .ok_or_else(|| {
                 ResolveError::refused("the stream redirect had no valid Location header")
             })?;
-        current = current
-            .join(location)
-            .map_err(|error| ResolveError::refused(format!("invalid stream redirect: {error}")))?;
+        current = redirect_target(&current, location).map_err(ResolveError::refused)?;
     }
     unreachable!("the redirect limit returns before another request")
 }
@@ -263,7 +286,7 @@ async fn read_capped(resp: reqwest::Response) -> Result<String, String> {
     let mut body: Vec<u8> = Vec::new();
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| describe(&e))?;
+        let chunk = chunk.map_err(|e| describe(&e.without_url()))?;
         if body.len() + chunk.len() > MAX_PLAYLIST_BYTES {
             return Err(format!(
                 "that playlist ran past the {MAX_PLAYLIST_BYTES}-byte limit"
@@ -296,35 +319,35 @@ async fn resolve(
     let mut current = url.trim().to_string();
 
     for _ in 0..3 {
-        let resp = station_response(clients, &current, want_metadata, network).await?;
+        let (resp, final_url) = station_response(clients, &current, want_metadata, network).await?;
         let content_type = content_type_of(&resp);
-        let final_url = resp.url().to_string();
 
-        if !looks_like_playlist(&final_url, &content_type) {
+        if !looks_like_playlist(final_url.as_str(), &content_type) {
             return Ok(Resolved::Stream {
                 resp,
-                final_url,
+                final_url: final_url.into(),
                 content_type,
             });
         }
 
         let body = read_capped(resp)
             .await
-            .map_err(|message| ResolveError::new(message, final_url.clone()))?;
+            .map_err(|message| ResolveError::new(message, final_url.as_str()))?;
         if is_hls(&body) {
             // Not a failure - a fork. The caller is told it is HLS so the
             // front end can hand it to hls.js instead of to <audio>.
             return Ok(Resolved::Hls {
-                final_url,
+                final_url: final_url.into(),
                 content_type,
             });
         }
-        match first_url_in_playlist(&body, &final_url, &content_type) {
+        match first_url_in_playlist(&body, final_url.as_str(), &content_type) {
             Some(next) => current = next,
             None => {
                 return Err(ResolveError::refused(format!(
-                    "{final_url} is a playlist with no stream URL in it"
-                )))
+                    "{} is a playlist with no stream URL in it",
+                    without_userinfo(&final_url)
+                )));
             }
         }
     }
@@ -409,7 +432,8 @@ async fn icy_connect_once(
     want_metadata: bool,
     network: &mut StationNetwork,
 ) -> Result<(tokio::net::TcpStream, Head, Vec<u8>), IcyFailure> {
-    let parsed = reqwest::Url::parse(url.trim()).map_err(|e| unproven(format!("{url}: {e}")))?;
+    let parsed = reqwest::Url::parse(url.trim())
+        .map_err(|e| unproven(format!("invalid station URL: {e}")))?;
     if parsed.scheme() != "http" {
         return Err(unproven("only a plaintext URL can be read this way"));
     }
@@ -439,9 +463,27 @@ async fn icy_connect_once(
     // HTTP/1.0 is what the players these servers were written for send, and
     // it settles the question of keeping the connection open afterwards.
     let metadata = if want_metadata { "Icy-MetaData: 1\r\n" } else { "" };
+    // Build the header the same way as the HTTP path, including URL percent
+    // decoding. Only the header is needed; no request is sent through reqwest.
+    let authorization = if parsed.username().is_empty() && parsed.password().is_none() {
+        String::new()
+    } else {
+        let clients = station_clients(&PROBE_CLIENTS, Duration::from_secs(5)).map_err(unproven)?;
+        let request = clients
+            .get(*network)
+            .get(parsed.clone())
+            .build()
+            .map_err(|error| unproven(describe(&error.without_url())))?;
+        request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| format!("Authorization: {value}\r\n"))
+            .unwrap_or_default()
+    };
     let request = format!(
         "GET {target} HTTP/1.0\r\nHost: {host}:{port}\r\nUser-Agent: {UA}\r\n\
-         {metadata}Connection: close\r\n\r\n"
+         {metadata}{authorization}Connection: close\r\n\r\n"
     );
     // Bound the entire head, not each read: a server trickling a byte at a
     // time otherwise keeps the connection pending forever.
@@ -528,10 +570,8 @@ async fn icy_connect(
                 return Err(unproven("the stream redirect had no Location header"));
             };
             let base = reqwest::Url::parse(&current)
-                .map_err(|e| unproven(format!("{current}: {e}")))?;
-            let next = base
-                .join(location)
-                .map_err(|e| unproven(format!("invalid stream redirect: {e}")))?;
+                .map_err(|e| unproven(format!("invalid station URL: {e}")))?;
+            let next = redirect_target(&base, location).map_err(unproven)?;
             if next.scheme() != "http" {
                 return Err(unproven("the raw ICY redirect was not plaintext HTTP"));
             }
@@ -673,10 +713,9 @@ async fn http_probe(
     let clients =
         station_clients(&PROBE_CLIENTS, Duration::from_secs(5)).map_err(ResolveError::refused)?;
     let (resp, direct, content_type) = if skip_resolve {
-        let resp = station_response(clients, url, true, network).await?;
+        let (resp, final_url) = station_response(clients, url, true, network).await?;
         let content_type = content_type_of(&resp);
-        let final_url = resp.url().to_string();
-        (resp, final_url, content_type)
+        (resp, final_url.into(), content_type)
     } else {
         match resolve(clients, url, true, network).await? {
             Resolved::Hls {
@@ -753,7 +792,7 @@ async fn http_probe(
                 }
             }
             Some(Err(e)) => {
-                return Err(ResolveError::new(describe(&e), direct.clone()));
+                return Err(ResolveError::new(describe(&e.without_url()), direct.clone()));
             }
             None => break,
         }
@@ -859,9 +898,9 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
     }
 }
 
-/// One file, fetched once: no playlist following, no ICY metadata, a hard
-/// size cap and a deadline. The HLS side wants exactly this - hls.js walks
-/// the playlists itself and only needs each individual file handed back.
+/// Fetch one public HLS resource with a hard size cap and deadline. The
+/// caller's client has automatic redirects disabled so this loop can check
+/// the destination and scope authorization again for every hop.
 pub async fn fetch_once(
     client: &reqwest::Client,
     url: &str,
@@ -869,14 +908,37 @@ pub async fn fetch_once(
     cap: usize,
 ) -> Result<crate::hls::Fetched, String> {
     let work = async {
-        let mut request = client.get(url);
-        if let Some((start, end)) = range {
-            request = request.header("Range", format!("bytes={start}-{end}"));
-        }
-        let resp = request.send().await.map_err(|e| describe(&e))?;
+        let mut url = reqwest::Url::parse(url).map_err(|e| format!("invalid HLS URL: {e}"))?;
+        let mut redirects = 0;
+        let resp = loop {
+            if !aerowave_core::network::public_http_destination_allowed(
+                url.scheme(),
+                url.host_str().unwrap_or(""),
+            ) {
+                return Err("that HLS request does not lead to a public HTTP address".into());
+            }
+            let mut request = client.get(url.clone());
+            if let Some((start, end)) = range {
+                request = request.header("Range", format!("bytes={start}-{end}"));
+            }
+            let resp = request.send().await.map_err(|e| describe(&e.without_url()))?;
+            if !is_redirect(resp.status()) {
+                break resp;
+            }
+            if redirects == MAX_REDIRECTS {
+                return Err("too many HLS redirects".into());
+            }
+            let location = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or("the HLS redirect had no valid Location header")?;
+            url = redirect_target(&url, location)?;
+            redirects += 1;
+        };
         let status = resp.status().as_u16();
         let content_type = content_type_of(&resp);
-        let final_url = resp.url().to_string();
+        let final_url = without_userinfo(&url);
 
         if let Some(len) = resp.content_length() {
             if len as usize > cap {
@@ -886,7 +948,7 @@ pub async fn fetch_once(
         let mut body: Vec<u8> = Vec::new();
         let mut chunks = resp.bytes_stream();
         while let Some(chunk) = chunks.next().await {
-            let chunk = chunk.map_err(|e| describe(&e))?;
+            let chunk = chunk.map_err(|e| describe(&e.without_url()))?;
             if body.len() + chunk.len() > cap {
                 return Err(format!("that file ran past the {cap}-byte limit"));
             }
@@ -905,7 +967,7 @@ pub async fn fetch_once(
     };
     match tokio::time::timeout(Duration::from_secs(20), work).await {
         Ok(result) => result,
-        Err(_) => Err(format!("timed out fetching {url}")),
+        Err(_) => Err("timed out fetching the HLS resource".into()),
     }
 }
 

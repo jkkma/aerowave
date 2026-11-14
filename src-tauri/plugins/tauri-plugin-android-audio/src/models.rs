@@ -18,6 +18,8 @@ pub struct AlarmLogExport {
 pub struct PlayPayload {
     pub url: String,
     pub source_url: String,
+    #[serde(default)]
+    pub station_url: Option<String>,
     pub title: String,
     pub station_id: Option<String>,
     pub volume: f64,
@@ -105,6 +107,10 @@ pub struct PlaybackState {
     pub status: String,
     pub generation: i64,
     pub source_url: String,
+    #[serde(default)]
+    pub station_url: Option<String>,
+    #[serde(default)]
+    pub manifest_url: Option<String>,
     pub title: String,
     pub station_id: Option<String>,
     pub position_ms: i64,
@@ -123,6 +129,8 @@ impl Default for PlaybackState {
             status: "idle".into(),
             generation: 0,
             source_url: String::new(),
+            station_url: None,
+            manifest_url: None,
             title: String::new(),
             station_id: None,
             position_ms: 0,

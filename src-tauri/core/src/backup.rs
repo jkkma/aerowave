@@ -128,20 +128,23 @@ fn alarm_options(object: &Map<String, Value>, name: &str, stations: &HashSet<&st
     object.get("source").map(|v| source(v, &format!("{name}.source"), stations, warnings)).transpose().map(|v| v.unwrap_or(false))
 }
 
-fn validate_station(station: &Value, name: &str) -> Result<String, String> {
+fn validate_station(station: &Value, name: &str) -> Result<(), String> {
     let station = object(station, name)?;
     id(field(station, "id", name)?, &format!("{name}.id"))?;
+    if let Some(recent_id) = station.get("recentId").filter(|value| !value.is_null()) {
+        id(recent_id, &format!("{name}.recentId"))?;
+    }
     string(field(station, "name", name)?, &format!("{name}.name"))?;
     let address = string(field(station, "url", name)?, &format!("{name}.url"))?;
     validate_station_url(address, &format!("{name}.url"))
 }
 
-fn validate_station_url(address: &str, name: &str) -> Result<String, String> {
+fn validate_station_url(address: &str, name: &str) -> Result<(), String> {
     let url = Url::parse(address).map_err(|_| format!("{name} is invalid"))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err(format!("{name} must be an HTTP(S) address"));
     }
-    Ok(url.to_string())
+    Ok(())
 }
 
 fn validate_data(data: &Value) -> Result<Vec<String>, String> {
@@ -177,11 +180,11 @@ fn validate_data(data: &Value) -> Result<Vec<String>, String> {
     if let Some(v) = settings.get("recentStations") {
         let recent = array(v, "data.settings.recentStations")?;
         if recent.len() > 20 { return Err("data.settings.recentStations exceeds 20".into()); }
-        let mut seen = HashSet::new();
         for (index, station) in recent.iter().enumerate() {
             let name = format!("data.settings.recentStations[{index}]");
-            let url = validate_station(station, &name)?;
-            if !seen.insert(url) { return Err("recentStations contains a duplicate URL".into()); }
+            // Keep the actual history snapshots. The Recent view resolves
+            // them against saved stations and handles duplicate identities.
+            validate_station(station, &name)?;
         }
     }
     Ok(warnings)
@@ -247,7 +250,10 @@ pub fn validate_live_edit(before: &Value, after: &Value) -> Result<(), String> {
     if size > MAX_BYTES && size > encode_document(before)?.len() {
         return Err("This change would grow the setup beyond the 2 MiB backup limit.".into());
     }
+    validate_live_station_urls(before, after)
+}
 
+pub fn validate_live_station_urls(before: &Value, after: &Value) -> Result<(), String> {
     for (pointer, label) in [
         ("/stations", "Saved station"),
         ("/settings/recentStations", "Recent station"),
@@ -302,8 +308,9 @@ mod tests {
     fn live_edits_reject_malformed_station_urls_and_allow_legacy_repairs() {
         let before = sample();
         let mut invalid = before.clone();
-        invalid["stations"][0]["url"] = Value::from("https://");
+        invalid["stations"][0]["url"] = Value::from("https://[abc]");
         assert!(validate_live_edit(&before, &invalid).is_err());
+        assert!(validate_live_station_urls(&before, &invalid).is_err());
         let mut settings_edit = invalid.clone();
         settings_edit["settings"]["volume"] = Value::from(0.4);
         assert!(validate_live_edit(&invalid, &settings_edit).is_ok());
@@ -384,6 +391,29 @@ mod tests {
         let encoded = encode(&sample()).unwrap();
         assert_eq!(validate(&encoded).unwrap(), sample());
         assert!(validate(&format!("{}{}", encoded, " ".repeat(MAX_BYTES))).is_err());
+    }
+
+    #[test]
+    fn recent_history_with_default_port_variants_still_exports_and_restores() {
+        let mut data = sample();
+        data["settings"]["recentStations"].as_array_mut().unwrap().push(serde_json::json!({
+            "id": "other", "name": "Other", "url": "https://example.com:443/live"
+        }));
+        let restored = prepare_restore(&encode(&data).unwrap()).unwrap();
+        assert_eq!(restored["settings"]["recentStations"], data["settings"]["recentStations"]);
+    }
+
+    #[test]
+    fn promoted_station_preserves_its_history_link_in_a_backup() {
+        let mut data = sample();
+        data["stations"][0]["recentId"] = Value::from("discovery");
+        data["settings"]["recentStations"][0]["id"] = Value::from("discovery");
+        let restored = prepare_restore(&encode(&data).unwrap()).unwrap();
+        assert_eq!(restored["stations"][0]["id"], "news");
+        assert_eq!(restored["stations"][0]["recentId"], "discovery");
+        assert_eq!(restored["alarms"][0]["source"]["stationId"], "news");
+        data["stations"][0]["recentId"] = Value::from(42);
+        assert!(encode(&data).unwrap_err().contains("recentId must be text"));
     }
 
     #[test]

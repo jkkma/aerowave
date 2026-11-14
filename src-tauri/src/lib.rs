@@ -583,7 +583,7 @@ async fn hls_response(
             reply(got.status, got.body, &content_type, &final_url)
         }
         Err(e) => {
-            eprintln!("aerowave hls: {url}: {e}");
+            eprintln!("aerowave hls: {e}");
             reply(502, e.into_bytes(), "text/plain", "")
         }
     }

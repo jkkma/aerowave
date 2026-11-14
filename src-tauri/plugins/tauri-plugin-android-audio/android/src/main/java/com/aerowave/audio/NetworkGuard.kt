@@ -8,17 +8,19 @@ import java.net.Proxy
 import java.net.URI
 import java.net.UnknownHostException
 import okhttp3.Dns
+import okhttp3.Credentials
+import okhttp3.HttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
 
 internal object NetworkGuard {
-  fun client(allowLoopback: Boolean, userAgent: String): OkHttpClient =
+  fun client(allowLoopback: Boolean, userAgent: String, credentialOrigin: HttpUrl? = null): OkHttpClient =
     OkHttpClient.Builder()
       // A proxy could resolve or connect on our behalf and evade the address check.
       .proxy(Proxy.NO_PROXY)
       .dns(PublicDns(allowLoopback))
-      .addNetworkInterceptor(GuardInterceptor(allowLoopback, userAgent))
+      .addNetworkInterceptor(GuardInterceptor(allowLoopback, userAgent, credentialOrigin))
       .build()
 
   fun validateInitialUrl(url: String, allowLoopback: Boolean) {
@@ -29,6 +31,13 @@ internal object NetworkGuard {
     }
     validateDestination(uri.scheme, uri.host, allowLoopback)
   }
+
+  internal fun sameOrigin(first: HttpUrl, second: HttpUrl): Boolean =
+    first.scheme == second.scheme && first.host == second.host && first.port == second.port
+
+  internal fun basicAuthorization(url: HttpUrl): String? =
+    if (url.encodedUsername.isEmpty() && url.encodedPassword.isEmpty()) null
+    else Credentials.basic(url.username, url.password)
 
   fun isLoopbackUrl(url: String): Boolean {
     return try {
@@ -117,6 +126,7 @@ internal object NetworkGuard {
   private class GuardInterceptor(
     private val allowLoopback: Boolean,
     private val userAgent: String,
+    private val credentialOrigin: HttpUrl?,
   ) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
       val request = chain.request()
@@ -126,12 +136,16 @@ internal object NetworkGuard {
         throw IOException(error.message, error)
       }
       // A network interceptor runs again after each redirect, so every target is checked.
-      return chain.proceed(
-        request.newBuilder()
-          .header("User-Agent", userAgent)
-          .header("Icy-MetaData", "1")
-          .build(),
-      )
+      val guarded = request.newBuilder()
+        .header("User-Agent", userAgent)
+        .header("Icy-MetaData", "1")
+      // An explicit child URI may carry its own credentials. Bind both forms
+      // of credentials to their origin even when OkHttp follows a redirect.
+      val original = chain.call().request().url
+      val authorization = original.takeIf { sameOrigin(it, request.url) }?.let(::basicAuthorization)
+        ?: credentialOrigin?.takeIf { sameOrigin(it, request.url) }?.let(::basicAuthorization)
+      if (authorization != null) guarded.header("Authorization", authorization)
+      return chain.proceed(guarded.build())
     }
   }
 }

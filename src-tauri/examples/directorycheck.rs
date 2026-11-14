@@ -212,8 +212,44 @@ async fn check_case(
     println!("PASS: {label}");
 }
 
+async fn check_artwork_does_not_share_private_dns_names() {
+    let (origin, observed, task) = fixture(Failure::Status(200), false, true, false).await;
+    let discovery = format!("{origin}/json/servers");
+    let client = browse::DirectoryClient::with_endpoints(
+        discovery, "bad.example", "example", Arc::new(move |host| format!("{origin}/{host}")),
+    ).unwrap();
+    let url = "https://station.example/live";
+    for answers in [vec![], vec!["192.168.2.20:0"], vec!["8.8.8.8:0", "127.0.0.1:0"]] {
+        let mut public_hosts = Default::default();
+        browse::art_candidates(&client, url, url, "", &mut public_hosts, |_| async move {
+            Ok(answers.into_iter().map(|answer| answer.parse().unwrap()).collect())
+        }).await.unwrap();
+        assert_eq!(observed.discoveries.load(Ordering::SeqCst), 0);
+        assert!(observed.requests.lock().unwrap().is_empty());
+    }
+    let mut public_hosts = Default::default();
+    let failure = browse::art_candidates(&client, url, url, "", &mut public_hosts, |_| async {
+        Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+    }).await;
+    assert!(failure.is_err(), "temporary DNS failure must leave artwork retryable");
+    assert_eq!(observed.discoveries.load(Ordering::SeqCst), 0);
+    assert!(observed.requests.lock().unwrap().is_empty());
+
+    // A later artwork retry has fresh DNS results.
+    let mut public_hosts = Default::default();
+    browse::art_candidates(&client, url, url, "", &mut public_hosts, |_| async {
+        Ok(vec!["8.8.8.8:0".parse().unwrap()])
+    }).await.unwrap();
+    let requests = observed.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("GET /bad.example/json/stations/byurl?url=https%3A%2F%2Fstation.example%2Flive "));
+    task.abort();
+    println!("PASS: artwork lookup only submits URLs with exclusively public DNS answers");
+}
+
 #[tokio::main]
 async fn main() {
+    check_artwork_does_not_share_private_dns_names().await;
     check_case(
         "closed connection retries the sole mirror",
         Failure::Closed,

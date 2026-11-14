@@ -40,10 +40,12 @@ pub fn first_url_in_playlist(body: &str, base_url: &str, content_type: &str) -> 
         if candidate.is_empty() {
             return None;
         }
-        base.join(candidate)
-            .ok()
-            .filter(|url| matches!(url.scheme(), "http" | "https"))
-            .map(|url| url.to_string())
+        let mut url = base.join(candidate).ok()?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return None;
+        }
+        crate::network::inherit_userinfo(&base, &mut url);
+        Some(url.into())
     };
 
     let first = body.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');

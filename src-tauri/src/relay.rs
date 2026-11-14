@@ -264,7 +264,7 @@ impl Relay {
             // The player only ever sees a status code, so the reason goes to
             // the log. `probe_stream` is what puts words on the screen.
             Err(e) => {
-                eprintln!("aerowave relay: {url}: {e}");
+                eprintln!("aerowave relay: {e}");
                 return reply(&mut socket, "502 Bad Gateway").await;
             }
         };

@@ -189,6 +189,78 @@ test("a direct fallback starts metadata polling after the relayed load failed", 
   assert.equal(h.el("#np-track").textContent, "Recovered song");
 });
 
+test("a station alarm fades in after a successful LAN direct fallback", async () => {
+  let attempts = 0;
+  const h = createHarness({
+    onPlay: () => attempts++ === 0 ? Promise.reject(Object.assign(new Error("relay failed"), { name: "NotSupportedError" })) : undefined,
+    invoke: (command, args) => command === "probe_stream"
+      ? { url: args.url, hls: false, directFallbackAllowed: true } : undefined,
+  });
+  h.evaluate("onAlarmFire({alarmId:'wake',occurrenceId:'1',kind:'station',url:'http://192.168.1.22/live',title:'Radio',volume:0.9,fadeSecs:5,snoozeMins:5})");
+  await flush();
+  assert.equal(h.audios[0].src, "http://192.168.1.22/live");
+  h.audios[0].readyState = 4;
+  h.audios[0].currentTime = 1;
+  await h.audios[0].dispatch("timeupdate");
+  assert.ok(h.evaluate("player.fadeTimer"), "the advancing direct stream must fade in");
+  h.evaluate("const afterFade = Date.now() + 6000; Date.now = () => afterFade;");
+  await h.fireTimer(h.evaluate("player.fadeTimer"));
+  assert.equal(h.audios[0].volume, 0.9);
+});
+
+for (const started of [false, true]) {
+  test(`ordinary radio reconnects when audio ${started ? "stops advancing" : "never starts"} without a media error`, async () => {
+    const pending = deferred();
+    const h = createHarness({ onPlay: () => started ? undefined : pending.promise });
+    h.evaluate("state.settings.showMetadata = false; let clock = 0; Date.now = () => clock");
+    const play = h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Radio' })");
+    await flush();
+    if (started) {
+      await h.audios[0].dispatch("playing");
+      h.audios[0].readyState = 4;
+      h.audios[0].currentTime = 3;
+      h.evaluate("clock = 29_000");
+      await h.audios[0].dispatch("timeupdate");
+      h.evaluate("clock = 32_000");
+      for (const id of [...h.timers.keys()]) await h.fireTimer(id);
+      assert.equal(h.evaluate("player.retries"), 0);
+    }
+    await h.audios[0].dispatch("waiting");
+    h.evaluate("clock = 120_000");
+    for (const id of [...h.timers.keys()]) await h.fireTimer(id);
+    assert.equal(h.evaluate("player.retries"), 1);
+    assert.equal(h.audios[0].paused, true);
+    assert.match(h.el("#statusline").textContent, /Reconnecting/);
+    pending.resolve();
+    await play;
+  });
+}
+
+test("ordinary playback and editor TEST send the submitted station to the relay", async () => {
+  const submitted = "http://listener:secret@192.168.1.22/listen";
+  const resolved = "http://listener:secret@192.168.1.22/live";
+  const h = createHarness({ invoke: (command) => command === "probe_stream"
+    ? { url: resolved, hls: false, directFallbackAllowed: true } : undefined });
+  h.context.submitted = submitted;
+  await h.evaluate("play({ kind: 'station', url: submitted, title: 'Radio' })");
+  assert.equal(h.calls.find(call => call.command === "relay_url").args.url, submitted);
+  h.evaluate("onStreamTitle({ url: submitted, title: 'Current song' })");
+  assert.equal(h.el("#np-track").textContent, "Current song");
+
+  h.evaluate("wire()");
+  h.el("#st-url").value = submitted;
+  const testPending = h.el("#st-test").dispatch("click");
+  await flush();
+  assert.equal(h.calls.filter(call => call.command === "relay_url").at(-1).args.url, submitted);
+  h.audios[1].error = { code: 4 };
+  await h.audios[1].dispatch("error");
+  assert.equal(h.audios[1].src, resolved);
+  await h.audios[1].dispatch("canplay");
+  await testPending;
+  assert.match(h.el("#st-note").textContent, /playable/);
+  assert.doesNotMatch(h.el("#st-note").textContent, /secret/);
+});
+
 test("a superseded relay play rejection leaves the direct attempt alone", async () => {
   const relayPlay = deferred();
   const directPlay = deferred();
@@ -263,7 +335,7 @@ test("an approved local station still plays if relay registration is unavailable
   assert.equal(h.audios[0].paused, false);
 });
 
-test("a reconnect routes the newly resolved public URL through the relay after local direct playback", async () => {
+test("a reconnect uses the original relay route after resolving a public destination for a local station", async () => {
   let probes = 0;
   const h = createHarness({ invoke: (command, args) => {
     if (command === "probe_stream") return ++probes === 1
@@ -281,7 +353,8 @@ test("a reconnect routes the newly resolved public URL through the relay after l
     await h.fireTimer(h.evaluate("player.retryTimer"));
   }
   assert.match(h.audios[0].src, /^http:\/\/127\.0\.0\.1\/relay\//);
-  assert.equal(h.calls.filter(({ command }) => command === "relay_url").at(-1).args.url, "https://radio.test/new");
+  assert.equal(h.calls.filter(({ command }) => command === "relay_url").at(-1).args.url, "http://192.168.1.22/live");
+  assert.equal(h.evaluate("player.resolved"), "https://radio.test/new");
 });
 
 test("a direct fallback resumes polling after a relay title and ignores late relay titles", async () => {
@@ -823,10 +896,10 @@ test("Android rebuilds a restored paused station when the user resumes after pro
   assert.equal(h.calls.filter(({ command }) => command === "plugin:android-audio|pause").length, 1);
   assert.equal(h.calls.some(({ command }) => command === "plugin:android-audio|stop"), false);
   assert.equal(h.calls.find(({ command }) => command === "probe_stream").args.url, "https://radio.test/original");
-  assert.equal(h.calls.find(({ command }) => command === "relay_url").args.url, "https://radio.test/fresh-upstream");
+  assert.equal(h.calls.find(({ command }) => command === "relay_url").args.url, "https://radio.test/original");
   const replay = h.calls.find(({ command }) => command === "plugin:android-audio|play");
-  assert.equal(replay.args.payload.url, "http://127.0.0.1/relay/https%3A%2F%2Fradio.test%2Ffresh-upstream");
-  assert.equal(replay.args.payload.sourceUrl, "https://radio.test/fresh-upstream");
+  assert.equal(replay.args.payload.url, "http://127.0.0.1/relay/https%3A%2F%2Fradio.test%2Foriginal");
+  assert.equal(replay.args.payload.sourceUrl, "https://radio.test/original");
   assert.equal(replay.args.payload.stationId, "saved");
   assert.equal(h.evaluate("player.source.nativeRestored"), false);
 });
@@ -896,7 +969,8 @@ test("later reconnects resolve the station's own URL again", async () => {
     ["https://radio.test/live", "https://radio.test/live"]);
   assert.deepEqual(
     h.calls.filter(({ command }) => command === "relay_url").map(({ args }) => args.url),
-    ["https://node1.radio.test/live", "https://node1.radio.test/live", "https://node2.radio.test/live"]);
+    ["https://radio.test/live", "https://radio.test/live", "https://radio.test/live"]);
+  assert.equal(h.evaluate("player.resolved"), "https://node2.radio.test/live");
 });
 
 test("a reconnect that finds the station is no longer HLS leaves hls.js", async () => {
@@ -911,7 +985,7 @@ test("a reconnect that finds the station is no longer HLS leaves hls.js", async 
   }
   assert.equal(h.evaluate("player.hls"), false);
   assert.equal(h.hlsInstances.at(-1).destroyed, true);
-  assert.equal(h.calls.filter(({ command }) => command === "relay_url").at(-1).args.url, "https://radio.test/live.mp3");
+  assert.equal(h.calls.filter(({ command }) => command === "relay_url").at(-1).args.url, "https://radio.test/listen");
 });
 
 test("an Android reconnect that finds the station is no longer HLS plays it through the relay", async () => {
@@ -936,5 +1010,5 @@ test("an Android reconnect that finds the station is no longer HLS plays it thro
   const plays = h.calls.filter(({ command }) => command === "plugin:android-audio|play");
   assert.equal(plays.length, 3);
   assert.equal(plays.at(-1).args.payload.isHls, false);
-  assert.equal(plays.at(-1).args.payload.url, "http://127.0.0.1/relay/" + encodeURIComponent("https://radio.test/live.mp3"));
+  assert.equal(plays.at(-1).args.payload.url, "http://127.0.0.1/relay/" + encodeURIComponent("https://radio.test/listen"));
 });

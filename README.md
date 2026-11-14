@@ -24,7 +24,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   preserves station changes saved while it was waiting.
 - **Recent** keeps the last 20 stations that actually started playing, newest
   first, including stations tried in Browse. Unsaved discoveries can be saved
-  from that list. Saved stations reflect their current names and stream URLs
+  from that list. An edited station saved from Recent keeps its link to that
+  history entry. Saved stations reflect their current names and stream URLs
   after edits. History survives restarting the app and travels with backups.
 - Drag a station with the mouse to change its **Saved order**, including within
   search results or favourites. The list scrolls as you drag near its edges.
@@ -81,8 +82,10 @@ Wake up to a radio station, or to a random track out of a folder you point it at
 - Ordinary station discovery and relaying check the destination of each request,
   including redirects, playlist entries and the raw ICY fallback. Private and
   loopback IP literals, `localhost`, `.local` and `.home.arpa` names, and single-label
-  hostnames allow ordinary LAN radio. Once a chain reaches a public broadcaster,
-  its later connections require public addresses. The probe and relay connect
+  hostnames allow ordinary LAN radio when entered manually. Browse accepts
+  public stations. Once a chain reaches a public broadcaster, its later
+  connections require public addresses. Basic Auth embedded in a station URL
+  follows requests on the same scheme, host and port. The probe and relay connect
   directly so the address check applies to the socket they open. Networks that
   require a system proxy cannot use these paths.
 - **HLS plays**, which is about 6% of the radio-browser directory — some 3,700
@@ -144,6 +147,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   ones, so the fallback works for stations saved under their submitted address. Temporary lookup failures
   retry with a bounded delay. Artwork requests validate public destinations,
   DNS answers and redirects, using the same direct-connection rules as HLS.
+- Directory artwork lookups use public station URLs without credentials, query
+  strings or fragments. They skip local addresses and check the DNS answers
+  before sending a URL to the directory.
 - A short-lived second connection is still opened once when a station starts,
   for the bitrate, genre and station name — none of which change. It repeats
   once a minute only for a station the relay is not carrying, and gives up
@@ -163,11 +169,12 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   socket and the head is parsed by hand. Plaintext only: ICY predates TLS and the
   servers still speaking it are `http://` to a one.
 - A dropped stream reconnects four times with a lengthening backoff. The first
-  attempt reuses the address playback started from; from the second, the
-  station's own URL is resolved again, because that address is where its
-  redirects led and can be one node of a load balancer or carry a token that
-  expires. Brief connections that drop again consume that budget; sustained
-  decoded playback restores it.
+  HLS retry reuses the current manifest, and later retries resolve the submitted
+  address again to pick up a new server or token. Ordinary relay connections
+  start from the submitted address each time. On desktop, 30 seconds without
+  decoded audio progress starts recovery, including when a connection opens
+  but stays silent. Brief connections that drop again consume the retry budget.
+  Sustained decoded playback restores it.
 - The now-playing poll still talks to the broadcaster directly rather than to
   the relay: it wants a title, not audio, and pointing it at the relay would
   only hand it back the app's own stream.
@@ -452,7 +459,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   completion is safe across restart; if neither write succeeds, keep Aerowave
   open until it saves. Editing or re-enabling an alarm creates a fresh arm, and
   a stale editor cannot silently re-enable one that already rang.
-- Fade-in ramps the volume over up to 90 s.
+- Fade-in ramps the volume over up to 90 s. On desktop the ramp starts when
+  playback starts, including after the player switches to a working LAN connection.
 - **Everything falls back to the backup folder.** Set one in Settings and it stands in
   whenever an alarm's own source will not make a sound: a station that 404s, a
   stream whose playback clock has not advanced within twelve seconds, a station

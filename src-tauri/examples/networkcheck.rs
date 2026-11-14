@@ -340,6 +340,62 @@ async fn wrapped_icy_fallback() {
     println!("PASS: playlist and HTTP redirect wrappers fall through to their Shoutcast-v1 endpoint for probes and relay playback");
 }
 
+async fn authenticated_station() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let other = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let other_addr = other.local_addr().unwrap();
+    let target = tokio::spawn(async move {
+        let (mut socket, _) = other.accept().await.unwrap();
+        let head = request(&mut socket).await;
+        assert!(!head.to_ascii_lowercase().contains("authorization:"));
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsong").await.unwrap();
+    });
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let head = request(&mut socket).await;
+            let authorized = head.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization") && value.trim() == "Basic dTpwQHNz"
+                })
+            });
+            let path = head.split_whitespace().nth(1).unwrap();
+            let answer = if !authorized {
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+            } else {
+                match path {
+                    "/redirect" => format!("HTTP/1.1 302 Found\r\nLocation: http://{addr}/list.m3u\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                    "/list.m3u" => "HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nContent-Length: 5\r\nConnection: close\r\n\r\n/song".to_string(),
+                    "/song" => "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsong".to_string(),
+                    "/icy" => "ICY 200 OK\r\nContent-Type: audio/mpeg\r\n\r\nsong".to_string(),
+                    "/other" => format!("HTTP/1.1 302 Found\r\nLocation: http://{other_addr}/song\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                    "/error" => "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                    path => panic!("unexpected path {path}"),
+                }
+            };
+            socket.write_all(answer.as_bytes()).await.unwrap();
+        }
+    });
+    let base = format!("http://u:p%40ss@{addr}");
+    let relay = relay::Relay::start(Arc::new(|_, _| {})).await.unwrap();
+    for path in ["/redirect", "/icy"] {
+        let info = stream::probe(&format!("{base}{path}"), false, false).await.unwrap();
+        let final_path = if path == "/redirect" { "/song" } else { path };
+        assert_eq!(info.url, format!("{base}{final_path}"));
+        let response = reqwest::get(relay.route(&info.url)).await.unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"song");
+    }
+    let other = stream::probe(&format!("{base}/other"), false, false).await.unwrap();
+    assert_eq!(other.url, format!("http://{other_addr}/song"));
+    target.await.unwrap();
+    let error = stream::probe(&format!("{base}/error"), false, false).await.unwrap_err();
+    assert!(error.contains("403 Forbidden"));
+    assert!(!error.contains("u:p%40ss"));
+    println!("PASS: station authorization survives same-origin redirects, playlists and ICY, and stays off cross-origin requests");
+}
+
 async fn large_interval() {
     let interval = 512 * 1024 + 1;
     let mut body = vec![b'a'; interval];
@@ -433,6 +489,7 @@ async fn guarded_redirects() {
     // the real redirect policy to run entirely on a local server. Production
     // uses PublicDns without any address overrides.
     let client = hls::client_builder()
+        .redirect(reqwest::redirect::Policy::none())
         .resolve("station.test", addr)
         .resolve("cdn.test", addr)
         .build()
@@ -561,6 +618,7 @@ async fn local_files() {
 
 #[tokio::main]
 async fn main() {
+    authenticated_station().await;
     raw_icy_refuses_non_audio().await;
     raw_icy_ip_literals().await;
     #[cfg(target_os = "linux")]

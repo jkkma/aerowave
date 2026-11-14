@@ -11,6 +11,8 @@
 //! saved is an ordinary station like any other.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -18,10 +20,11 @@ use aerowave_core::directory::{
     art_query_urls, bitrate_band_by_key, clean_name, directory_failure_forgets_mirror,
     directory_host_candidates, directory_page_window, directory_tag_buckets, exact_tag_filter,
     first_tag, image_kind, is_country_code, is_directory_host, listen_url, playable_url,
-    select_directory_host, sort_key, stream_key, stream_matches, tally_directory_facets,
+    resolved_directory_url, select_directory_host, sort_key, stream_key, stream_matches,
+    tally_directory_facets,
     DirectoryFacetEntry, DirectoryFailure, BITRATE_BANDS, DIRECTORY_CODECS,
 };
-use aerowave_core::network::public_http_destination_allowed;
+use aerowave_core::network::{public_addresses, public_http_destination_allowed};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use futures_util::StreamExt;
@@ -505,6 +508,9 @@ pub struct BrowseStation {
     /// the stream when duplicates are compared, and it is what older versions
     /// saved, but it may carry a token or a timestamp that does not last.
     pub resolved_url: String,
+    /// Other submitted addresses the directory resolved to the same stream.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     pub homepage: String,
     /// The first tag, ready to go into a saved station.
     pub tag: String,
@@ -865,17 +871,46 @@ pub async fn logo(url: &str) -> Result<String, LogoFailure> {
 
 /// Artwork submitted for one exact stream URL, still carrying both URL forms
 /// long enough to verify the directory did not answer with a namesake.
-async fn art_candidates(
+pub(crate) async fn art_candidates<F>(
+    directory: &DirectoryClient,
     query_url: &str,
     requested_url: &str,
     requested_resolved: &str,
-) -> Result<Vec<String>, String> {
+    public_hosts: &mut HashMap<String, Result<bool, &'static str>>,
+    resolve: impl FnOnce(String) -> F,
+) -> Result<Vec<String>, String>
+where
+    F: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let url = reqwest::Url::parse(query_url).map_err(|error| error.to_string())?;
+    let host = url.host_str().unwrap_or("").trim_matches(['[', ']']);
+    if host.parse::<IpAddr>().is_err() {
+        let host = host.to_owned();
+        let public = match public_hosts.get(&host) {
+            Some(&public) => public,
+            None => {
+                // DNS can make a public-looking name private. Inspect all its
+                // answers before sharing the URL, within the lookup budget.
+                let public = match tokio::time::timeout(Duration::from_secs(8), resolve(host.clone())).await {
+                    Ok(Ok(addrs)) => Ok(public_addresses(&addrs)),
+                    Ok(Err(_)) => Err("Could not resolve the station host for artwork lookup"),
+                    Err(_) => Err("Station host resolution timed out during artwork lookup"),
+                };
+                public_hosts.insert(host, public);
+                public
+            }
+        };
+        if !public? {
+            return Ok(Vec::new());
+        }
+    }
     let params = &[("url", query_url.to_string())];
-    let raw: Vec<Raw> = directory_client()?
+    let raw: Vec<Raw> = directory
         .get_json(
             "stations/byurl",
             params,
-            Duration::from_secs(20),
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
             MAX_BODY_BYTES,
             "radio-browser sent something unreadable",
         )
@@ -917,6 +952,7 @@ pub async fn art(
     if queries.exact.is_empty() {
         return Ok(None);
     }
+    let directory = directory_client()?;
 
     let excluded: HashSet<&str> = excluded_urls
         .iter()
@@ -926,13 +962,18 @@ pub async fn art(
     let mut lookup_failure: Option<String> = None;
     let mut tried: HashSet<String> = HashSet::new();
     let mut fetch_failure: Option<String> = None;
+    let mut public_hosts = HashMap::new();
     for phase in [&queries.exact, &queries.fallback] {
         if tried.len() >= MAX_ART_TRIES {
             break;
         }
         let mut candidates = Vec::new();
         for query in phase {
-            match art_candidates(query, requested_url, requested_resolved).await {
+            let found = art_candidates(directory, query, requested_url, requested_resolved,
+                &mut public_hosts, |host| async move {
+                    Ok(tokio::net::lookup_host((host, 0)).await?.collect())
+                }).await;
+            match found {
                 Ok(found) => candidates.extend(found),
                 Err(error) => {
                     if lookup_failure.is_none() {
@@ -1030,16 +1071,18 @@ pub async fn search(query: Query) -> Result<Page, String> {
         }
         // Duplicates are still told apart by the stream the directory reached,
         // exactly as the facet tally and the webview's own pass compare them.
-        let key = stream_key(
-            &playable_url(text(&entry.url), text(&entry.url_resolved)).unwrap_or_else(|| url.clone()),
-        );
+        let resolved_url = resolved_directory_url(text(&entry.url_resolved)).unwrap_or_default();
+        let key = stream_key(if resolved_url.is_empty() { &url } else { &resolved_url });
 
         let tags = clean_name(text(&entry.tags), 120);
-        let station = BrowseStation {
+        let hls = number(&entry.hls) != 0
+            && (!resolved_url.is_empty() || text(&entry.url_resolved).trim().is_empty());
+        let mut station = BrowseStation {
             uuid: entry.stationuuid.unwrap_or_default(),
             name,
             url,
-            resolved_url: playable_url(text(&entry.url_resolved), "").unwrap_or_default(),
+            resolved_url,
+            aliases: Vec::new(),
             homepage: clean_name(text(&entry.homepage), 200),
             tag: first_tag(&tags, 24),
             tags,
@@ -1050,12 +1093,23 @@ pub async fn search(query: Query) -> Result<Page, String> {
             codec: clean_name(text(&entry.codec), 12),
             bitrate: number(&entry.bitrate).clamp(0, 100_000) as u32,
             votes: number(&entry.votes),
-            hls: number(&entry.hls) != 0,
+            hls,
         };
 
         match best.get_mut(&key) {
-            Some(kept) if kept.votes >= station.votes => {}
-            Some(kept) => *kept = station,
+            Some(kept) => {
+                let alias = if station.votes > kept.votes {
+                    station.aliases = std::mem::take(&mut kept.aliases);
+                    let previous = std::mem::replace(kept, station);
+                    kept.aliases.retain(|alias| alias != &kept.url);
+                    previous.url
+                } else {
+                    station.url
+                };
+                if alias != kept.url && !kept.aliases.contains(&alias) {
+                    kept.aliases.push(alias);
+                }
+            }
             None => {
                 order.push(key.clone());
                 best.insert(key, station);

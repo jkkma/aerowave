@@ -40,6 +40,7 @@ private const val NOTIFICATIONS_PERMISSION = "notifications"
 class PlayArgs {
   lateinit var url: String
   lateinit var sourceUrl: String
+  var stationUrl: String? = null
   lateinit var title: String
   var stationId: String? = null
   var volume: Double = 1.0
@@ -54,6 +55,7 @@ class PlayArgs {
   internal fun toRequest(): PlayRequest = PlayRequest(
     url = url,
     sourceUrl = sourceUrl,
+    stationUrl = stationUrl,
     title = title,
     stationId = stationId,
     volume = volume.coerceIn(0.0, 1.0).toFloat(),
@@ -709,6 +711,8 @@ private fun PlaybackSnapshot.toJsObject(): JSObject = JSObject().apply {
   put("status", status)
   put("generation", generation)
   put("sourceUrl", sourceUrl)
+  put("stationUrl", stationUrl)
+  put("manifestUrl", playableUrl.takeIf { isHls })
   put("title", title)
   put("stationId", stationId)
   put("positionMs", positionMs)

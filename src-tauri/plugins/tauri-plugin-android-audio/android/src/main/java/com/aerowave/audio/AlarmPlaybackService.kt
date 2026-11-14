@@ -37,10 +37,7 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
-import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import java.util.concurrent.Executor
 import java.util.concurrent.FutureTask
 import java.util.concurrent.RejectedExecutionException
@@ -290,16 +287,6 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       packageManager.getPackageInfo(packageName, 0).versionName ?: "0.0.0"
     } catch (_: Exception) { "0.0.0" }
     userAgent = "Aerowave/$version"
-    val guardedClient = NetworkGuard.client(false, userAgent)
-    val networkClient = diagnostics?.withHttpEvents(guardedClient) ?: guardedClient
-    val networkFactory = OkHttpDataSource.Factory(networkClient)
-      .setUserAgent(userAgent)
-      .setDefaultRequestProperties(mapOf("Icy-MetaData" to "1"))
-    // DefaultDataSource keeps SAF content URIs local while all HTTP still
-    // passes through the same public-network guard used by radio playback.
-    val dataSourceFactory = DefaultDataSource.Factory(
-      this, diagnostics?.withTransferEvents(networkFactory) ?: networkFactory,
-    )
     val extractors = diagnostics?.let { trace ->
       ChainedOpusExtractorsFactory(
         onExtractorProbe = trace::extractorProbe,
@@ -314,8 +301,7 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       .build()
     player = ExoPlayer.Builder(this)
       .setMediaSourceFactory(
-        DefaultMediaSourceFactory(this, extractors)
-          .setDataSourceFactory(dataSourceFactory),
+        RadioMediaSourceFactory.create(this, userAgent, allowRelay = false, extractors, diagnostics = diagnostics),
       )
       // The service owns a transient request so focus remains tied to the full
       // ring lifecycle rather than to an individual fallback source.
@@ -1184,12 +1170,12 @@ class AlarmPlaybackService : Service(), Player.Listener, SensorEventListener {
       mapOf("sourceKind" to sourceKind, "errorCode" to error.errorCode,
         "errorCodeName" to error.errorCodeName, "duringPreparation" to (ring == null)), error)
     if (preparation != null && ring == null) {
-      Log.w("AerowaveAlarmPlayback", "Muted station preparation failed", error)
+      Log.w("AerowaveAlarmPlayback", "Muted station preparation failed (${error.errorCodeName})")
       retryPreparation("player_error")
       return
     }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && sourceKind == "tone") return
-    Log.e("AerowaveAlarmPlayback", "Playback failed for $sourceKind source", error)
+    Log.e("AerowaveAlarmPlayback", "Playback failed for $sourceKind source (${error.errorCodeName})")
     val reason = when (sourceKind) {
       "station" -> "The selected station could not play"
       "folder" -> "The selected alarm track could not play"
