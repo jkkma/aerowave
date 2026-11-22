@@ -6,6 +6,8 @@ use std::collections::HashSet;
 use serde_json::{Map, Value};
 use url::Url;
 
+use crate::directory::is_directory_stream_id;
+
 pub const MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const FORMAT: &str = "aerowave-backup";
 pub const VERSION: u64 = 1;
@@ -133,6 +135,12 @@ fn validate_station(station: &Value, name: &str) -> Result<(), String> {
     id(field(station, "id", name)?, &format!("{name}.id"))?;
     if let Some(recent_id) = station.get("recentId").filter(|value| !value.is_null()) {
         id(recent_id, &format!("{name}.recentId"))?;
+    }
+    if let Some(value) = station.get("directoryStreamId").filter(|value| !value.is_null()) {
+        let field = format!("{name}.directoryStreamId");
+        if !is_directory_stream_id(string(value, &field)?) {
+            return Err(format!("{field} must be a directory stream identifier"));
+        }
     }
     string(field(station, "name", name)?, &format!("{name}.name"))?;
     let address = string(field(station, "url", name)?, &format!("{name}.url"))?;
@@ -414,6 +422,20 @@ mod tests {
         assert_eq!(restored["alarms"][0]["source"]["stationId"], "news");
         data["stations"][0]["recentId"] = Value::from(42);
         assert!(encode(&data).unwrap_err().contains("recentId must be text"));
+    }
+
+    #[test]
+    fn directory_stream_identity_round_trips_in_saved_and_recent_stations() {
+        let mut data = sample();
+        let identity = Value::from("a".repeat(64));
+        data["stations"][0]["directoryStreamId"] = identity.clone();
+        data["settings"]["recentStations"][0]["directoryStreamId"] = identity.clone();
+        let restored = prepare_restore(&encode(&data).unwrap()).unwrap();
+        assert_eq!(restored["stations"][0]["directoryStreamId"], identity);
+        assert_eq!(restored["settings"]["recentStations"][0]["directoryStreamId"], identity);
+
+        data["stations"][0]["directoryStreamId"] = Value::from("https://cdn.example/live?token=secret");
+        assert!(encode(&data).unwrap_err().contains("directoryStreamId must be a directory stream identifier"));
     }
 
     #[test]

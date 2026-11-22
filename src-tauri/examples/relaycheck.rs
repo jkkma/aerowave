@@ -15,6 +15,7 @@
 #[path = "../src/stream.rs"]
 mod stream;
 
+#[allow(dead_code)]
 #[path = "../src/relay.rs"]
 mod relay;
 

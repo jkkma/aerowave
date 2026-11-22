@@ -616,6 +616,95 @@ async fn local_files() {
     println!("PASS: local file relay streams full files and concurrent ranges, returns 416, conceals paths, rejects foreign hosts/methods/tokens, and bounds retained handles");
 }
 
+#[tokio::test]
+async fn playlists_reach_a_working_alternate_and_keep_redirected_audio_bytes() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let request = request(&mut socket).await;
+                let path = request.split_whitespace().nth(1).unwrap();
+                let (mime, body) = match path {
+                    "/list.pls" => ("audio/x-scpls", "[playlist]\nFile1=/gone\nFile2=/error-page\nFile3=song\n"),
+                    "/list.m3u" => ("audio/x-mpegurl", "#EXTM3U\n/gone\n/error-page\nsong\n"),
+                    "/list.asx" => ("video/x-ms-asx", "<ASX><ENTRY><REF HREF='/gone'/><REF HREF='/error-page'/><REF HREF='song'/></ENTRY></ASX>"),
+                    "/gone" => {
+                        socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                        return;
+                    }
+                    "/live.m3u8" | "/audio.m3u8" => {
+                        let location = if path == "/live.m3u8" { "/manifest" } else { "/untyped" };
+                        let response = format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        socket.write_all(response.as_bytes()).await.unwrap();
+                        return;
+                    }
+                    "/manifest" => ("application/octet-stream", "#EXTM3U\n#EXT-X-TARGETDURATION:5\n#EXTINF:5,\nsegment.ts\n"),
+                    "/untyped" => ("application/octet-stream", "#EXTbinary payload"),
+                    "/error-page" => ("text/html", "<html>Station offline</html>"),
+                    "/song" => ("audio/mpeg", "song"),
+                    _ => panic!("Unexpected fixture path {path}"),
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+        }
+    });
+    let relay = relay::Relay::start(Arc::new(|_, _| {})).await.unwrap();
+    let base = format!("http://{addr}");
+    for playlist in ["list.pls", "list.m3u", "list.asx"] {
+        let url = format!("{base}/{playlist}");
+        let info = stream::probe(&url, false, false).await.unwrap();
+        assert_eq!(info.url, format!("{base}/song"));
+        let response = reqwest::get(relay.route(&url)).await.unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"song");
+    }
+    let hls = stream::probe(&format!("{base}/live.m3u8"), false, false)
+        .await
+        .unwrap();
+    assert!(hls.hls);
+    assert_eq!(hls.url, format!("{base}/manifest"));
+
+    let audio = format!("{base}/audio.m3u8");
+    assert!(!stream::probe(&audio, false, false).await.unwrap().hls);
+    let response = reqwest::get(relay.route(&audio)).await.unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        b"#EXTbinary payload"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn quiet_relay_route_strips_metadata_without_announcing_it() {
+    let mut body = b"song\x02StreamTitle='Fixture title';".to_vec();
+    body.resize(4 + 1 + 32, 0);
+    body.extend_from_slice(b"more");
+    let station = icy_fixture(body, Some(4), false, false).await;
+    let titles = Arc::new(Mutex::new(Vec::new()));
+    let heard = titles.clone();
+    let relay = relay::Relay::start(Arc::new(move |_, title| {
+        heard.lock().unwrap().push(title.to_string());
+    }))
+    .await
+    .unwrap();
+    let quiet = relay.quiet_route(&station);
+    let live = relay.route(&station);
+    assert_ne!(quiet, live);
+    for (url, expected) in [(quiet, &[][..]), (live, &["Fixture title"][..])] {
+        let response = reqwest::get(url).await.unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"songmore");
+        assert_eq!(*titles.lock().unwrap(), expected);
+    }
+}
+
 #[tokio::main]
 async fn main() {
     authenticated_station().await;

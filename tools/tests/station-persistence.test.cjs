@@ -80,6 +80,22 @@ test("a pending station save keeps the editor busy and rejects a duplicate submi
   assert.equal(h.el("#station-editor").inert, false);
 });
 
+test("editing a station preserves its directory identity until the stream changes", async () => {
+  const h = fixture();
+  const directoryStreamId = "a".repeat(64);
+  h.context.directoryStreamId = directoryStreamId;
+  h.evaluate("state.stations[0].directoryStreamId = directoryStreamId; openStationEditor(state.stations[0])");
+  h.el("#st-name").value = "Updated name";
+  await h.el("#station-editor").dispatch("submit");
+  assert.equal(h.evaluate("state.stations[0].directoryStreamId"), directoryStreamId);
+
+  h.evaluate("openStationEditor(state.stations[0])");
+  h.el("#st-url").value = "https://radio.test/retuned";
+  await h.el("#station-editor").dispatch("submit");
+  assert.equal(h.evaluate("state.stations[0].directoryStreamId"), null);
+  assert.equal(h.calls.filter(call => call.command === "save_stations").at(-1).args.stations[0].directoryStreamId, null);
+});
+
 test("Android keeps a malformed HTTP station draft open and never writes it", async () => {
   const h = createHarness({ navigator: { userAgent: "Mozilla/5.0 (Linux; Android 15; Mobile)" } });
   h.evaluate("wire(); openStationEditor(null)");

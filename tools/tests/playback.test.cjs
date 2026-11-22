@@ -126,6 +126,37 @@ test("brief reconnects consume the retry budget before backup takes over", async
   assert.equal(h.calls.filter(({ command }) => command === "backup_track").length, 1);
 });
 
+test("terminal station failure retains the broadcaster error after the relay retries", async () => {
+  const h = createHarness({
+    invoke: command => {
+      if (command === "probe_stream") throw new Error("HTTP 403 Forbidden from the broadcaster");
+      if (command === "backup_track") throw new Error("Choose a backup folder in Settings");
+    },
+    onPlay: () => Promise.reject(Object.assign(new Error("No supported source"), { name: "NotSupportedError" })),
+  });
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Blocked station' })");
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await h.fireTimer(h.evaluate("player.retryTimer"));
+    await flush();
+  }
+  assert.equal(h.el("#statusline").textContent, "Station unavailable");
+  assert.match(h.el("#np-track").textContent, /HTTP 403 Forbidden/);
+  assert.equal(h.calls.filter(({ command }) => command === "relay_url").length, 5);
+});
+
+test("decoded playback discards an earlier informational probe error", async () => {
+  const h = createHarness({
+    invoke: command => {
+      if (command === "probe_stream") throw new Error("initial probe failed");
+      if (command === "backup_track") throw new Error("Choose a backup folder in Settings");
+    },
+  });
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Recovered station' })");
+  h.evaluate("failure('connection lost after playback', { fatal: true })");
+  await flush();
+  assert.match(h.el("#np-track").textContent, /connection lost after playback/);
+});
+
 test("sustained decoded progress restores the reconnect budget", async () => {
   const h = createHarness();
   h.evaluate("globalThis.testNow = 1000; Date.now = () => testNow");
@@ -243,7 +274,9 @@ test("ordinary playback and editor TEST send the submitted station to the relay"
     ? { url: resolved, hls: false, directFallbackAllowed: true } : undefined });
   h.context.submitted = submitted;
   await h.evaluate("play({ kind: 'station', url: submitted, title: 'Radio' })");
-  assert.equal(h.calls.find(call => call.command === "relay_url").args.url, submitted);
+  const playbackRoute = h.calls.find(call => call.command === "relay_url");
+  assert.equal(playbackRoute.args.url, submitted);
+  assert.notEqual(playbackRoute.args.quiet, true);
   h.evaluate("onStreamTitle({ url: submitted, title: 'Current song' })");
   assert.equal(h.el("#np-track").textContent, "Current song");
 
@@ -251,7 +284,9 @@ test("ordinary playback and editor TEST send the submitted station to the relay"
   h.el("#st-url").value = submitted;
   const testPending = h.el("#st-test").dispatch("click");
   await flush();
-  assert.equal(h.calls.filter(call => call.command === "relay_url").at(-1).args.url, submitted);
+  const testRoute = h.calls.filter(call => call.command === "relay_url").at(-1);
+  assert.equal(testRoute.args.url, submitted);
+  assert.equal(testRoute.args.quiet, true);
   h.audios[1].error = { code: 4 };
   await h.audios[1].dispatch("error");
   assert.equal(h.audios[1].src, resolved);

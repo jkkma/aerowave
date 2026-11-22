@@ -249,7 +249,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   differs from the submitted one beyond the scheme. The player follows the
   submitted playlist or redirect itself, so it gets a fresh address each time.
   The resolved address still identifies the stream when duplicates are compared.
-  A station saved under it by an earlier version still shows as saved.
+  A station saved under it by an earlier version still shows as saved. New
+  saves keep an identifier for stable directory addresses so that alternate
+  submissions also show as saved when they turn up in another search.
 - Country, genre, format and bitrate are directly available beside the search.
   Format and bitrate use separate, side-by-side dropdowns. Applied filters can
   be removed one at a time, and Clear all starts over. The results count says how many stations
@@ -310,8 +312,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   or the dropdown would refuse to offer what it is currently set to. The
   results simply come back empty, which is honest; silently un-setting a filter
   you chose would not be.
-  A zero in an incomplete sample stays selectable too: the rest of the
-  directory may still contain that format or bitrate. If a tally fails, the
+  An incomplete sample keeps every global country and genre selectable, with
+  a count only where the sample found matches. A sampled zero stays selectable
+  for formats and bitrates as well. If a tally fails, the
   filters fall back to uncounted choices instead of showing another selection's
   old counts. Missing initial country and genre lists are retried on the next
   visit or search.
@@ -326,8 +329,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   places that compare streams — the search, the tally, and the webview's own
   pass over what is already on screen — have to read a URL the same way, or a
   row one of them collapsed reappears from another. All three compare the
-  address the directory reached where it has one, and all three fold ASCII case
-  only.
+  address the directory reached where it has one. All three fold ASCII case in
+  the host and path while preserving case-sensitive query selectors.
 - **Which duplicate survives is decided by votes**, not by whichever the
   directory sorted first. `radio.plaza.one/ogg` is filed both as "Nightwave
   Plaza" (171 votes) and as "Vaporwave" (379); ordered by name the first won,

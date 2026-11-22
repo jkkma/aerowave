@@ -7,14 +7,15 @@
 //! `resolve` hands back the live response it already opened rather than just
 //! its URL, so a probe does not fetch the same stream twice.
 
+use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use aerowave_core::icy::{
-    decode_text, first_url_in_playlist, head_end, is_hls, is_playable_type, looks_like_playlist,
-    metadata_interval, parse_head, socket_host, Head, MetaStrip,
+    decode_text, head_end, is_hls, is_playable_type, looks_like_playlist, metadata_interval,
+    parse_head, playlist_urls, socket_host, Head, MetaStrip,
 };
 use aerowave_core::network::{clear_userinfo, inherit_userinfo, StationNetwork};
 use aerowave_core::stream_tags::StreamTags;
@@ -47,6 +48,9 @@ const MAX_PLAYLIST_BYTES: usize = 256 * 1024;
 pub(crate) const RELAY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const ICY_HEAD_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_REDIRECTS: usize = 6;
+const MAX_PLAYLIST_DEPTH: usize = 2;
+const MAX_STATION_CANDIDATES: usize = 8;
+const ALTERNATE_WAIT: Duration = Duration::from_secs(5);
 
 static PROBE_CLIENTS: OnceLock<StationClients> = OnceLock::new();
 static RELAY_CLIENTS: OnceLock<StationClients> = OnceLock::new();
@@ -192,13 +196,25 @@ pub struct StreamInfo {
 enum Resolved {
     Stream {
         resp: reqwest::Response,
+        primed: Vec<u8>,
         final_url: String,
         content_type: String,
+    },
+    Icy {
+        socket: tokio::net::TcpStream,
+        head: Head,
+        primed: Vec<u8>,
+        final_url: String,
     },
     Hls {
         final_url: String,
         content_type: String,
     },
+}
+
+enum Candidate {
+    Source(Resolved),
+    Playlist(Vec<String>),
 }
 
 /// An HTTP attempt that may still have reached a plaintext Shoutcast-v1
@@ -230,9 +246,10 @@ async fn station_response(
     url: &str,
     want_metadata: bool,
     network: &mut StationNetwork,
-) -> Result<(reqwest::Response, reqwest::Url), ResolveError> {
+) -> Result<(reqwest::Response, reqwest::Url, bool), ResolveError> {
     let mut current = reqwest::Url::parse(url.trim())
         .map_err(|error| ResolveError::refused(format!("invalid station URL: {error}")))?;
+    let mut redirected_playlist = false;
     for redirects in 0..=MAX_REDIRECTS {
         network.admit(&current).map_err(ResolveError::refused)?;
         let mut request = clients.get(*network).get(current.clone());
@@ -251,7 +268,7 @@ async fn station_response(
         })?;
         let status = response.status();
         if status.is_success() {
-            return Ok((response, current));
+            return Ok((response, current, redirected_playlist));
         }
         if !is_redirect(status) {
             return Err(ResolveError::new(
@@ -269,13 +286,14 @@ async fn station_response(
             .ok_or_else(|| {
                 ResolveError::refused("the stream redirect had no valid Location header")
             })?;
+        redirected_playlist |= looks_like_playlist(current.path(), "");
         current = redirect_target(&current, location).map_err(ResolveError::refused)?;
     }
     unreachable!("the redirect limit returns before another request")
 }
 
 /// Read a playlist body, refusing to buffer more than the cap.
-async fn read_capped(resp: reqwest::Response) -> Result<String, String> {
+async fn read_capped(resp: reqwest::Response, mut body: Vec<u8>) -> Result<String, String> {
     if let Some(len) = resp.content_length() {
         if len as usize > MAX_PLAYLIST_BYTES {
             return Err(format!(
@@ -283,7 +301,11 @@ async fn read_capped(resp: reqwest::Response) -> Result<String, String> {
             ));
         }
     }
-    let mut body: Vec<u8> = Vec::new();
+    if body.len() > MAX_PLAYLIST_BYTES {
+        return Err(format!(
+            "that playlist ran past the {MAX_PLAYLIST_BYTES}-byte limit"
+        ));
+    }
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| describe(&e.without_url()))?;
@@ -297,6 +319,29 @@ async fn read_capped(resp: reqwest::Response) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
+/// A playlist address can redirect to an untyped URL. Read only far enough
+/// to recognize an M3U header, retaining any bytes read for an audio response.
+async fn sniff_m3u(resp: &mut reqwest::Response, primed: &mut Vec<u8>) -> Result<bool, String> {
+    let prefixes: &[&[u8]] = &[
+        b"#EXTM3U\n",
+        b"#EXTM3U\r",
+        b"\xef\xbb\xbf#EXTM3U\n",
+        b"\xef\xbb\xbf#EXTM3U\r",
+    ];
+    loop {
+        if prefixes.iter().any(|prefix| primed.starts_with(prefix)) {
+            return Ok(true);
+        }
+        if !prefixes.iter().any(|prefix| prefix.starts_with(primed)) {
+            return Ok(false);
+        }
+        match resp.chunk().await.map_err(|e| describe(&e.without_url()))? {
+            Some(chunk) => primed.extend_from_slice(&chunk),
+            None => return Ok(false),
+        }
+    }
+}
+
 fn content_type_of(resp: &reqwest::Response) -> String {
     resp.headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -305,55 +350,157 @@ fn content_type_of(resp: &reqwest::Response) -> String {
         .to_ascii_lowercase()
 }
 
-/// Follow playlist files until a direct stream turns up (max 3 hops).
-///
-/// `want_metadata` asks the server to interleave ICY metadata blocks with the
-/// audio. Only a caller that will take them back out again may say yes - see
-/// `open_for_relay`.
+async fn open_candidate(
+    clients: &StationClients,
+    url: &str,
+    want_metadata: bool,
+    network: &mut StationNetwork,
+    skip_resolve: bool,
+) -> Result<Candidate, ResolveError> {
+    let (mut resp, final_url, redirected_playlist) =
+        match station_response(clients, url, want_metadata, network).await {
+            Ok(response) => response,
+            Err(error) => {
+                let Some(raw_url) = error.raw_url.as_deref() else {
+                    return Err(error);
+                };
+                // An HTTP client cannot parse Shoutcast v1's status line. Prefer
+                // the raw server's reason only when it proves it speaks ICY.
+                return match icy_connect(raw_url, want_metadata, network).await {
+                    Ok((socket, head, primed, final_url)) => Ok(Candidate::Source(Resolved::Icy {
+                        socket,
+                        head,
+                        primed,
+                        final_url,
+                    })),
+                    Err(icy) if icy.proven => Err(ResolveError::refused(icy.message)),
+                    Err(_) => Err(error),
+                };
+            }
+        };
+    let content_type = content_type_of(&resp);
+    let mut primed = Vec::new();
+    let mime = content_type.split(';').next().unwrap_or("").trim();
+    let playlist = !skip_resolve
+        && (looks_like_playlist(final_url.path(), &content_type)
+            || (redirected_playlist
+                && matches!(mime, "" | "application/octet-stream" | "text/plain")
+                && sniff_m3u(&mut resp, &mut primed)
+                    .await
+                    .map_err(ResolveError::refused)?));
+    if playlist {
+        let body = read_capped(resp, primed)
+            .await
+            .map_err(ResolveError::refused)?;
+        if is_hls(&body) {
+            return Ok(Candidate::Source(Resolved::Hls {
+                final_url: final_url.into(),
+                content_type,
+            }));
+        }
+        let candidates = playlist_urls(
+            &body,
+            final_url.as_str(),
+            &content_type,
+            MAX_STATION_CANDIDATES,
+        );
+        if candidates.is_empty() {
+            return Err(ResolveError::refused(format!(
+                "{} is a playlist with no stream URL in it",
+                without_userinfo(&final_url)
+            )));
+        }
+        return Ok(Candidate::Playlist(candidates));
+    }
+
+    if !is_playable_type(&content_type) {
+        return Err(ResolveError::refused(format!(
+            "that address answers with {content_type}, not audio - the station is probably down, full, or has moved"
+        )));
+    }
+    if primed.is_empty() && resp.content_length() == Some(0) {
+        return Err(ResolveError::refused(
+            "the station returned an empty audio response",
+        ));
+    }
+    Ok(Candidate::Source(Resolved::Stream {
+        resp,
+        primed,
+        final_url: final_url.into(),
+        content_type,
+    }))
+}
+
+/// Try the playlist's addresses in order with bounded depth, attempts and
+/// time for a candidate when another is waiting. Each branch inherits the
+/// network policy of the playlist that named it.
 async fn resolve(
     clients: &StationClients,
     url: &str,
     want_metadata: bool,
     network: &mut StationNetwork,
+    skip_resolve: bool,
 ) -> Result<Resolved, ResolveError> {
-    let mut current = url.trim().to_string();
-
-    for _ in 0..3 {
-        let (resp, final_url) = station_response(clients, &current, want_metadata, network).await?;
-        let content_type = content_type_of(&resp);
-
-        if !looks_like_playlist(final_url.as_str(), &content_type) {
-            return Ok(Resolved::Stream {
-                resp,
-                final_url: final_url.into(),
-                content_type,
-            });
+    let mut pending = vec![(url.trim().to_string(), *network, 0)];
+    let mut seen = HashSet::new();
+    let mut first_error = None;
+    let mut attempts = 0;
+    while let Some((current, mut branch_network, depth)) = pending.pop() {
+        if attempts == MAX_STATION_CANDIDATES {
+            break;
         }
-
-        let body = read_capped(resp)
-            .await
-            .map_err(|message| ResolveError::new(message, final_url.as_str()))?;
-        if is_hls(&body) {
-            // Not a failure - a fork. The caller is told it is HLS so the
-            // front end can hand it to hls.js instead of to <audio>.
-            return Ok(Resolved::Hls {
-                final_url: final_url.into(),
-                content_type,
-            });
+        if !seen.insert((
+            current.clone(),
+            branch_network == StationNetwork::Lan,
+            depth,
+        )) {
+            continue;
         }
-        match first_url_in_playlist(&body, final_url.as_str(), &content_type) {
-            Some(next) => current = next,
-            None => {
-                return Err(ResolveError::refused(format!(
-                    "{} is a playlist with no stream URL in it",
-                    without_userinfo(&final_url)
-                )));
+        attempts += 1;
+        let attempt = open_candidate(
+            clients,
+            &current,
+            want_metadata,
+            &mut branch_network,
+            skip_resolve,
+        );
+        let result = if pending.is_empty() {
+            attempt.await
+        } else {
+            tokio::time::timeout(ALTERNATE_WAIT, attempt)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(ResolveError::refused(
+                        "timed out talking to a playlist entry",
+                    ))
+                })
+        };
+
+        let error = match result {
+            Ok(Candidate::Source(source)) => {
+                *network = branch_network;
+                return Ok(source);
             }
+            Ok(Candidate::Playlist(candidates)) if depth < MAX_PLAYLIST_DEPTH => {
+                pending.extend(
+                    candidates
+                        .into_iter()
+                        .rev()
+                        .map(|url| (url, branch_network, depth + 1)),
+                );
+                continue;
+            }
+            Ok(Candidate::Playlist(_)) => {
+                ResolveError::refused("too many nested station playlists")
+            }
+            Err(error) => error,
+        };
+        if first_error.is_none() {
+            first_error = Some(error);
         }
     }
-    Err(ResolveError::refused(
-        "playlist links went round in circles",
-    ))
+    Err(first_error
+        .unwrap_or_else(|| ResolveError::refused("playlist links went round in circles")))
 }
 
 /// One response header, decoded the way ICY text has to be.
@@ -385,24 +532,32 @@ async fn probe_inner(
     let parsed =
         reqwest::Url::parse(url.trim()).map_err(|e| format!("invalid station URL: {e}"))?;
     let mut network = StationNetwork::for_source(&parsed);
-    match http_probe(url, want_title, skip_resolve, &mut network).await {
-        Ok(info) => Ok(info),
-        Err(http_error) => {
-            let Some(raw_url) = http_error.raw_url else {
-                return Err(http_error.message);
-            };
-            match icy_probe(&raw_url, want_title, &mut network).await {
-                Ok(info) => Ok(info),
-                // Past the head, the server has shown it really is speaking ICY
-                // and has said something specific - "ICY 401", the station is
-                // full. That beats hyper's complaint about a status line it could
-                // not read, which is true of every one of these servers.
-                Err(icy) if icy.proven => Err(icy.message),
-                // Before that point it has proved nothing, so the HTTP error is
-                // still the one worth showing.
-                Err(_) => Err(http_error.message),
-            }
-        }
+    let clients = station_clients(&PROBE_CLIENTS, Duration::from_secs(5))?;
+    match resolve(clients, url, true, &mut network, skip_resolve)
+        .await
+        .map_err(|error| error.message)?
+    {
+        Resolved::Hls {
+            final_url,
+            content_type,
+        } => Ok(StreamInfo {
+            url: final_url,
+            content_type: Some(content_type).filter(|c| !c.is_empty()),
+            hls: true,
+            ..Default::default()
+        }),
+        Resolved::Stream {
+            resp,
+            primed,
+            final_url,
+            content_type,
+        } => http_probe(resp, primed, final_url, content_type, want_title, network).await,
+        Resolved::Icy {
+            socket,
+            head,
+            primed,
+            final_url,
+        } => Ok(icy_probe(socket, head, primed, final_url, want_title, network).await),
     }
 }
 
@@ -625,12 +780,13 @@ fn metadata_updates(
 /// The Shoutcast v1 probe: connect as above, then read far enough into the
 /// audio to catch either an ICY title or the container's initial native tags.
 async fn icy_probe(
-    url: &str,
+    mut socket: tokio::net::TcpStream,
+    head: Head,
+    mut body: Vec<u8>,
+    final_url: String,
     want_title: bool,
-    network: &mut StationNetwork,
-) -> Result<StreamInfo, IcyFailure> {
-    let (mut socket, head, mut body, final_url) = icy_connect(url, true, network).await?;
-
+    network: StationNetwork,
+) -> StreamInfo {
     let content_type = head
         .get("content-type")
         .map(|content_type| content_type.to_ascii_lowercase());
@@ -644,11 +800,11 @@ async fn icy_probe(
         title: None,
         warning: None,
         hls: false,
-        direct_fallback_allowed: *network == StationNetwork::Lan,
+        direct_fallback_allowed: network == StationNetwork::Lan,
     };
 
     if !want_title {
-        return Ok(info);
+        return info;
     }
     let metaint = head
         .get("icy-metaint")
@@ -658,7 +814,7 @@ async fn icy_probe(
     let mut strip = (metaint > 0).then(|| MetaStrip::new(metaint));
     let mut tags = StreamTags::for_stream(content_type.as_deref().unwrap_or(""), &final_url);
     if strip.is_none() && tags.is_none() {
-        return Ok(info);
+        return info;
     }
 
     let mut total = 0usize;
@@ -690,63 +846,25 @@ async fn icy_probe(
         body.clear();
         if let Some(title) = updates.into_iter().next() {
             info.title = Some(title);
-            return Ok(info);
+            return info;
         }
         if total >= MAX_META_BYTES || metadata_readers_done(&strip, &tags) {
             break;
         }
     }
-    Ok(info)
+    info
 }
 
 /// Connect, read enough of the stream to catch one metadata block, disconnect.
 ///
-/// `skip_resolve` is for the now-playing poll, which already holds the direct
-/// URL from the first probe: following the playlist chain again every time
-/// would ask the broadcaster for the same file over and over for nothing.
 async fn http_probe(
-    url: &str,
+    resp: reqwest::Response,
+    primed: Vec<u8>,
+    direct: String,
+    content_type: String,
     want_title: bool,
-    skip_resolve: bool,
-    network: &mut StationNetwork,
-) -> Result<StreamInfo, ResolveError> {
-    let clients =
-        station_clients(&PROBE_CLIENTS, Duration::from_secs(5)).map_err(ResolveError::refused)?;
-    let (resp, direct, content_type) = if skip_resolve {
-        let (resp, final_url) = station_response(clients, url, true, network).await?;
-        let content_type = content_type_of(&resp);
-        (resp, final_url.into(), content_type)
-    } else {
-        match resolve(clients, url, true, network).await? {
-            Resolved::Hls {
-                final_url,
-                content_type,
-            } => {
-                return Ok(StreamInfo {
-                    url: final_url,
-                    content_type: Some(content_type).filter(|c| !c.is_empty()),
-                    hls: true,
-                    ..Default::default()
-                })
-            }
-            Resolved::Stream {
-                resp,
-                final_url,
-                content_type,
-            } => (resp, final_url, content_type),
-        }
-    };
-
-    if !is_playable_type(&content_type) {
-        return Err(ResolveError::new(
-            format!(
-                "that address answers with {content_type}, not audio - the station \
-             is probably down, full, or has moved"
-            ),
-            direct,
-        ));
-    }
-
+    network: StationNetwork,
+) -> Result<StreamInfo, String> {
     let mut info = StreamInfo {
         url: direct.clone(),
         name: header(&resp, "icy-name"),
@@ -756,7 +874,7 @@ async fn http_probe(
         title: None,
         warning: None,
         hls: false,
-        direct_fallback_allowed: *network == StationNetwork::Lan,
+        direct_fallback_allowed: network == StationNetwork::Lan,
     };
 
     if !want_title {
@@ -772,7 +890,8 @@ async fn http_probe(
         return Ok(info);
     }
 
-    let mut body = resp.bytes_stream();
+    let primed = (!primed.is_empty()).then(|| Ok(primed.into()));
+    let mut body = futures_util::stream::iter(primed).chain(resp.bytes_stream());
     let mut total = 0usize;
     let mut audio = Vec::new();
     while total < MAX_META_BYTES && !metadata_readers_done(&strip, &tags) {
@@ -792,7 +911,7 @@ async fn http_probe(
                 }
             }
             Some(Err(e)) => {
-                return Err(ResolveError::new(describe(&e.without_url()), direct.clone()));
+                return Err(describe(&e.without_url()));
             }
             None => break,
         }
@@ -802,7 +921,10 @@ async fn http_probe(
 
 /// An upstream the relay can pump from, however the server chose to answer.
 pub enum RelayBody {
-    Http(reqwest::Response),
+    Http {
+        response: reqwest::Response,
+        primed: Vec<u8>,
+    },
     /// Shoutcast v1: the socket, plus the audio that arrived with the head.
     Icy {
         socket: tokio::net::TcpStream,
@@ -849,42 +971,42 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
     // An established radio stream gets longer to recover from a quiet stretch
     // than a short probe, but a dead connection still ends on its own.
     let clients = station_clients(&RELAY_CLIENTS, RELAY_READ_TIMEOUT)?;
-    let http = match resolve(clients, url, true, &mut network).await {
-        Ok(Resolved::Stream {
+    match tokio::time::timeout(
+        RELAY_READ_TIMEOUT,
+        resolve(clients, url, true, &mut network, false),
+    )
+    .await
+    .map_err(|_| "timed out opening the station".to_string())?
+    .map_err(|error| error.message)?
+    {
+        Resolved::Stream {
             resp,
+            primed,
             final_url,
             content_type,
-        }) => {
-            if !is_playable_type(&content_type) {
-                return Err(format!(
-                    "that address answers with {content_type}, not audio - \
-                     the station is probably down, full, or has moved"
-                ));
-            }
+        } => {
             let content_type = if content_type.is_empty() {
                 "audio/mpeg".to_string()
             } else {
                 content_type
             };
-            return Ok(RelaySource {
+            Ok(RelaySource {
                 content_type,
                 metadata_url: final_url,
                 metaint: metadata_interval(header(&resp, "icy-metaint").as_deref())?,
-                body: RelayBody::Http(resp),
-            });
+                body: RelayBody::Http {
+                    response: resp,
+                    primed,
+                },
+            })
         }
-        Ok(Resolved::Hls { .. }) => {
-            return Err("HLS - this plays through hls.rs, not the relay".into())
-        }
-        Err(error) => error,
-    };
-    // Same order as `probe_inner`: HTTP first, and the hand-rolled ICY path
-    // only once the HTTP client has failed.
-    let Some(raw_url) = http.raw_url else {
-        return Err(http.message);
-    };
-    match icy_connect(&raw_url, true, &mut network).await {
-        Ok((socket, head, primed, final_url)) => Ok(RelaySource {
+        Resolved::Hls { .. } => Err("HLS - this plays through hls.rs, not the relay".into()),
+        Resolved::Icy {
+            socket,
+            head,
+            primed,
+            final_url,
+        } => Ok(RelaySource {
             content_type: head
                 .get("content-type")
                 .map(|c| c.to_ascii_lowercase())
@@ -893,8 +1015,6 @@ pub async fn open_for_relay(url: &str) -> Result<RelaySource, String> {
             metaint: metadata_interval(head.get("icy-metaint"))?,
             body: RelayBody::Icy { socket, primed },
         }),
-        Err(icy) if icy.proven => Err(icy.message),
-        Err(_) => Err(http.message),
     }
 }
 
@@ -962,6 +1082,7 @@ pub async fn fetch_once(
                 content_type
             },
             final_url,
+            effective_url: url,
             body,
         })
     };
@@ -1036,7 +1157,7 @@ mod tests {
         };
         let url = format!("http://station.test:{}/stream", address.port());
         let mut network = StationNetwork::Public;
-        let result = resolve(&clients, &url, false, &mut network).await;
+        let result = resolve(&clients, &url, false, &mut network, false).await;
         let error = result.err().expect("private hop was accepted");
         assert!(
             error.raw_url.is_none(),

@@ -7,7 +7,7 @@ const MAX_STRUCTURED_TITLE_BYTES: usize = 255 * 16;
 
 /// Is this URL (or content type) a playlist file rather than a stream?
 pub fn looks_like_playlist(url: &str, content_type: &str) -> bool {
-    let lower = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
+    let lower = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
     lower.ends_with(".pls")
         || lower.ends_with(".m3u")
         || lower.ends_with(".m3u8")
@@ -29,23 +29,35 @@ fn playlist_assignment<'a>(line: &'a str, prefix: &str, numbered: bool) -> Optio
     Some(value.trim())
 }
 
-/// Pull the first stream URL out of a .pls, .m3u or .asx body. A playlist can
+/// Pull stream candidates out of a .pls, .m3u or .asx body in document order. A playlist can
 /// name a stream relative to its final address after HTTP redirects.
-pub fn first_url_in_playlist(body: &str, base_url: &str, content_type: &str) -> Option<String> {
-    let base = url::Url::parse(base_url).ok()?;
+pub fn playlist_urls(body: &str, base_url: &str, content_type: &str, limit: usize) -> Vec<String> {
+    let Ok(base) = url::Url::parse(base_url) else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    if limit == 0 {
+        return candidates;
+    }
     let lower = base.path().to_ascii_lowercase();
     let mime = content_type.to_ascii_lowercase();
-    let resolve = |candidate: &str| {
+    let mut add_candidate = |candidate: &str| {
         let candidate = candidate.trim();
         if candidate.is_empty() {
-            return None;
+            return false;
         }
-        let mut url = base.join(candidate).ok()?;
+        let Ok(mut url) = base.join(candidate) else {
+            return false;
+        };
         if !matches!(url.scheme(), "http" | "https") {
-            return None;
+            return false;
         }
         crate::network::inherit_userinfo(&base, &mut url);
-        Some(url.into())
+        let url = url.into();
+        if !candidates.contains(&url) {
+            candidates.push(url);
+        }
+        candidates.len() == limit
     };
 
     let first = body.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
@@ -53,13 +65,13 @@ pub fn first_url_in_playlist(body: &str, base_url: &str, content_type: &str) -> 
     if first.starts_with('<') {
         // A REF belongs to an ASX document, not to any XML body that happens
         // to contain an address. Unknown markup is never an M3U entry.
-        let mut reader = Reader::from_str(body);
+        let mut reader = Reader::from_str(first);
         let mut saw_asx_root = false;
         loop {
             match reader.read_event() {
                 Ok(Event::Start(ref element) | Event::Empty(ref element)) if !saw_asx_root => {
                     if !element.name().as_ref().eq_ignore_ascii_case(b"asx") {
-                        return None;
+                        return candidates;
                     }
                     saw_asx_root = true;
                 }
@@ -71,8 +83,8 @@ pub fn first_url_in_playlist(body: &str, base_url: &str, content_type: &str) -> 
                             if let Ok(value) =
                                 attribute.decode_and_unescape_value(reader.decoder())
                             {
-                                if let Some(url) = resolve(&value) {
-                                    return Some(url);
+                                if add_candidate(&value) {
+                                    return candidates;
                                 }
                             }
                         }
@@ -82,10 +94,10 @@ pub fn first_url_in_playlist(body: &str, base_url: &str, content_type: &str) -> 
                 _ => {}
             }
         }
-        return None;
+        return candidates;
     }
 
-    let lines = body.lines().map(str::trim);
+    let lines = first.lines().map(str::trim);
     let asx_body = first_line.eq_ignore_ascii_case("[reference]")
         || lines
             .clone()
@@ -95,7 +107,7 @@ pub fn first_url_in_playlist(body: &str, base_url: &str, content_type: &str) -> 
             .clone()
             .any(|line| playlist_assignment(line, "file", true).is_some());
     if first_line.starts_with('[') && !asx_body && !pls_body {
-        return None;
+        return candidates;
     }
     let m3u_body = first_line.eq_ignore_ascii_case("#EXTM3U");
     let asx_hint = lower.ends_with(".asx") || mime.contains("ms-asf") || mime.contains("x-ms-asx");
@@ -123,11 +135,11 @@ pub fn first_url_in_playlist(body: &str, base_url: &str, content_type: &str) -> 
             }
             line
         };
-        if let Some(url) = resolve(candidate) {
-            return Some(url);
+        if add_candidate(candidate) {
+            break;
         }
     }
-    None
+    candidates
 }
 
 /// Is this an HLS playlist? WebView2 will not play one by itself, so these
@@ -619,6 +631,23 @@ fn radio_info_title(xml: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn first_url_in_playlist(body: &str, base_url: &str, content_type: &str) -> Option<String> {
+        playlist_urls(body, base_url, content_type, 1).into_iter().next()
+    }
+
+    #[test]
+    fn playlist_candidates_keep_order_deduplicate_and_respect_the_limit() {
+        let base = "https://radio.example/final/list";
+        let expected = ["https://radio.example/final/first", "https://radio.example/next"];
+        for playlist in [
+            "[playlist]\nFile1=first\nFile2=first\nFile3=ftp://invalid.example\nFile4=/next\nFile5=/extra",
+            "#EXTM3U\nfirst\nfirst\nftp://invalid.example\n/next\n/extra",
+            "<ASX><ENTRY><REF HREF='first'/><REF HREF='first'/><REF HREF='ftp://invalid.example'/><REF HREF='/next'/><REF HREF='/extra'/></ENTRY></ASX>",
+        ] {
+            assert_eq!(playlist_urls(playlist, base, "", 2), expected);
+        }
+    }
 
     #[test]
     fn non_audio_content_types_are_refused_in_both_server_dialects() {

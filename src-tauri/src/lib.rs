@@ -603,9 +603,15 @@ struct IcyTitle {
 /// Hand back a loopback URL that plays `url`, or None when the relay is not
 /// running. See `relay.rs` for why a station is worth relaying at all.
 #[tauri::command]
-fn relay_url(state: State<'_, AppState>, url: String) -> Option<String> {
+fn relay_url(state: State<'_, AppState>, url: String, quiet: Option<bool>) -> Option<String> {
     let relay = state.relay.lock().unwrap();
-    relay.as_ref().map(|r| r.route(&url))
+    relay.as_ref().map(|relay| {
+        if quiet == Some(true) {
+            relay.quiet_route(&url)
+        } else {
+            relay.route(&url)
+        }
+    })
 }
 
 /// WebKitGTK cannot stream media from Tauri's asset protocol. Only files

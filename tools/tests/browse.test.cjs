@@ -1086,8 +1086,30 @@ test("sampled zero format, bitrate and selected dynamic buckets remain selectabl
   assert.equal(h.el("#browse-bitrate").options[2].disabled, true);
 
   h.evaluate(`setBrowseOptions("#browse-country", [], asCountry, "DE", "Germany", true)`);
-  assert.equal(h.el("#browse-country").selectedOptions[0].textContent, "Germany (0+)");
+  assert.equal(h.el("#browse-country").selectedOptions[0].textContent, "Germany");
   assert.equal(h.el("#browse-country").selectedOptions[0].disabled, false);
+});
+
+test("sampled country and genre lists keep uncounted global choices and new sample buckets", async () => {
+  const h = createHarness({ invoke(command) {
+    if (command !== "browse_facets") return;
+    return { countries: [{ code: "US", name: "United States", stations: 3 }],
+      tags: [{ value: "rare", name: "Rare", stations: 1 }], codecs: [], bitrates: [], sampled: true };
+  } });
+  seedSelects(h);
+  h.evaluate(`browseCodec = "MP3";
+    browseCountries = [{code:"AD",name:"Andorra",stations:5},{code:"US",name:"United States",stations:500}];
+    browseTags = [{value:"jazz",name:"Jazz",stations:99}];
+    browseTag = "ambient"; browseTagLabel = "Ambient"`);
+  await h.evaluate("refreshBrowseFilters()");
+  const list = selector => h.el(selector).options.map(option => [option.value, option.textContent, option.disabled]);
+  assert.deepEqual(list("#browse-country"), [
+    ["", "Any country", false], ["AD", "Andorra", false], ["US", "United States (3+)", false],
+  ]);
+  assert.deepEqual(list("#browse-tag"), [
+    ["", "Any genre", false], ["ambient", "Ambient", false], ["jazz", "Jazz", false], ["rare", "Rare (1+)", false],
+  ]);
+  assert.equal(h.el("#browse-tag").value, "ambient");
 });
 
 test("a failed facet update replaces stale counts with uncounted global choices", async () => {
@@ -1462,6 +1484,49 @@ test("a higher-voted Browse submission keeps a prior submission marked Saved", a
   assert.equal(h.evaluate("state.stations[0].url"), first.url);
 });
 
+test("a directory match across separate searches survives a pending save and reopening", async () => {
+  const directoryStreamId = "a".repeat(64);
+  const resolvedUrl = "https://cdn.test/live?station=First";
+  const first = { ...directoryStation("First", "https://one.test/listen.pls?channel=1"), directoryStreamId, resolvedUrl };
+  const second = { ...directoryStation("Second", "https://two.test/listen.m3u"), directoryStreamId, resolvedUrl };
+  const write = deferred();
+  let stored = [];
+  const restart = () => {
+    const h = createHarness({ invoke(command, args) {
+      if (command === "get_state") return { stations: structuredClone(stored), alarms: [], settings: {} };
+      if (command === "browse_countries" || command === "browse_tags") return [];
+      if (command === "browse_facets") return { countries: [], tags: [], codecs: [], bitrates: [] };
+      if (command === "browse_stations") return {
+        offered: 1, hasMore: false, stations: [args.query.name === "First" ? first : second],
+      };
+      if (command === "save_stations") return write.promise.then(() => {
+        stored = JSON.parse(JSON.stringify(args.stations));
+      });
+    } });
+    seedSelects(h);
+    return h;
+  };
+  const add = h => h.el("#browse-list").querySelector(".browse-save");
+  const h = restart();
+  await h.evaluate('browseSearch(false, "First")');
+  const saving = add(h).dispatch("click");
+  await h.evaluate('browseSearch(false, "Second")');
+  assert.equal(add(h).textContent, "Saving…");
+  write.resolve();
+  await saving;
+  assert.equal(add(h).textContent, "Saved");
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].url, first.url);
+  assert.equal(stored[0].directoryStreamId, directoryStreamId);
+  assert.equal(stored[0].resolvedUrl, undefined);
+
+  const reopened = restart();
+  await reopened.evaluate("loadState()");
+  await reopened.evaluate('browseSearch(false, "Second")');
+  assert.equal(add(reopened).textContent, "Saved");
+  assert.equal(add(reopened).disabled, true);
+});
+
 function filterHarness(stationQueries, reply = () => ({ offered: 0, hasMore: false, stations: [] })) {
   const h = createHarness({ invoke(command, args) {
     if (command === "browse_countries" || command === "browse_tags") return [];
@@ -1589,4 +1654,7 @@ test("stream comparison folds only ASCII case, as the backend's stream key does"
   assert.equal(h.evaluate('sameStream("HTTP://Radio.Test/Live/", "https://radio.test/live")'), true);
   assert.equal(h.evaluate('sameStream("https://radio.test/%C3%96", "https://radio.test/%c3%96")'), true);
   assert.equal(h.evaluate('sameStream("https://radio.test/Ö", "https://radio.test/ö")'), false);
+  assert.equal(h.evaluate('sameStream("https://radio.test/Live?station=A", "http://radio.test/live?station=A")'), true);
+  assert.equal(h.evaluate('sameStream("https://radio.test/live?station=A", "https://radio.test/live?station=a")'), false);
+  assert.equal(h.evaluate('sameStream("https://radio.test/live?station=A/", "https://radio.test/live?station=A")'), false);
 });

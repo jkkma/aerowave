@@ -4,6 +4,9 @@ use std::collections::HashMap;
 
 use url::Url;
 
+mod steering;
+pub use steering::{steering_identity, Steering};
+
 const MAX_VARIABLES: usize = 64;
 const MAX_URI_BYTES: usize = 4096;
 const MAX_RESOURCES: usize = 4096;
@@ -12,8 +15,33 @@ pub type Variables = HashMap<String, String>;
 
 pub struct Resource {
     pub url: Url,
-    /// Variant and rendition playlists can import the master's definitions.
-    pub variant: bool,
+    pub kind: ResourceKind,
+}
+
+pub enum ResourceKind {
+    Media,
+    Playlist,
+    Variant {
+        pathway: String,
+        stable_id: Option<String>,
+        audio: Option<String>,
+        subtitles: Option<String>,
+    },
+    Rendition {
+        group: Option<(String, String)>,
+        stable_id: Option<String>,
+    },
+    Steering,
+}
+
+impl ResourceKind {
+    /// These playlists can import the master's definitions.
+    pub fn is_playlist(&self) -> bool {
+        matches!(
+            self,
+            Self::Playlist | Self::Variant { .. } | Self::Rendition { .. }
+        )
+    }
 }
 
 pub struct Playlist {
@@ -24,15 +52,24 @@ pub struct Playlist {
 /// Match a variant to its declaration when hls.js adds live reload directives.
 /// Retain the order and encoding of the station's own query parameters.
 pub fn playlist_identity(url: &Url) -> Url {
+    identity_ignoring_query_parameters(url, is_delivery_directive)
+}
+
+pub fn resource_identity(url: &Url) -> Url {
     let mut key = url.clone();
     crate::network::clear_userinfo(&mut key);
     key.set_fragment(None);
+    key
+}
+
+fn identity_ignoring_query_parameters(url: &Url, ignore: impl Fn(&str) -> bool) -> Url {
+    let mut key = resource_identity(url);
     if let Some(query) = url.query() {
         let query = query
             .split('&')
             .filter(|pair| {
                 let name = pair.split_once('=').map_or(*pair, |(name, _)| name);
-                !is_delivery_directive(name)
+                !ignore(name)
             })
             .collect::<Vec<_>>()
             .join("&");
@@ -62,8 +99,8 @@ pub fn parse_playlist(
     let mut next_uri = None;
     for line in lines.map(str::trim).filter(|line| !line.is_empty()) {
         if !line.starts_with('#') {
-            if let Some(variant) = next_uri.take() {
-                add_resource(&mut resources, &variables, base, line, variant)?;
+            if let Some(kind) = next_uri.take() {
+                add_resource(&mut resources, &variables, base, line, kind)?;
             }
             continue;
         }
@@ -71,17 +108,45 @@ pub fn parse_playlist(
             continue;
         };
         match tag {
-            "#EXTINF" => next_uri = Some(false),
-            "#EXT-X-STREAM-INF" => next_uri = Some(true),
+            "#EXTINF" => next_uri = Some(ResourceKind::Media),
+            "#EXT-X-STREAM-INF" => {
+                let attributes = quoted_attributes(value).unwrap_or_default();
+                let get = |key| attribute(&attributes, key).map(str::to_owned);
+                next_uri = Some(ResourceKind::Variant {
+                    pathway: get("PATHWAY-ID")
+                        .filter(|id| !id.is_empty())
+                        .unwrap_or_else(|| ".".into()),
+                    stable_id: get("STABLE-VARIANT-ID"),
+                    audio: get("AUDIO"),
+                    subtitles: get("SUBTITLES"),
+                });
+            }
             "#EXT-X-DEFINE" => define(
                 value,
                 &mut variables,
                 inherited,
                 query_variables_allowed.then_some(base),
             )?,
-            "#EXT-X-MEDIA" | "#EXT-X-I-FRAME-STREAM-INF" | "#EXT-X-IMAGE-STREAM-INF" => {
+            "#EXT-X-MEDIA" => {
+                let attributes = selected_attributes(value, |name| name == "TYPE")?;
+                let get = |key| attribute(&attributes, key).map(str::to_owned);
+                if let Some(uri) = attribute(&attributes, "URI") {
+                    let kind = ResourceKind::Rendition {
+                        group: get("TYPE").zip(get("GROUP-ID")),
+                        stable_id: get("STABLE-RENDITION-ID"),
+                    };
+                    add_resource(&mut resources, &variables, base, uri, kind)?;
+                }
+            }
+            "#EXT-X-I-FRAME-STREAM-INF" | "#EXT-X-IMAGE-STREAM-INF" => {
                 if let Some(uri) = attribute(&quoted_attributes(value)?, "URI") {
-                    add_resource(&mut resources, &variables, base, uri, true)?;
+                    add_resource(
+                        &mut resources,
+                        &variables,
+                        base,
+                        uri,
+                        ResourceKind::Playlist,
+                    )?;
                 }
             }
             "#EXT-X-KEY"
@@ -92,17 +157,24 @@ pub fn parse_playlist(
             | "#EXT-X-SESSION-KEY"
             | "#EXT-X-SESSION-DATA" => {
                 if let Some(uri) = attribute(&quoted_attributes(value)?, "URI") {
-                    add_resource(&mut resources, &variables, base, uri, false)?;
+                    add_resource(&mut resources, &variables, base, uri, ResourceKind::Media)?;
                 }
             }
-            "#EXT-X-CONTENT-STEERING" | "#EXT-X-DATERANGE" => {
+            "#EXT-X-CONTENT-STEERING" => {
+                if let Some(uri) = attribute(&quoted_attributes(value)?, "SERVER-URI") {
+                    add_resource(
+                        &mut resources,
+                        &variables,
+                        base,
+                        uri,
+                        ResourceKind::Steering,
+                    )?;
+                }
+            }
+            "#EXT-X-DATERANGE" => {
                 for (key, uri) in quoted_attributes(value)? {
-                    if matches!(
-                        (tag, key),
-                        ("#EXT-X-CONTENT-STEERING", "SERVER-URI")
-                            | ("#EXT-X-DATERANGE", "X-ASSET-URI" | "X-ASSET-LIST")
-                    ) {
-                        add_resource(&mut resources, &variables, base, uri, false)?;
+                    if matches!(key, "X-ASSET-URI" | "X-ASSET-LIST") {
+                        add_resource(&mut resources, &variables, base, uri, ResourceKind::Media)?;
                     }
                 }
             }
@@ -120,7 +192,7 @@ fn add_resource(
     variables: &Variables,
     base: &Url,
     uri: &str,
-    variant: bool,
+    kind: ResourceKind,
 ) -> Option<()> {
     if resources.len() >= MAX_RESOURCES {
         return None;
@@ -130,7 +202,7 @@ fn add_resource(
         return None;
     }
     let url = base.join(&uri).ok()?;
-    resources.push(Resource { url, variant });
+    resources.push(Resource { url, kind });
     Some(())
 }
 
@@ -207,7 +279,14 @@ fn attribute<'a>(attributes: &[(&str, &'a str)], name: &str) -> Option<&'a str> 
 
 /// Quoted strings may contain commas. Parse actual attribute boundaries so
 /// text within another attribute cannot be mistaken for a resource URI.
-fn quoted_attributes(mut list: &str) -> Option<Vec<(&str, &str)>> {
+fn quoted_attributes(list: &str) -> Option<Vec<(&str, &str)>> {
+    selected_attributes(list, |_| false)
+}
+
+fn selected_attributes(
+    mut list: &str,
+    include_unquoted: impl Fn(&str) -> bool,
+) -> Option<Vec<(&str, &str)>> {
     if list.len() > MAX_URI_BYTES {
         return None;
     }
@@ -230,7 +309,11 @@ fn quoted_attributes(mut list: &str) -> Option<Vec<(&str, &str)>> {
                 rest.strip_prefix(',')?
             };
         } else {
-            list = value.split_once(',').map_or("", |(_, rest)| rest);
+            let (value, rest) = value.split_once(',').unwrap_or((value, ""));
+            if include_unquoted(key) {
+                quoted.push((key, value));
+            }
+            list = rest;
         }
     }
     Some(quoted)
@@ -248,7 +331,10 @@ mod tests {
         .unwrap();
         let body = "#EXTM3U\n#EXT-X-DEFINE:QUERYPARAM=\"cdn\"\n#EXT-X-DEFINE:QUERYPARAM=\"name\"\n#EXT-X-DEFINE:VALUE=\"{$cdn}/live\",NAME=\"base\"\n#EXT-X-MEDIA:TYPE=AUDIO,NAME=\"voice, radio\",URI=\"{$base}/{$name}.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=64000\n{$base}/primary.m3u8\n";
         let got = parse_playlist(body, &base, None, true).unwrap();
-        assert!(got.resources.iter().all(|resource| resource.variant));
+        assert!(got
+            .resources
+            .iter()
+            .all(|resource| resource.kind.is_playlist()));
         assert_eq!(
             got.resources
                 .iter()
@@ -271,9 +357,13 @@ mod tests {
         assert_eq!(got.resources[0].url.as_str(), "https://cdn.example/secret");
         assert_eq!(got.resources[1].url.as_str(), "https://cdn.example/001.ts");
         assert!(parse_playlist(child, &base, None, false).is_none());
-        assert!(
-            parse_playlist("#EXTM3U\n#EXTINF:4,\n{$cdn}/001.ts\n", &base, Some(&names), false).is_none()
-        );
+        assert!(parse_playlist(
+            "#EXTM3U\n#EXTINF:4,\n{$cdn}/001.ts\n",
+            &base,
+            Some(&names),
+            false
+        )
+        .is_none());
     }
 
     #[test]

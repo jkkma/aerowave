@@ -71,9 +71,15 @@ pub type TitleSink = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 #[derive(Default)]
 struct Routes {
-    by_token: HashMap<String, String>,
-    by_url: HashMap<String, String>,
+    by_token: HashMap<String, StationRoute>,
+    by_station: HashMap<StationRoute, String>,
     order: VecDeque<String>,
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct StationRoute {
+    url: String,
+    quiet: bool,
 }
 
 fn token() -> String {
@@ -121,22 +127,35 @@ impl Relay {
     /// Give a station URL a local address. The same URL keeps the same token,
     /// so replaying a station does not fill the table.
     pub fn route(&self, url: &str) -> String {
-        let url = url.trim().to_string();
+        self.register(url, false)
+    }
+
+    /// The editor's muted decoder needs its own route so its metadata cannot
+    /// replace a title from the same station playing on the main element.
+    pub fn quiet_route(&self, url: &str) -> String {
+        self.register(url, true)
+    }
+
+    fn register(&self, url: &str, quiet: bool) -> String {
+        let station = StationRoute {
+            url: url.trim().to_string(),
+            quiet,
+        };
         let token = {
             let mut routes = self.routes.lock().unwrap();
-            match routes.by_url.get(&url) {
+            match routes.by_station.get(&station) {
                 Some(existing) => existing.clone(),
                 None => {
                     let fresh = token();
-                    routes.by_token.insert(fresh.clone(), url.clone());
-                    routes.by_url.insert(url, fresh.clone());
+                    routes.by_token.insert(fresh.clone(), station.clone());
+                    routes.by_station.insert(station, fresh.clone());
                     routes.order.push_back(fresh.clone());
                     while routes.order.len() > MAX_ROUTES {
                         let Some(old) = routes.order.pop_front() else {
                             break;
                         };
                         if let Some(stale) = routes.by_token.remove(&old) {
-                            routes.by_url.remove(&stale);
+                            routes.by_station.remove(&stale);
                         }
                     }
                     fresh
@@ -146,7 +165,7 @@ impl Relay {
         format!("http://127.0.0.1:{}/s/{token}", self.port)
     }
 
-    fn upstream_for(&self, token: &str) -> Option<String> {
+    fn upstream_for(&self, token: &str) -> Option<StationRoute> {
         self.routes.lock().unwrap().by_token.get(token).cloned()
     }
 
@@ -256,10 +275,10 @@ impl Relay {
             #[cfg(not(target_os = "linux"))]
             return reply(&mut socket, "404 Not Found").await;
         }
-        let Some(url) = self.upstream_for(&request.token) else {
+        let Some(route) = self.upstream_for(&request.token) else {
             return reply(&mut socket, "404 Not Found").await;
         };
-        let source = match open_for_relay(&url).await {
+        let source = match open_for_relay(&route.url).await {
             Ok(source) => source,
             // The player only ever sees a status code, so the reason goes to
             // the log. `probe_stream` is what puts words on the screen.
@@ -275,18 +294,21 @@ impl Relay {
         );
         socket.write_all(head.as_bytes()).await?;
         let mut pipe = Pipe::new(
-            &self.on_title,
-            &url,
+            (!route.quiet).then_some(&self.on_title),
+            &route.url,
             source.metaint,
             &source.content_type,
             &source.metadata_url,
         );
         match source.body {
-            RelayBody::Http(resp) => {
+            RelayBody::Http { response, primed } => {
                 // reqwest has already undone the chunked framing. Forwarding
                 // the upstream socket raw instead would splice the chunk
                 // sizes into the audio, which is silence with extra steps.
-                let mut body = resp.bytes_stream();
+                if !primed.is_empty() {
+                    pipe.write(&mut socket, &primed).await?;
+                }
+                let mut body = response.bytes_stream();
                 while let Some(chunk) = body.next().await {
                     let Ok(chunk) = chunk else { break };
                     pipe.write(&mut socket, &chunk).await?;
@@ -326,7 +348,7 @@ impl Relay {
 /// straight through, which is what every relayed station did before titles
 /// were read here.
 struct Pipe<'a> {
-    on_title: &'a TitleSink,
+    on_title: Option<&'a TitleSink>,
     url: &'a str,
     strip: Option<MetaStrip>,
     tags: Option<StreamTags>,
@@ -336,7 +358,7 @@ struct Pipe<'a> {
 
 impl<'a> Pipe<'a> {
     fn new(
-        on_title: &'a TitleSink,
+        on_title: Option<&'a TitleSink>,
         url: &'a str,
         metaint: usize,
         content_type: &str,
@@ -346,7 +368,7 @@ impl<'a> Pipe<'a> {
             on_title,
             url,
             strip: (metaint > 0).then(|| MetaStrip::new(metaint)),
-            tags: StreamTags::for_stream(content_type, metadata_url),
+            tags: on_title.and_then(|_| StreamTags::for_stream(content_type, metadata_url)),
             audio: Vec::new(),
             last: None,
         }
@@ -364,14 +386,15 @@ impl<'a> Pipe<'a> {
         if let Some(tags) = self.tags.as_mut() {
             titles.extend(tags.push(&self.audio));
         }
-        for title in titles {
-            // Not every server saves its breath between tracks; some repeat
-            // the current title in every block. Only the changes are news.
-            if self.last.as_deref() == Some(title.as_str()) {
-                continue;
+        if let Some(on_title) = self.on_title {
+            for title in titles {
+                // Some streams repeat the current title in every block.
+                if self.last.as_deref() == Some(title.as_str()) {
+                    continue;
+                }
+                on_title(self.url, &title);
+                self.last = Some(title);
             }
-            (self.on_title)(self.url, &title);
-            self.last = Some(title);
         }
         socket.write_all(&self.audio).await
     }

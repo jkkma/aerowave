@@ -32,6 +32,10 @@ pub struct Station {
     /// Links a promoted history entry without reusing its ID for alarms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recent_id: Option<String>,
+    /// The directory's stream identity survives new searches without
+    /// replacing the submitted URL or keeping the checker's resolved URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_stream_id: Option<String>,
 }
 
 /// Where an alarm gets its sound from. When a station will not play, the

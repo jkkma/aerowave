@@ -18,10 +18,10 @@ use std::time::Duration;
 
 use aerowave_core::directory::{
     art_query_urls, bitrate_band_by_key, clean_name, directory_failure_forgets_mirror,
-    directory_host_candidates, directory_page_window, directory_tag_buckets, exact_tag_filter,
-    first_tag, image_kind, is_country_code, is_directory_host, listen_url, playable_url,
-    resolved_directory_url, select_directory_host, sort_key, stream_key, stream_matches,
-    tally_directory_facets,
+    directory_host_candidates, directory_page_window, directory_stream_id, directory_tag_buckets,
+    exact_tag_filter, first_tag, image_kind, is_country_code, is_directory_host, listen_url,
+    playable_url, resolved_directory_url, select_directory_host, sort_key, stream_key,
+    stream_matches, tally_directory_facets,
     DirectoryFacetEntry, DirectoryFailure, BITRATE_BANDS, DIRECTORY_CODECS,
 };
 use aerowave_core::network::{public_addresses, public_http_destination_allowed};
@@ -508,6 +508,8 @@ pub struct BrowseStation {
     /// the stream when duplicates are compared, and it is what older versions
     /// saved, but it may carry a token or a timestamp that does not last.
     pub resolved_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory_stream_id: Option<String>,
     /// Other submitted addresses the directory resolved to the same stream.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
@@ -1080,6 +1082,7 @@ pub async fn search(query: Query) -> Result<Page, String> {
         let mut station = BrowseStation {
             uuid: entry.stationuuid.unwrap_or_default(),
             name,
+            directory_stream_id: directory_stream_id(&url, &resolved_url),
             url,
             resolved_url,
             aliases: Vec::new(),

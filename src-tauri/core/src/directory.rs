@@ -8,6 +8,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use sha2::{Digest, Sha256};
+
 use crate::network::StationNetwork;
 
 /// Formats the Browse tab can hand to the player.
@@ -328,16 +330,47 @@ pub fn is_hostname(name: &str) -> bool {
 /// all, so neither is done - a normalisation that never fires is only a way
 /// to collapse two stations that were never the same.
 ///
-/// The path is lower-cased along with the host, which is not strictly correct
-/// for a URL path but is correct for this directory: the same stream is filed
-/// as `LOS40.mp3` and `Los40.mp3`.
+/// The path is lower-cased along with the host: the same stream is filed as
+/// `LOS40.mp3` and `Los40.mp3`. A query can contain a case-sensitive stream
+/// selector or signature, so keep it verbatim.
 pub fn stream_key(url: &str) -> String {
-    let lower = url.trim().to_ascii_lowercase();
+    let url = url.trim();
+    let (address, suffix) = url.split_at(url.find(['?', '#']).unwrap_or(url.len()));
+    let lower = address.to_ascii_lowercase();
     let bare = match lower.strip_prefix("https://") {
         Some(rest) => rest,
         None => lower.strip_prefix("http://").unwrap_or(lower.as_str()),
     };
-    bare.trim_end_matches('/').to_string()
+    if suffix.is_empty() {
+        bare.trim_end_matches('/').to_string()
+    } else {
+        format!("{bare}{suffix}")
+    }
+}
+
+/// Remember a directory match without retaining its checked URL. A permanent
+/// query selector can identify a stream, while a changed signature produces
+/// a different identity and leaves the submitted tuning URL usable.
+pub fn directory_stream_id(url: &str, resolved_url: &str) -> Option<String> {
+    let submitted = parse_http_url(url)?;
+    let address = if resolved_url.is_empty() { url } else { resolved_url };
+    let resolved = parse_http_url(address)?;
+    // A selector on the submitted wrapper can lead to a stable stream URL.
+    // Keep that identity while avoiding anything that requires credentials.
+    if !submitted.username().is_empty()
+        || submitted.password().is_some()
+        || !resolved.username().is_empty()
+        || resolved.password().is_some()
+        || resolved.fragment().is_some()
+        || StationNetwork::Public.admit(&resolved).is_err()
+    {
+        return None;
+    }
+    Some(format!("{:x}", Sha256::digest(stream_key(address))))
+}
+
+pub fn is_directory_stream_id(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -704,6 +737,42 @@ mod tests {
             stream_key("http://stream.live.vc.bbcmedia.co.uk/bbc_world_service"),
             stream_key("https://stream.live.vc.bbcmedia.co.uk/bbc_world_service")
         );
+    }
+
+    #[test]
+    fn directory_stream_identity_matches_wrappers_without_storing_the_checked_address() {
+        let first = directory_stream_id("http://first.example/listen?id=1", "http://cdn.example/Live");
+        let second = directory_stream_id("https://second.example/live.m3u", "https://cdn.example/live/");
+        assert_eq!(first, second);
+        assert!(first.as_deref().is_some_and(is_directory_stream_id));
+        assert_ne!(first, directory_stream_id("http://cdn.example/other", ""));
+    }
+
+    #[test]
+    fn directory_stream_identity_matches_exact_queries_and_distinguishes_selectors() {
+        let plain = "https://cdn.example/live";
+        let first = directory_stream_id("https://first.example/tune?id=1", "https://cdn.example/Live?station=A");
+        let duplicate = directory_stream_id("https://second.example/tune?id=2", "http://cdn.example/live?station=A");
+        assert!(first.as_deref().is_some_and(is_directory_stream_id));
+        assert_eq!(first, duplicate);
+        for address in [
+            "https://cdn.example/live?station=B",
+            "https://cdn.example/live?station=a",
+            "https://cdn.example/live?Station=A",
+            "https://cdn.example/live?station=A/",
+            plain,
+        ] {
+            assert_ne!(first, directory_stream_id(plain, address), "{address}");
+        }
+    }
+
+    #[test]
+    fn directory_stream_identity_skips_credentials_and_fragments() {
+        let stable = "https://cdn.example/live";
+        let credentials = "https://user:password@cdn.example/live";
+        assert_eq!(directory_stream_id(credentials, stable), None);
+        assert_eq!(directory_stream_id(stable, credentials), None);
+        assert_eq!(directory_stream_id(stable, "https://cdn.example/live#station"), None);
     }
 
     #[test]

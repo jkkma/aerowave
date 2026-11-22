@@ -239,6 +239,7 @@ const player = {
   lastProgress: 0,    // when audio last actually arrived, for the ring watchdog
   resolved: null,     // the station's own stream URL, after any playlist hop
   probed: false,      // ...and whether a probe, rather than the station, chose it
+  probeError: null,   // broadcaster error to keep if playback never recovers
   directFallbackUrl: null, // exact route approved by a successful local-station probe
   relayed: false,     // is <audio> playing through the local relay?
   streamTitle: false, // has the stream itself named the track? then stop asking
@@ -343,6 +344,7 @@ function stopPlayback(quiet, { skipNative = false } = {}) {
   player.pendingPosition = null;
   player.resolved = null;
   player.probed = false;
+  player.probeError = null;
   player.directFallbackUrl = null;
   player.relayed = false;
   player.triedDirect = false;
@@ -986,7 +988,7 @@ function canDecode(url, timeoutMs = 9000, { hls = false, signal, source = { kind
         decoder.loadSource(url);
         decoder.attachMedia(probe);
       } else {
-        const playUrl = await playable(source, url, directFallbackAllowed);
+        const playUrl = await playable(source, url, { directFallbackAllowed, quiet: true });
         if (settled) return;
         relayed = source.kind === "station" && playUrl !== url;
         probe.src = playUrl;
@@ -1368,14 +1370,16 @@ async function startHls(source, url, generation) {
  * Other platforms keep the asset URL. Desktop direct playback requires a
  * successful probe authorizing the submitted local station's resolved route.
  */
-async function playable(source, url, directFallbackAllowed = false) {
+async function playable(source, url, { directFallbackAllowed = false, quiet = false } = {}) {
   if (source.kind === "folder" && source.path) {
     if (IS_ANDROID) return source.path;
     return await invoke("local_file_url", { path: source.path }) || url;
   }
   if (source.kind !== "station") return url;
   try {
-    const relayed = await invoke("relay_url", { url: source.url || url });
+    const request = { url: source.url || url };
+    if (quiet) request.quiet = true;
+    const relayed = await invoke("relay_url", request);
     if (relayed) return relayed;
     throw new Error("The station relay is unavailable");
   } catch (error) {
@@ -1496,7 +1500,7 @@ async function play(source, opts = {}) {
 
   let useHls = source.kind === "station" && !!source.hls;
   let initialInfo = null;
-  if (source.kind === "station" && (!useHls || /\.(pls|m3u|asx)(\?|$)/i.test(url))) {
+  if (source.kind === "station" && (!useHls || /\.(pls|m3u|asx)([?#]|$)/i.test(url))) {
     // A /listen endpoint can serve or redirect to HLS just as a .m3u8 can.
     // Reuse this request's station headers for the first metadata update.
     try {
@@ -1513,9 +1517,10 @@ async function play(source, opts = {}) {
       if (info.warning) say(info.warning, "bad");
     } catch (e) {
       if (superseded(generation)) return;
+      if (!IS_ANDROID) player.probeError = String(e);
       // A failed informational request need not prevent a relay from playing.
       // Explicit playlists still need resolution before any media load.
-      if (/\.(pls|m3u|m3u8|asx)(\?|$)/i.test(url)) {
+      if (/\.(pls|m3u|m3u8|asx)([?#]|$)/i.test(url)) {
         failure(String(e));
         return;
       }
@@ -1539,7 +1544,7 @@ async function play(source, opts = {}) {
   } else {
     let playUrl;
     try {
-      playUrl = await playable(source, url, player.directFallbackUrl === url);
+      playUrl = await playable(source, url, { directFallbackAllowed: player.directFallbackUrl === url });
     } catch (e) {
       if (!superseded(generation) && !givingUp) failure(String(e));
       return;
@@ -2110,7 +2115,8 @@ function failure(detail, opts = {}) {
     }
     // The station is not coming back. Fall through to the backup folder.
     say("stream unavailable - falling back to the backup folder", "bad");
-    playBackupTrack(source.title + " is unavailable (" + detail + ")", { volume: player.target });
+    const reason = !IS_ANDROID && player.probeError ? player.probeError : detail;
+    playBackupTrack(source.title + " is unavailable (" + reason + ")", { volume: player.target });
     return;
   }
   const wait = 1500 * player.retries;
@@ -2131,12 +2137,17 @@ function failure(detail, opts = {}) {
         // A stop during the probe must not write a resolved URL back into a
         // session that has already been torn down.
         if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
+        player.probeError = null;
         player.resolved = info.url;
         player.probed = true;
         if (!IS_ANDROID && info.directFallbackAllowed === true) player.directFallbackUrl = info.url;
         source.hls = !!info.hls;
         source.hlsUrl = info.hls ? info.url : null;
-      } catch { /* stay with the address already resolved */ }
+      } catch (error) {
+        if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
+        if (!IS_ANDROID) player.probeError = String(error);
+        // Still give the previous route a chance to recover.
+      }
     }
     if (superseded(generation) || player.source !== source || player.paused || givingUp) return;
     const upstream = player.resolved || source.url;
@@ -2160,7 +2171,7 @@ function failure(detail, opts = {}) {
       const directAllowed = player.directFallbackUrl === upstream;
       let playUrl;
       try {
-        playUrl = player.triedDirect && directAllowed ? upstream : await playable(source, upstream, directAllowed);
+        playUrl = player.triedDirect && directAllowed ? upstream : await playable(source, upstream, { directFallbackAllowed: directAllowed });
       } catch (error) {
         if (!superseded(generation) && player.source === source && !player.paused && !givingUp) {
           failure(String(error));
@@ -2253,6 +2264,7 @@ async function playLoadedAudio(generation) {
   try {
     await audio.play();
     if (!current()) return false;
+    player.probeError = null;
     if (player.pendingFadeSeconds > 0) {
       fadeTo(player.target, player.pendingFadeSeconds);
       player.pendingFadeSeconds = 0;
@@ -2397,6 +2409,7 @@ function playStation(station, opts) {
       logo: station.logo,
       tag: station.tag,
       stationId: station.id,
+      directoryStreamId: station.directoryStreamId,
       hls: !!station.hls,
     },
     opts
@@ -2833,8 +2846,13 @@ const browseNarrows = new Map();
 const sameStream = (a, b) => {
   // ASCII case only, as `to_ascii_lowercase` folds it: `/Ö` and `/ö` are two
   // paths to the backend, so they must be two here too.
-  const tidy = (u) => (u || "").trim().replace(/[A-Z]+/g, (upper) => upper.toLowerCase())
-    .replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  const tidy = (u) => {
+    const url = (u || "").trim();
+    const suffixAt = url.search(/[?#]/);
+    const address = suffixAt < 0 ? url : url.slice(0, suffixAt);
+    const bare = address.replace(/[A-Z]+/g, (upper) => upper.toLowerCase()).replace(/^https?:\/\//, "");
+    return suffixAt < 0 ? bare.replace(/\/+$/, "") : bare + url.slice(suffixAt);
+  };
   return !!tidy(a) && tidy(a) === tidy(b);
 };
 
@@ -2845,18 +2863,19 @@ const sameStream = (a, b) => {
  */
 const browseStreamOf = (st) => st.resolvedUrl || st.url;
 
-/**
- * Whether a saved or playing address is this row: its submitted address, or
- * the resolved one that earlier versions saved. A resolved address that
- * has since moved on - laut.fm stamps the time of each check into theirs -
- * still matches through the submitted one.
- */
-const isBrowseRow = (url, st) => sameStream(url, st.url) || sameStream(url, st.resolvedUrl) ||
-  (st.aliases || []).some(alias => sameStream(url, alias));
+const sameSavedStream = (a, b) => sameStream(a.url, b.url) ||
+  (!!a.directoryStreamId && a.directoryStreamId === b.directoryStreamId);
 
-const browseSaved = (st) => state.stations.some((s) => isBrowseRow(s.url, st));
-const browseSaving = (st) => Array.from(pendingBrowseAdds).some((s) => isBrowseRow(s.url, st));
-const browsePlaying = (st) => !!player.source && isBrowseRow(player.source.url, st);
+/**
+ * A stable directory identity survives a search whose aliases are different.
+ * Older saves still match the submitted, resolved or alternate addresses.
+ */
+const isBrowseRow = (source, st) => sameSavedStream(source, st) || sameStream(source.url, st.resolvedUrl) ||
+  (st.aliases || []).some(alias => sameStream(source.url, alias));
+
+const browseSaved = (st) => state.stations.some((station) => isBrowseRow(station, st));
+const browseSaving = (st) => Array.from(pendingBrowseAdds).some((station) => isBrowseRow(station, st));
+const browsePlaying = (st) => !!player.source && isBrowseRow(player.source, st);
 
 /** A saved station's tag, held to the editor's 24 characters as `first_tag` is. */
 const stationTag = (text) => Array.from(String(text || "").trim()).slice(0, 24).join("").trimEnd();
@@ -3318,7 +3337,8 @@ async function narrow(selector, query, pick, unpack, what) {
     const facets = await facetsFor(query);
     if (browseNarrows.get(selector) !== mine) return;
     const current = filterNow(selector);
-    setBrowseOptions(selector, pick(facets), unpack, current.value, current.label, facets.sampled);
+    const globalEntries = selector === "#browse-tag" ? browseTags : browseCountries;
+    setBrowseOptions(selector, pick(facets), unpack, current.value, current.label, facets.sampled, globalEntries);
   } catch {
     if (browseNarrows.get(selector) !== mine) return;
     // The old list belongs to different filters. Replace its now-false counts
@@ -3337,19 +3357,18 @@ async function narrow(selector, query, pick, unpack, what) {
  * the country list has always filed it. Rust can only order by bytes, which
  * put Türkiye after Tuvalu and any accented genre after Z.
  */
-function inBrowseOrder(entries, unpack) {
+function inBrowseOrder(entries) {
   const key = (name) => {
     const trimmed = String(name || "").trim();
     return /^the /i.test(trimmed) ? trimmed.slice(4) : trimmed;
   };
-  return entries.map(unpack)
-    .sort((a, b) => key(a[1]).localeCompare(key(b[1]), undefined, { sensitivity: "base" }));
+  return entries.sort((a, b) => key(a[1]).localeCompare(key(b[1]), undefined, { sensitivity: "base" }));
 }
 
 function setBrowseFallback(selector, entries, unpack, value, label) {
   const select = $(selector);
   while (select.options.length > 1) select.remove(1);
-  inBrowseOrder(entries, unpack).forEach(([optionValue, optionLabel]) => {
+  inBrowseOrder(entries.map(unpack)).forEach(([optionValue, optionLabel]) => {
     const option = document.createElement("option");
     option.value = optionValue;
     option.dataset.label = optionLabel;
@@ -3373,29 +3392,28 @@ function setBrowseFallback(selector, entries, unpack, value, label) {
  * person reads, which are not always the same string - so the label rides
  * along on the option for anything that saves it.
  */
-function setBrowseOptions(selector, entries, unpack, value, label, sampled) {
+function setBrowseOptions(selector, entries, unpack, value, label, sampled, globalEntries) {
   const select = $(selector);
+  const choices = new Map(entries.map(unpack).map(entry => [entry[0], entry]));
+  if (sampled) {
+    // An incomplete tally cannot rule out a country or genre. Offer the
+    // missing global choices without repeating their whole-directory counts.
+    for (const [optionValue, optionLabel] of (globalEntries || []).map(unpack)) {
+      if (!choices.has(optionValue)) choices.set(optionValue, [optionValue, optionLabel]);
+    }
+  }
+  if (value && !choices.has(value)) choices.set(value, [value, label || value, sampled ? undefined : 0]);
+
   while (select.options.length > 1) select.remove(1);
-  inBrowseOrder(entries, unpack).forEach(([optionValue, optionLabel, stations]) => {
+  inBrowseOrder([...choices.values()]).forEach(([optionValue, optionLabel, stations]) => {
     const option = document.createElement("option");
     option.value = optionValue;
     option.dataset.label = optionLabel;
     // A tally that hit its limit counted a slice of a big country, so what it
     // found is a floor. Say "312+" rather than passing it off as the total.
-    option.textContent = `${optionLabel} (${stations}${sampled ? "+" : ""})`;
+    option.textContent = stations === undefined ? optionLabel : `${optionLabel} (${stations}${sampled ? "+" : ""})`;
     select.append(option);
   });
-  // A filter still filtering must still be shown, even when the other side
-  // has narrowed it out of the list - otherwise the dropdown quietly claims
-  // to be set to something it is not.
-  const known = Array.prototype.some.call(select.options, (o) => o.value === value);
-  if (value && !known) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.dataset.label = label || value;
-    option.textContent = `${label || value} (0${sampled ? "+" : ""})`;
-    select.append(option);
-  }
   select.value = value;
 }
 
@@ -3413,6 +3431,7 @@ function previewBrowse(st) {
     logo: st.favicon,
     tag: st.tags || st.tag || "",
     stationId: null,
+    directoryStreamId: st.directoryStreamId,
     // The directory's HLS flag describes the address its checker reached. It
     // can start hls.js directly only when that is also the address played;
     // behind a playlist or redirect, the probe finds a fresh manifest instead
@@ -3438,6 +3457,7 @@ function addBrowseStation(st) {
     id: newId(),
     name: st.name,
     url: st.url,
+    directoryStreamId: st.directoryStreamId,
     tag,
     logo: st.favicon,
     favorite: false,
@@ -4135,7 +4155,7 @@ function recentStations() {
 
 function resolveRecentStation(recent) {
   return stationById(recent.id) || state.stations.find(saved => saved.recentId === recent.id) ||
-    state.stations.find(saved => sameStream(saved.url, recent.url)) || recent;
+    state.stations.find(saved => sameSavedStream(saved, recent)) || recent;
 }
 
 function currentRecentStations() {
@@ -4144,7 +4164,7 @@ function currentRecentStations() {
     const station = resolveRecentStation(recent);
     // An edit can make separate history snapshots converge on one saved row or
     // stream. Keep its newest position without changing the stored snapshots.
-    if (!current.some(item => item.id === station.id || sameStream(item.url, station.url))) current.push(station);
+    if (!current.some(item => item.id === station.id || sameSavedStream(item, station))) current.push(station);
   }
   return current;
 }
@@ -4205,14 +4225,15 @@ function rememberPlayedStation() {
   if (ringing || source?.kind !== "station" || !/^https?:\/\//i.test(source.url || "") || historyRecordedSource === source) return;
   historyRecordedSource = source;
   const previous = recentStations();
-  const saved = state.stations.find(station => sameStream(station.url, source.url));
-  const old = previous.find(station => sameStream(station.url, source.url));
+  const saved = state.stations.find(station => sameSavedStream(station, source));
+  const old = previous.find(station => sameSavedStream(station, source));
   const entry = saved ? { ...saved } : {
     id: old?.id || source.stationId || newId(), name: source.title || "Live radio", url: source.url,
     tag: source.tag || old?.tag || "", logo: source.logo || old?.logo || "", favorite: false,
+    directoryStreamId: source.directoryStreamId || old?.directoryStreamId,
   };
   const history = [entry, ...previous.filter(station => resolveRecentStation(station).id !== entry.id &&
-    station.id !== entry.id && !sameStream(station.url, entry.url))].slice(0, 20);
+    station.id !== entry.id && !sameSavedStream(station, entry))].slice(0, 20);
   if (JSON.stringify(history) === JSON.stringify(previous)) return;
   state.settings.recentStations = history;
   saveSettings(null, "recentStations");
@@ -4228,7 +4249,7 @@ async function saveRecentStation(station) {
   renderStations();
   try {
     await saveStations({ extraStation: saved, onSuccess: () => {
-      if (!state.stations.some(item => sameStream(item.url, saved.url))) state.stations.push(saved);
+      if (!state.stations.some(item => sameSavedStream(item, saved))) state.stations.push(saved);
       say(saved.name + " added to your stations", "good");
     } });
   } finally {
@@ -4975,7 +4996,7 @@ function saveStations({ extraStation = null, move = null, patch = null, removeId
     }
     let linkedStationId = null;
     if (extraStation) {
-      const existing = stations.find(station => sameStream(station.url, extraStation.url));
+      const existing = stations.find(station => sameSavedStream(station, extraStation));
       if (!existing) stations.push({ ...extraStation });
       else if (extraStation.recentId && !existing.recentId) {
         existing.recentId = extraStation.recentId;
@@ -6468,7 +6489,7 @@ function wire() {
     }
     const changes = { name, url, tag: $("#st-tag").value.trim() };
     if (!editingStation) changes.favorite = false;
-    else if (editingStation.url !== url) Object.assign(changes, { logo: "", hls: false });
+    else if (editingStation.url !== url) Object.assign(changes, { logo: "", hls: false, directoryStreamId: null });
     await saveStationEditorChange({ patch: { id: stationDraftId, changes, create: !editingStation } }, "station saved");
   });
 
