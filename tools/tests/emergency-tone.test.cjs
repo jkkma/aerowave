@@ -69,7 +69,7 @@ for (const action of ["dismissRing()", "snoozeRing()"])
     pending.resolve();
     await flush();
     assert.equal(h.evaluate("ringing"), null);
-    assert.equal(h.el("#ringing").hidden, true);
+    assert.equal(h.el("#ringing").open, false);
     assert.equal(calls(h, "start_emergency_tone").length, 1);
   });
 

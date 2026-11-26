@@ -514,18 +514,35 @@ function init() {
 
   wireClicks(host);
   host.classList.add("gl");
+  let hostInView = true;
+  let hostSkipped = false;
+  if (typeof IntersectionObserver === "function") {
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries.at(-1);
+      if (!entry) return;
+      hostInView = entry.isIntersecting;
+      renderLoop?.sync();
+    }, { threshold: 0 });
+    observer.observe(host);
+  }
+  host.closest?.(".orbwrap")?.addEventListener?.("contentvisibilityautostatechange", (event) => {
+    hostSkipped = !!event.skipped;
+    renderLoop?.sync();
+  });
   renderLoop = createOrbRenderLoop({
     renderer: state.renderer,
     draw: () => state.renderer.render(state.scene, state.camera),
     step,
-    visible: () => window.aerowaveVisuals?.visible() ?? !document.hidden,
+    visible: () => (window.aerowaveVisuals?.visible() ?? !document.hidden)
+      && hostInView
+      && !hostSkipped
+      && (typeof host.getClientRects !== "function" || host.getClientRects().length > 0),
     reducedMotion: () => reducedMotion.matches,
     now: () => performance.now(),
     pause: () => { state.kick = 0; },
   });
   if (!window.aerowaveVisuals) document.addEventListener("visibilitychange", renderLoop.sync);
-  if (reducedMotion.addEventListener) reducedMotion.addEventListener("change", renderLoop.sync);
-  else reducedMotion.addListener(renderLoop.sync);
+  reducedMotion.addEventListener("change", renderLoop.sync);
   renderLoop.sync();
   return true;
 }

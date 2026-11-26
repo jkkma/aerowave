@@ -131,7 +131,7 @@ test("test rings cannot schedule a snooze or dismiss a real pending occurrence",
   h.evaluate('onAlarmFire({alarmId:"saved",trigger:"test",kind:"none",snoozeMins:10,hour:7,minute:0})');
   assert.equal(h.el("#ring-snooze").disabled, true);
   await h.evaluate("snoozeRing()");
-  assert.equal(h.el("#ringing").hidden, false);
+  assert.equal(h.el("#ringing").open, true);
   await h.evaluate("dismissRing()");
   assert.equal(h.calls.some(c => c.command === "snooze_alarm" || c.command === "dismiss_alarm"), false);
   h.evaluate('onAlarmFire({alarmId:"saved",trigger:"scheduled",kind:"none",snoozeMins:10,hour:7,minute:0})');
@@ -156,17 +156,17 @@ for (const [action, command, verb] of [["snoozeRing", "snooze_alarm", "snooze"],
     await flush();
     const active = h.evaluate("ringing");
     const pending = h.evaluate(`${action}()`);
-    assert.equal(h.el("#ringing").hidden, false);
+    assert.equal(h.el("#ringing").open, true);
     assert.equal(h.audios[0].paused, false);
     request.reject(new Error("backend refused the action"));
     await pending;
     assert.equal(h.evaluate("ringing"), active);
-    assert.equal(h.el("#ringing").hidden, false);
+    assert.equal(h.el("#ringing").open, true);
     assert.equal(h.audios[0].paused, false);
     assert.match(h.el("#ring-note").textContent, new RegExp("Could not " + verb));
     await h.evaluate(`${action}()`);
     assert.equal(h.evaluate("ringing"), null);
-    assert.equal(h.el("#ringing").hidden, true);
+    assert.equal(h.el("#ringing").open, false);
     assert.equal(h.audios[0].paused, true);
   });
 
@@ -185,7 +185,7 @@ for (const [action, command, verb] of [["snoozeRing", "snooze_alarm", "snooze"],
       await pending;
       assert.equal(h.evaluate("ringing"), current);
       assert.equal(h.evaluate("player.source.title"), "New ring");
-      assert.equal(h.el("#ringing").hidden, false);
+      assert.equal(h.el("#ringing").open, true);
       assert.equal(h.el("#ring-note").textContent, "");
       assert.equal(h.audios[0].paused, false);
       assert.doesNotMatch(h.el("#status-msg").textContent, /snoozed|old action failed/i);
@@ -606,4 +606,99 @@ test("boot listens for native window actions before loading settings", async () 
   await h.emit("window-action-requested", { requestId: "11", action: "close" });
   assert.equal(h.calls.some(c => c.command === "save_settings"), false);
   assert.equal(h.calls.find(c => c.command === "complete_window_action").args.saved, true);
+});
+
+
+test("HTML and CSS adopt modern color-scheme, text-scale, cascade layers, switches, and modal dialog", () => {
+  const root = path.resolve(__dirname, "../..");
+  const html = fs.readFileSync(path.join(root, "src/index.html"), "utf8");
+  const css = fs.readFileSync(path.join(root, "src/styles.css"), "utf8");
+
+  assert.match(html, /<meta\s+name="color-scheme"\s+content="dark">/);
+  assert.match(html, /<meta\s+name="text-scale"\s+content="scale">/);
+  assert.match(html, /<dialog[^>]+id="ringing"[^>]+closedby="none"/);
+  assert.match(html, /id="ring-dismiss"[^>]*autofocus/);
+  assert.match(html, /<input[^>]+type="checkbox"[^>]+switch[^>]+role="switch"[^>]+id="setting-clock"/);
+  assert.doesNotMatch(html, /vendor\/hls\.min\.js/);
+  assert.match(css, /@layer\s+base,\s*layout,\s*components,\s*platform,\s*utilities;/);
+});
+
+test("say() applies mood classes without inline color and clears on reset", async () => {
+  const h = createHarness();
+  let setColor = false;
+  h.el("#status-msg").style = {
+    set color(_v) { setColor = true; },
+    setProperty() {},
+  };
+  h.evaluate("say('Stream unavailable', 'bad')");
+  assert.equal(setColor, false);
+  assert.equal(h.el("#status-msg").classList.contains("bad"), true);
+  assert.equal(h.el("#status-msg").classList.contains("good"), false);
+  await h.fireTimer(h.evaluate("statusMsgTimer"));
+  assert.equal(h.el("#status-msg").textContent, "Ready");
+  assert.equal(h.el("#status-msg").classList.contains("bad"), false);
+});
+
+test("syncSlider computes --fill percentage from actual min and max", () => {
+  const h = createHarness();
+  let volumeFill = "";
+  let alarmFill = "";
+  const vol = h.el("#volume");
+  vol.min = "0";
+  vol.max = "100";
+  vol.value = "50";
+  vol.style = { setProperty: (k, v) => { if (k === "--fill") volumeFill = v; } };
+  const alarmVol = h.el("#al-volume");
+  alarmVol.min = "10";
+  alarmVol.max = "";
+  alarmVol.value = "55";
+  alarmVol.style = { setProperty: (k, v) => { if (k === "--fill") alarmFill = v; } };
+
+  h.evaluate('syncSlider($("#volume"), $("#volval"))');
+  h.evaluate('syncSlider($("#al-volume"), $("#al-volval"), "%")');
+  assert.equal(volumeFill, "50%");
+  assert.equal(vol.getAttribute("aria-valuetext"), "50%");
+  assert.equal(alarmFill, "50%");
+  assert.equal(alarmVol.getAttribute("aria-valuetext"), "55%");
+  assert.equal(h.el("#al-volval").textContent, "55%");
+});
+
+test("IME composition prevents Enter from submitting search or alarm name", async () => {
+  const h = createHarness({
+    navigator: { userAgent: "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36" },
+  });
+  let searches = 0;
+  h.evaluate("wire(); browseSearch = () => { globalThis.__browseSearches = (globalThis.__browseSearches || 0) + 1; };");
+  h.el("#browse-query").focus();
+  for (const ime of [{ key: "Enter", isComposing: true }, { key: "Enter", keyCode: 229 }]) {
+    const e = await h.el("#browse-query").dispatch("keydown", ime);
+    assert.equal(e.defaultPrevented, false);
+  }
+  searches = h.evaluate("globalThis.__browseSearches || 0");
+  assert.equal(searches, 0);
+
+  h.el("#station-filter").focus();
+  const filterEvent = await h.el("#station-filter").dispatch("keydown", { key: "Enter", isComposing: true });
+  assert.equal(filterEvent.defaultPrevented, false);
+  assert.equal(h.document.activeElement, h.el("#station-filter"));
+
+  h.el("#al-name-dialog").open = true;
+  h.el("#al-name-input").focus();
+  const nameEvent = await h.el("#al-name-input").dispatch("keydown", { key: "Enter", keyCode: 229 });
+  assert.equal(nameEvent.defaultPrevented, false);
+  assert.equal(h.el("#al-name-dialog").open, true);
+});
+
+test("ensureHls lazily loads vendor/hls.min.js only when Hls is absent", async () => {
+  const h = createHarness();
+  const originalHls = h.context.Hls;
+  h.evaluate("delete globalThis.Hls");
+  let appended = null;
+  h.document.head.append = (node) => { appended = node; };
+  const pending = h.evaluate("ensureHls()");
+  assert.equal(appended?.src, "vendor/hls.min.js");
+  h.context.Hls = originalHls;
+  await appended.dispatch("load");
+  const resolved = await pending;
+  assert.equal(resolved, originalHls);
 });

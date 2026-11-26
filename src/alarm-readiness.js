@@ -109,7 +109,7 @@ window.AlarmReadiness = {
     }
     async function refresh() {
       if (busy) return;
-      const context = JSON.parse(JSON.stringify(getContext()));
+      const context = structuredClone(getContext());
       const request = ++generation;
       inspectedKey = key();
       buttons(true);

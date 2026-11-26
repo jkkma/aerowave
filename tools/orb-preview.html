@@ -11,6 +11,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>Aerowave orb preview</title>
 <link rel="stylesheet" href="../src/styles.css">
 <style>
@@ -133,10 +134,15 @@
 
   .preview-toggle button:hover,
   .preview-toggle button:focus-visible,
+  .preview-select:hover,
   .preview-select:focus-visible {
-    outline: none;
     border-color: var(--aqua);
     box-shadow: 0 0 0 2px rgba(111, 227, 245, .2);
+  }
+  .preview-toggle button:focus-visible,
+  .preview-select:focus-visible {
+    outline: 2px solid var(--amber);
+    outline-offset: 2px;
   }
 
   .preview-toggle button[aria-pressed="true"] {

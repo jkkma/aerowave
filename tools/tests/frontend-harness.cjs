@@ -19,6 +19,7 @@ class Element {
     this.className = "";
     this.textContent = "";
     this.value = "";
+    this.checked = false;
     this.disabled = false;
     this.classList = {
       contains: (name) => this.className.split(/\s+/).includes(name),
@@ -93,8 +94,18 @@ class Element {
   blur() {
     if (this.ownerDocument?.activeElement === this) this.ownerDocument.activeElement = this.ownerDocument.body;
   }
-  showModal() { this.open = true; }
-  close() { this.open = false; }
+  showModal() {
+    if (this.open) return;
+    this._returnFocus = this.ownerDocument?.activeElement || null;
+    this.open = true;
+  }
+  close() {
+    if (!this.open) return;
+    this.open = false;
+    const previous = this._returnFocus;
+    this._returnFocus = null;
+    if (previous?.isConnected) previous.focus();
+  }
   select() {}
   scrollIntoView() {}
 }
@@ -120,6 +131,8 @@ function createHarness(options = {}) {
   };
   const document = new Element("document");
   document.body = new Element("body");
+  document.head = new Element("head");
+  document.head.ownerDocument = document;
   document.activeElement = document.body;
   document.createElement = (tag) => Object.assign(new Element(tag), { ownerDocument: document });
   document.querySelector = (selector) => selector.startsWith("#") ? el(selector) : (queries.get(selector)?.[0] || null);
@@ -187,7 +200,7 @@ function createHarness(options = {}) {
     return id;
   };
   const context = vm.createContext({
-    document, Audio, Hls, URL, TextEncoder, TextDecoder, AbortController, console,
+    document, Audio, Hls, URL, TextEncoder, TextDecoder, AbortController, structuredClone, console,
     performance: options.performance || { now: () => 0 },
     btoa: (str) => Buffer.from(str, "binary").toString("base64"),
     navigator: options.navigator || {},

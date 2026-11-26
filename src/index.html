@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="text-scale" content="scale">
 <title>Aerowave</title>
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -28,18 +30,15 @@
     <span class="tb-date" id="tb-date"></span>
   </div>
   <div class="winbtns">
-    <button class="winbtn" id="btn-min" title="Minimise" aria-label="Minimise"><svg viewBox="0 0 12 12"><path d="M2 6h8"/></svg></button>
-    <button class="winbtn" id="btn-max" title="Maximise" aria-label="Maximise"><svg viewBox="0 0 12 12"><rect x="2.5" y="2.5" width="7" height="7"/></svg></button>
-    <button class="winbtn close" id="btn-close" title="Close to tray" aria-label="Close"><svg viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6"/></svg></button>
+    <button type="button" class="winbtn" id="btn-min" title="Minimise" aria-label="Minimise"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8"/></svg></button>
+    <button type="button" class="winbtn" id="btn-max" title="Maximise" aria-label="Maximise"><svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2.5" y="2.5" width="7" height="7"/></svg></button>
+    <button type="button" class="winbtn close" id="btn-close" title="Close to tray" aria-label="Close"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6"/></svg></button>
   </div>
 </header>
 
 <main id="app-content">
   <!-- ============================ left: the stage ====================== -->
   <section class="stage panel bevel" id="player-stage">
-    <div class="corner tl"></div><div class="corner tr"></div>
-    <div class="corner bl"></div><div class="corner br"></div>
-
     <div class="orbwrap">
       <div class="orb" id="orb">
         <div class="orb-body"></div>
@@ -59,19 +58,19 @@
     </div>
 
     <div class="transport">
-      <button class="gel big" id="btn-play" title="Play / stop (Space)" aria-label="Play / stop">
-        <svg class="ic-play" viewBox="0 0 24 24"><path d="M8 5l12 7-12 7z"/></svg>
-        <svg class="ic-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
-        <svg class="ic-pause android-only" viewBox="0 0 24 24"><path d="M7 5h4v14H7zM14 5h4v14h-4z"/></svg>
+      <button type="button" class="gel big" id="btn-play" title="Play / stop (Space)" aria-label="Play / stop">
+        <svg class="ic-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l12 7-12 7z"/></svg>
+        <svg class="ic-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+        <svg class="ic-pause android-only" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM14 5h4v14h-4z"/></svg>
       </button>
-      <button class="gel" id="btn-prev" title="Previous station" aria-label="Previous station"><svg viewBox="0 0 24 24"><path d="M6 6h2.5v12H6zM18.5 6l-8.5 6 8.5 6z"/></svg></button>
-      <button class="gel" id="btn-next" title="Next station" aria-label="Next station"><svg viewBox="0 0 24 24"><path d="M15.5 6h2.5v12h-2.5zM5.5 6l8.5 6-8.5 6z"/></svg></button>
+      <button type="button" class="gel" id="btn-prev" title="Previous station" aria-label="Previous station"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h2.5v12H6zM18.5 6l-8.5 6 8.5 6z"/></svg></button>
+      <button type="button" class="gel" id="btn-next" title="Next station" aria-label="Next station"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 6h2.5v12h-2.5zM5.5 6l8.5 6-8.5 6z"/></svg></button>
 
       <button class="gel android-only" id="btn-stop-android" type="button" aria-label="Stop playback" hidden>Stop</button>
 
       <div class="volwrap">
-        <svg class="volic" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 010 7"/></svg>
-        <input type="range" id="volume" class="slider" min="0" max="100" value="80" aria-label="Volume">
+        <svg class="volic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 010 7"/></svg>
+        <input type="range" id="volume" name="volume" class="slider" min="0" max="100" value="80" aria-label="Volume" aria-valuetext="80%">
         <span class="volval" id="volval">80</span>
       </div>
     </div>
@@ -80,18 +79,18 @@
       <div class="sleeprow">
         <span class="hud-mini" id="sleep-caption">Sleep timer</span>
         <div class="chips" id="sleep-chips" role="group" aria-labelledby="sleep-caption">
-          <button class="chip on" data-mins="0" aria-pressed="true">Off</button>
-          <button class="chip" data-mins="15" aria-pressed="false" aria-label="15 minutes">15</button>
-          <button class="chip" data-mins="30" aria-pressed="false" aria-label="30 minutes">30</button>
-          <button class="chip" data-mins="45" aria-pressed="false" aria-label="45 minutes">45</button>
-          <button class="chip" data-mins="60" aria-pressed="false" aria-label="60 minutes">60</button>
-          <button class="chip" data-mins="90" aria-pressed="false" aria-label="90 minutes">90</button>
-          <button class="chip" data-mins="120" aria-pressed="false" aria-label="120 minutes">120</button>
+          <button type="button" class="chip on" data-mins="0" aria-pressed="true">Off</button>
+          <button type="button" class="chip" data-mins="15" aria-pressed="false" aria-label="15 minutes">15</button>
+          <button type="button" class="chip" data-mins="30" aria-pressed="false" aria-label="30 minutes">30</button>
+          <button type="button" class="chip" data-mins="45" aria-pressed="false" aria-label="45 minutes">45</button>
+          <button type="button" class="chip" data-mins="60" aria-pressed="false" aria-label="60 minutes">60</button>
+          <button type="button" class="chip" data-mins="90" aria-pressed="false" aria-label="90 minutes">90</button>
+          <button type="button" class="chip" data-mins="120" aria-pressed="false" aria-label="120 minutes">120</button>
         </div>
       </div>
       <div class="sleeprow sleep-action-row">
         <label class="hud-mini desktop-only" for="sleep-action">On finish</label>
-        <select class="field desktop-only" id="sleep-action" aria-describedby="sleep-hint">
+        <select class="field desktop-only" id="sleep-action" name="sleepAction" aria-describedby="sleep-hint">
           <option value="stop">Stop audio</option>
           <option value="sleep">Sleep PC</option>
           <option value="shutdown">Shut down PC</option>
@@ -104,18 +103,15 @@
 
   <!-- ========================== right: the console ===================== -->
   <section class="console panel bevel">
-    <div class="corner tl"></div><div class="corner tr"></div>
-    <div class="corner bl"></div><div class="corner br"></div>
-
-    <nav class="tabs" role="tablist" aria-label="Main navigation">
-      <button class="android-only" id="tab-player" data-pane="player" role="tab" aria-selected="false" aria-controls="pane-player" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="m10 8 6 4-6 4z"/></svg><span>Player</span></button>
-      <button class="tab on" id="tab-radio" data-pane="radio" role="tab" aria-selected="true" aria-controls="pane-radio"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10h16v10H4zM8 10V6l8-3v7M8 15h8M16 15h2"/></svg><span id="tab-radio-label">Stations</span></button>
-      <button class="tab" id="tab-browse" data-pane="browse" role="tab" aria-selected="false" aria-controls="pane-browse" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m15.5 15.5 5 5"/></svg><span>Browse</span></button>
-      <button class="tab" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 17h14l-2-3V9a5 5 0 0 0-10 0v5zM10 20h4M4 5 2 7M20 5l2 2"/></svg><span>Alarms</span></button>
-      <button class="tab" id="tab-settings" data-pane="settings" role="tab" aria-selected="false" aria-controls="pane-settings" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 2h4l.5 2.2 1.8.8 2-.9 2.8 2.8-.9 2 .8 1.8L23 11v4l-2.2.5-.8 1.8.9 2-2.8 2.8-2-.9-1.8.8L14 24h-4l-.5-2.2-1.8-.8-2 .9-2.8-2.8.9-2-.8-1.8L1 15v-4l2.2-.5.8-1.8-.9-2L5.9 3.9l2 .9 1.8-.8z" transform="translate(0 -1) scale(.96)"/><circle cx="12" cy="12" r="3"/></svg><span>Settings</span></button>
-    </nav>
+    <div class="tabs" role="tablist" aria-label="Views">
+      <button type="button" class="android-only" id="tab-player" data-pane="player" role="tab" aria-selected="false" aria-controls="pane-player" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="m10 8 6 4-6 4z"/></svg><span>Player</span></button>
+      <button type="button" class="tab on" id="tab-radio" data-pane="radio" role="tab" aria-selected="true" aria-controls="pane-radio"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10h16v10H4zM8 10V6l8-3v7M8 15h8M16 15h2"/></svg><span id="tab-radio-label">Stations</span></button>
+      <button type="button" class="tab" id="tab-browse" data-pane="browse" role="tab" aria-selected="false" aria-controls="pane-browse" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m15.5 15.5 5 5"/></svg><span>Browse</span></button>
+      <button type="button" class="tab" id="tab-alarms" data-pane="alarms" role="tab" aria-selected="false" aria-controls="pane-alarms" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 17h14l-2-3V9a5 5 0 0 0-10 0v5zM10 20h4M4 5 2 7M20 5l2 2"/></svg><span>Alarms</span></button>
+      <button type="button" class="tab" id="tab-settings" data-pane="settings" role="tab" aria-selected="false" aria-controls="pane-settings" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 2h4l.5 2.2 1.8.8 2-.9 2.8 2.8-.9 2 .8 1.8L23 11v4l-2.2.5-.8 1.8.9 2-2.8 2.8-2-.9-1.8.8L14 24h-4l-.5-2.2-1.8-.8-2 .9-2.8-2.8.9-2-.8-1.8L1 15v-4l2.2-.5.8-1.8-.9-2L5.9 3.9l2 .9 1.8-.8z" transform="translate(0 -1) scale(.96)"/><circle cx="12" cy="12" r="3"/></svg><span>Settings</span></button>
+    </div>
     <!-- ---------------------------- player --------------------------- -->
-    <div class="pane" id="pane-player" role="tabpanel" aria-labelledby="tab-player"></div>
+    <div class="pane" id="pane-player" role="tabpanel" aria-labelledby="tab-player" hidden></div>
     <section class="android-quick-access android-only" id="android-quick-access" aria-labelledby="android-quick-title" hidden>
       <h2 id="android-quick-title" tabindex="-1">Jump back in</h2>
       <div class="android-quick-list" id="android-quick-list"></div>
@@ -132,17 +128,19 @@
           </div>
           <button type="button" class="gel" id="btn-add-station">+ Add station</button>
         </div>
-        <label class="station-search">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
-          <input type="search" id="station-filter" class="field" placeholder="Search by name or tag" aria-label="Search stations">
-        </label>
+        <search class="station-search-wrap">
+          <label class="station-search" for="station-filter">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+            <input type="search" id="station-filter" name="stationFilter" class="field" placeholder="Search by name or tag" aria-label="Search stations" enterkeyhint="search">
+          </label>
+        </search>
         <div class="station-toolbar">
           <div class="station-views" id="station-views" role="group" aria-label="Show stations">
             <button type="button" id="station-all" class="station-view on" aria-pressed="true">All <span id="station-all-count">0</span></button>
             <button type="button" id="station-favorites" class="station-view" aria-pressed="false"><span aria-hidden="true">★</span> Favourites <span id="station-favorites-count">0</span></button>
             <button type="button" id="station-recent" class="station-view" aria-pressed="false">Recent</button>
           </div>
-          <select id="station-sort" class="field" aria-label="Sort saved stations">
+          <select id="station-sort" name="stationSort" class="field" aria-label="Sort saved stations">
             <option value="saved">Saved order</option>
             <option value="name">Name A–Z</option>
           </select>
@@ -157,13 +155,13 @@
       <ul class="list" id="station-list" aria-label="Saved stations"></ul>
 
       <form class="editor hidden" id="station-editor" autocomplete="off" aria-labelledby="station-editor-title">
-        <div class="editor-title" id="station-editor-title" tabindex="-1">Add station</div>
+        <h2 class="editor-title" id="station-editor-title" tabindex="-1">Add station</h2>
         <div class="station-editor-body">
           <p class="editor-note">Keep a station here by adding its stream link, or find one in Browse.</p>
-          <label class="lbl">Name<input class="field" id="st-name" maxlength="60" placeholder="Station name" required></label>
-          <label class="lbl">Stream URL<input class="field" id="st-url" placeholder="https://…" aria-describedby="st-url-hint" required></label>
+          <label class="lbl" for="st-name">Name<input class="field" id="st-name" name="stationName" maxlength="60" placeholder="Station name" required></label>
+          <label class="lbl" for="st-url">Stream URL<input class="field" id="st-url" name="stationUrl" inputmode="url" placeholder="https://…" aria-describedby="st-url-hint" required></label>
           <p class="editor-note" id="st-url-hint">Use a direct audio stream or a .pls / .m3u playlist link.</p>
-          <label class="lbl">Tag (optional)<input class="field" id="st-tag" maxlength="24" placeholder="Jazz, ambient, news…"></label>
+          <label class="lbl" for="st-tag">Tag (optional)<input class="field" id="st-tag" name="stationTag" maxlength="24" enterkeyhint="done" placeholder="Jazz, ambient, news…"></label>
           <div class="editor-test-row"><button type="button" class="gel" id="st-test">Test</button><button type="button" class="gel danger hidden" id="st-delete">Delete</button></div>
         </div>
         <div class="station-editor-footer">
@@ -182,43 +180,43 @@
           <p class="folderpath" id="folder-path">No folder chosen</p>
         </div>
         <div class="editor-actions">
-          <button class="gel" id="btn-pick-folder">Choose folder</button>
-          <button class="gel" id="btn-play-folder">Shuffle</button>
+          <button type="button" class="gel" id="btn-pick-folder">Choose folder</button>
+          <button type="button" class="gel" id="btn-play-folder">Shuffle</button>
         </div>
       </div>
     </div>
 
     <!-- ---------------------------- browse --------------------------- -->
-    <div class="pane" id="pane-browse" role="tabpanel" aria-labelledby="tab-browse">
+    <div class="pane" id="pane-browse" role="tabpanel" aria-labelledby="tab-browse" hidden>
       <div class="browse-controls">
         <div class="browse-intro">
           <h2>Discover radio</h2>
           <p>Find a station to listen to, then save the ones you like.</p>
         </div>
-        <div class="browse-search">
+        <search class="browse-search">
           <label class="lbl" for="browse-query">Search stations</label>
           <div class="browse-search-line">
-            <input type="search" id="browse-query" class="field" placeholder="Station name">
+            <input type="search" id="browse-query" name="browseQuery" class="field" placeholder="Station name" enterkeyhint="search">
             <button type="button" class="gel wide" id="btn-browse">Search</button>
           </div>
-        </div>
+        </search>
         <button type="button" class="browse-filters-toggle" id="browse-filters-toggle" aria-controls="browse-filter-fields" aria-expanded="false">Filters <span aria-hidden="true">▾</span></button>
         <div class="browse-filter-fields" id="browse-filter-fields">
           <div class="browsefilters">
             <label class="lbl" for="browse-country"><span class="sr-only">Country</span>
-              <select class="field" id="browse-country">
+              <select class="field" id="browse-country" name="browseCountry">
                 <option value="">Any country</option>
               </select>
             </label>
             <label class="lbl" for="browse-tag"><span class="sr-only">Genre</span>
-              <select class="field" id="browse-tag">
+              <select class="field" id="browse-tag" name="browseTag">
                 <option value="">Any genre</option>
               </select>
             </label>
           </div>
           <div class="browse-quality-fields">
             <label class="lbl" for="browse-codec"><span class="sr-only">Format</span>
-              <select class="field" id="browse-codec">
+              <select class="field" id="browse-codec" name="browseCodec">
                 <option value="">Any format</option>
                 <option value="MP3">MP3</option>
                 <option value="AAC">AAC</option>
@@ -228,7 +226,7 @@
               </select>
             </label>
             <label class="lbl" for="browse-bitrate"><span class="sr-only">Bitrate</span>
-              <select class="field" id="browse-bitrate">
+              <select class="field" id="browse-bitrate" name="browseBitrate">
                 <option value="">Any bitrate</option>
                 <option value="low">Under 48 kbps</option>
                 <option value="48">48 kbps</option>
@@ -254,7 +252,7 @@
     </div>
 
     <!-- ---------------------------- alarms --------------------------- -->
-    <div class="pane" id="pane-alarms" role="tabpanel" aria-labelledby="tab-alarms">
+    <div class="pane" id="pane-alarms" role="tabpanel" aria-labelledby="tab-alarms" hidden>
       <div class="paneheader alarm-paneheader">
         <h2>Alarms</h2>
         <button type="button" class="gel" id="btn-alarm-readiness">Readiness</button>
@@ -264,28 +262,28 @@
 
       <p class="android-only editor-note" id="android-alarm-hint">Checking Android alarm permissions…</p>
 
-      <form class="editor hidden" id="alarm-editor" autocomplete="off">
-        <div class="editor-title"><span id="al-editor-title" tabindex="-1">New alarm</span><p class="hidden" id="al-copy-note"></p></div>
+      <form class="editor hidden" id="alarm-editor" autocomplete="off" aria-labelledby="al-editor-title">
+        <div class="editor-title"><h2 id="al-editor-title" tabindex="-1">New alarm</h2><p class="hidden" id="al-copy-note"></p></div>
         <div class="alarm-editor-body">
           <section class="alarm-editor-section" aria-labelledby="al-time-heading">
             <h3 id="al-time-heading">Time &amp; repeat</h3>
             <div class="timerow">
               <div class="timeset">
                 <button type="button" class="stepper" data-step="hour" data-dir="1" aria-label="Increase hour">▲</button>
-                <input class="timefield" id="al-hour" aria-label="Alarm hour" inputmode="numeric" maxlength="2" value="07">
+                <input class="timefield" id="al-hour" name="alarmHour" aria-label="Alarm hour" inputmode="numeric" maxlength="2" value="07">
                 <button type="button" class="stepper" data-step="hour" data-dir="-1" aria-label="Decrease hour">▼</button>
               </div>
               <span class="timecolon">:</span>
               <div class="timeset">
                 <button type="button" class="stepper" data-step="minute" data-dir="1" aria-label="Increase minute">▲</button>
-                <input class="timefield" id="al-minute" aria-label="Alarm minute" inputmode="numeric" maxlength="2" value="00">
+                <input class="timefield" id="al-minute" name="alarmMinute" aria-label="Alarm minute" inputmode="numeric" maxlength="2" value="00">
                 <button type="button" class="stepper" data-step="minute" data-dir="-1" aria-label="Decrease minute">▼</button>
               </div>
               <div class="meridiem hidden" id="al-meridiem" role="group" aria-label="Morning or afternoon">
                 <button type="button" class="chip" data-ampm="am" aria-pressed="false">AM</button>
                 <button type="button" class="chip" data-ampm="pm" aria-pressed="false">PM</button>
               </div>
-              <label class="lbl grow alarm-inline-label">Label<input class="field" id="al-label" maxlength="40" placeholder="Wake up"></label>
+              <label class="lbl grow alarm-inline-label" for="al-label">Label<input class="field" id="al-label" name="alarmLabel" maxlength="40" enterkeyhint="done" placeholder="Wake up"></label>
             </div>
             <button type="button" class="alarm-name-edit android-only" id="al-name-edit" aria-haspopup="dialog" aria-controls="al-name-dialog"><span class="alarm-name-copy"><span class="hud-mini">Name</span><span id="al-name-value">Optional name</span></span><span class="alarm-name-action">Edit name</span></button>
 
@@ -331,21 +329,21 @@
                 <button type="button" class="chip on" data-kind="station">Station</button>
                 <button type="button" class="chip" data-kind="folder">Folder</button>
               </div>
-              <select class="field" id="al-station" aria-label="Alarm station"></select>
+              <select class="field" id="al-station" name="alarmStation" aria-label="Alarm station"></select>
               <div class="folderpick hidden" id="al-folderpick">
                 <span class="folderpath" id="al-folderpath">No folder chosen</span>
                 <button type="button" class="gel" id="al-folderbtn">Choose…</button>
               </div>
-              <p class="editor-note" id="al-sourcenote"></p>
+              <p class="editor-note" id="al-sourcenote" role="status"></p>
               <p class="editor-note android-only">Alarms use your current media output, including Bluetooth, and your phone’s media volume. Keep media volume audible and allow media sound in Do Not Disturb. If Bluetooth disconnects, the alarm continues on the phone.</p>
             </div>
 
             <div class="knobs">
-              <label class="lbl">Volume <span class="knobval" id="al-volval">80%</span>
-                <input type="range" class="slider" id="al-volume" min="10" max="100" value="80">
+              <label class="lbl" for="al-volume">Volume <span class="knobval" id="al-volval">80%</span>
+                <input type="range" class="slider" id="al-volume" name="alarmVolume" min="10" max="100" value="80" aria-valuetext="80%">
               </label>
-              <label class="lbl">Fade-in
-                <select class="field" id="al-fade">
+              <label class="lbl" for="al-fade">Fade-in
+                <select class="field" id="al-fade" name="alarmFade">
                   <option value="0">none</option>
                   <option value="10">10 s</option>
                   <option value="20" selected>20 s</option>
@@ -361,16 +359,16 @@
             <div class="alarm-options-body">
               <p class="editor-note">When the ring duration ends, the alarm stops. With auto-snooze, it waits for the snooze interval and rings again.</p>
               <div class="knobs">
-                <label class="lbl">Snooze
-                  <select class="field" id="al-snooze">
+                <label class="lbl" for="al-snooze">Snooze
+                  <select class="field" id="al-snooze" name="alarmSnooze">
                     <option value="5">5 min</option>
                     <option value="10" selected>10 min</option>
                     <option value="15">15 min</option>
                     <option value="20">20 min</option>
                   </select>
                 </label>
-                <label class="lbl">Ring duration
-                  <select class="field" id="al-autostop">
+                <label class="lbl" for="al-autostop">Ring duration
+                  <select class="field" id="al-autostop" name="alarmAutostop">
                     <option value="1">1 min</option>
                     <option value="2">2 min</option>
                     <option value="5">5 min</option>
@@ -385,8 +383,8 @@
                     <option value="0">never</option>
                   </select>
                 </label>
-                <label class="lbl">Auto-snooze
-                  <select class="field" id="al-autosnooze">
+                <label class="lbl" for="al-autosnooze">Auto-snooze
+                  <select class="field" id="al-autosnooze" name="alarmAutosnooze">
                     <option value="0" selected>off</option>
                     <option value="1">once</option>
                     <option value="2">twice</option>
@@ -410,7 +408,7 @@
     </div>
 
     <!-- --------------------------- settings -------------------------- -->
-    <div class="pane" id="pane-settings" role="tabpanel" aria-labelledby="tab-settings">
+    <div class="pane" id="pane-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
       <div class="settings-heading">
         <h2>Settings</h2>
         <p>Changes save automatically.</p>
@@ -420,70 +418,79 @@
           <h3 id="readiness-heading" tabindex="-1">Alarm readiness</h3>
           <p class="editor-note">Inspect saved setup without playing sound. This is not an audible wake test.</p>
           <div class="readiness-actions">
-            <label class="lbl" for="readiness-alarm">Inspect source for<select class="field" id="readiness-alarm"><option value="">Next scheduled alarm</option></select></label>
+            <label class="lbl" for="readiness-alarm">Inspect source for<select class="field" id="readiness-alarm" name="readinessAlarm"><option value="">Next scheduled alarm</option></select></label>
             <button type="button" class="gel" id="readiness-check">Check now</button>
           </div>
           <p class="editor-note" id="readiness-summary" role="status">Choose Check now to inspect your alarm setup.</p>
           <ul class="readiness-list" id="readiness-list" aria-label="Alarm readiness results"></ul>
         </section>
-        <details class="settings-section settings-transfer settings-category" aria-labelledby="settings-transfer" open>
-          <summary><h3 id="settings-transfer">Backup &amp; restore</h3></summary>
-          <div class="settings-category-body">
-          <p class="editor-note">Keep a copy of your stations, alarms, and preferences.</p>
-          <div class="transfer-actions">
-            <button class="gel" id="backup-export">Export backup…</button>
-            <button class="gel" id="backup-import">Restore backup…</button>
-            <button class="station-link" id="backup-previous">Previous setup…</button>
-          </div>
-          <p class="editor-note" id="backup-status" role="status"></p>
-          </div>
-        </details>
-        <div class="settings-preferences">
-          <details class="settings-section settings-category" aria-labelledby="settings-display" open>
-            <summary><h3 id="settings-display">Display</h3></summary>
+        <section class="settings-section settings-transfer" aria-labelledby="settings-transfer">
+          <h3 id="settings-transfer" class="sr-only">Backup &amp; restore</h3>
+          <details class="settings-category" open>
+            <summary><span class="settings-category-title">Backup &amp; restore</span></summary>
             <div class="settings-category-body">
-            <ul class="settings">
-              <li class="row toggle" data-setting="clock24h">
-                <label for="setting-clock"><span id="setting-clock-label">24-hour clock</span><em id="setting-clock-help">Use 14:00 instead of 2:00 PM.</em></label>
-                <button id="setting-clock" class="sw" aria-pressed="true" aria-labelledby="setting-clock-label" aria-describedby="setting-clock-help"></button>
-              </li>
-              <li class="row toggle" data-setting="showMetadata">
-                <label for="setting-metadata"><span id="setting-metadata-label">Song information</span><em id="setting-metadata-help">Show titles supplied by stations.</em></label>
-                <button id="setting-metadata" class="sw" aria-pressed="true" aria-labelledby="setting-metadata-label" aria-describedby="setting-metadata-help"></button>
-              </li>
-            </ul>
+            <p class="editor-note">Keep a copy of your stations, alarms, and preferences.</p>
+            <div class="transfer-actions">
+              <button type="button" class="gel" id="backup-export">Export backup…</button>
+              <button type="button" class="gel" id="backup-import">Restore backup…</button>
+              <button type="button" class="station-link" id="backup-previous">Previous setup…</button>
+            </div>
+            <p class="editor-note" id="backup-status" role="status"></p>
             </div>
           </details>
+        </section>
+        <div class="settings-preferences">
+          <section class="settings-section" aria-labelledby="settings-display">
+            <h3 id="settings-display" class="sr-only">Display</h3>
+            <details class="settings-category" open>
+              <summary><span class="settings-category-title">Display</span></summary>
+              <div class="settings-category-body">
+              <ul class="settings">
+                <li class="row toggle" data-setting="clock24h">
+                  <label for="setting-clock"><span id="setting-clock-label">24-hour clock</span><em id="setting-clock-help">Use 14:00 instead of 2:00 PM.</em></label>
+                  <input type="checkbox" switch role="switch" id="setting-clock" class="sw" checked aria-labelledby="setting-clock-label" aria-describedby="setting-clock-help">
+                </li>
+                <li class="row toggle" data-setting="showMetadata">
+                  <label for="setting-metadata"><span id="setting-metadata-label">Song information</span><em id="setting-metadata-help">Show titles supplied by stations.</em></label>
+                  <input type="checkbox" switch role="switch" id="setting-metadata" class="sw" checked aria-labelledby="setting-metadata-label" aria-describedby="setting-metadata-help">
+                </li>
+              </ul>
+              </div>
+            </details>
+          </section>
           <section class="settings-section android-unavailable" aria-labelledby="settings-startup">
             <h3 id="settings-startup">Startup &amp; closing</h3>
             <ul class="settings">
               <li class="row toggle" data-setting="minimizeToTray">
                 <label for="setting-tray"><span id="setting-tray-label">Keep running when closed</span><em id="setting-tray-help">Keep alarms active in the tray.</em></label>
-                <button id="setting-tray" class="sw" aria-pressed="true" aria-labelledby="setting-tray-label" aria-describedby="setting-tray-help"></button>
+                <input type="checkbox" switch role="switch" id="setting-tray" class="sw" checked aria-labelledby="setting-tray-label" aria-describedby="setting-tray-help">
               </li>
               <li class="row toggle" data-setting="startWithWindows">
                 <label for="setting-startup"><span id="setting-startup-label">Start at login</span><em id="setting-startup-help">Open quietly in the tray.</em></label>
-                <button id="setting-startup" class="sw" aria-pressed="false" aria-labelledby="setting-startup-label" aria-describedby="setting-startup-help"></button>
+                <input type="checkbox" switch role="switch" id="setting-startup" class="sw" aria-labelledby="setting-startup-label" aria-describedby="setting-startup-help">
               </li>
             </ul>
           </section>
         </div>
-        <details class="settings-section settings-backup settings-category" aria-labelledby="settings-backup" open>
-          <summary><h3 id="settings-backup">Backup music</h3></summary>
-          <div class="settings-category-body">
-          <button class="gel" id="btn-pick-backup">Choose folder…</button>
-          <p class="editor-note">Plays when a station or alarm source is unavailable.</p>
-          <p class="folderpath" id="backup-path" role="status">No backup folder chosen</p>
-          <p class="editor-note android-only">If no backup track can play, alarms use the phone’s default alarm sound.</p>
-          <p class="editor-note desktop-only">If both media sources fail, alarms use a built-in offline tone. Check system volume, mute and the intended audio output.</p>
-          </div>
-        </details>
+        <section class="settings-section settings-backup" aria-labelledby="settings-backup">
+          <h3 id="settings-backup" class="sr-only">Backup music</h3>
+          <details class="settings-category" open>
+            <summary><span class="settings-category-title">Backup music</span></summary>
+            <div class="settings-category-body">
+            <button type="button" class="gel" id="btn-pick-backup">Choose folder…</button>
+            <p class="editor-note">Plays when a station or alarm source is unavailable.</p>
+            <p class="folderpath" id="backup-path" role="status">No backup folder chosen</p>
+            <p class="editor-note android-only">If no backup track can play, alarms use the phone’s default alarm sound.</p>
+            <p class="editor-note desktop-only">If both media sources fail, alarms use a built-in offline tone. Check system volume, mute and the intended audio output.</p>
+            </div>
+          </details>
+        </section>
         <section class="settings-section android-unavailable" aria-labelledby="settings-wake">
           <h3 id="settings-wake">Alarms &amp; sleep</h3>
           <ul class="settings">
             <li class="row toggle" data-setting="wakeForAlarms">
               <label for="setting-wake"><span id="setting-wake-label">Wake this PC for alarms</span><em id="setting-wake-help">Request a wake timer before alarms and snoozes.</em></label>
-              <button id="setting-wake" class="sw" aria-pressed="true" aria-labelledby="setting-wake-label" aria-describedby="setting-wake-help power-status"></button>
+              <input type="checkbox" switch role="switch" id="setting-wake" class="sw" checked aria-labelledby="setting-wake-label" aria-describedby="setting-wake-help power-status">
             </li>
           </ul>
           <div class="power-info">
@@ -498,73 +505,79 @@
             </details>
           </div>
         </section>
-        <details class="settings-section android-only android-alarm-settings settings-category" aria-labelledby="settings-android" open>
-          <summary><h3 id="settings-android">Permissions</h3></summary>
-          <div class="settings-category-body">
-          <button class="gel" id="android-permissions-refresh" type="button">Check again</button>
-          <p id="android-alarm-status" class="editor-note" role="status">Checking Android settings…</p>
-          <ul class="android-permission-list">
-            <li class="android-permission-row">
-              <div class="android-permission-heading"><strong>Alarms &amp; reminders</strong><span id="android-exact-status" class="android-permission-state">Checking…</span></div>
-              <p id="android-exact-help">Lets Aerowave schedule alarms at the right time.</p>
-              <button class="gel" type="button" data-android-setting="exact">Open alarm access</button>
-            </li>
-            <li class="android-permission-row">
-              <div class="android-permission-heading"><strong>Notifications</strong><span id="android-notifications-status" class="android-permission-state">Checking…</span></div>
-              <p id="android-notifications-help">Shows the ringing alarm and its Dismiss and Snooze controls.</p>
-              <button class="gel" type="button" data-android-setting="notifications">Open notifications</button>
-            </li>
-            <li class="android-permission-row">
-              <div class="android-permission-heading"><strong>Alarm alerts</strong><span id="android-channel-status" class="android-permission-state">Checking…</span></div>
-              <p id="android-channel-help">The Alarms notification channel needs high priority to appear over other apps.</p>
-              <button class="gel" type="button" data-android-setting="alarmChannel">Open alarm alerts</button>
-            </li>
-            <li class="android-permission-row">
-              <div class="android-permission-heading"><strong>Do Not Disturb</strong><span id="android-dnd-status" class="android-permission-state">Checking…</span></div>
-              <p id="android-dnd-help">Check whether Do Not Disturb allows alarm alerts, media sound, and the ringing screen.</p>
-              <button class="gel" type="button" data-android-setting="dndSettings">Open Do Not Disturb settings</button>
-            </li>
-            <li class="android-permission-row" id="android-alarm-screen-row" hidden>
-              <div class="android-permission-heading"><strong>Alarm screen during Do Not Disturb</strong><span id="android-alarm-screen-status" class="android-permission-state">Checking…</span></div>
-              <p id="android-alarm-screen-help">On Xiaomi/Redmi/POCO, Android's Display over other apps access lets Aerowave request the alarm screen for a scheduled ring with Do Not Disturb on and the screen off.</p>
-              <button class="gel" type="button" data-android-setting="alarmScreen">Open alarm screen access</button>
-            </li>
-            <li class="android-permission-row">
-              <div class="android-permission-heading"><strong>Full-screen alarm access</strong><span id="android-fullscreen-status" class="android-permission-state">Checking…</span></div>
-              <p id="android-fullscreen-help">Allows a ringing alarm to open over the lock screen when Android permits it.</p>
-              <button class="gel" id="android-fullscreen-action" type="button" data-android-setting="fullscreen">Open full-screen access</button>
-            </li>
-            <li class="android-permission-row">
-              <div class="android-permission-heading"><strong>Battery use</strong><span id="android-battery-status" class="android-permission-state">Checking…</span></div>
-              <p id="android-battery-help">Battery restrictions can interfere with background alarms and audio.</p>
-              <button class="gel" type="button" data-android-setting="battery">Open battery settings</button>
-            </li>
-            <li class="android-permission-row">
-              <div class="android-permission-heading"><strong>Phone-specific restrictions</strong><span class="android-permission-state manual">Check manually</span></div>
-              <p id="android-phone-help">Your phone may have extra lock-screen or background-start controls that Aerowave cannot read.</p>
-              <button class="gel" type="button" data-android-setting="appInfo">Open app info</button>
-            </li>
-          </ul>
-          <details class="settings-details">
-            <summary>Screen wake and quick controls</summary>
-            <p>A ringing alarm shows Dismiss and Snooze over the lock screen. Shake firmly several times to dismiss, or press either volume button while the alarm screen or Aerowave is open to snooze. Test alarms stop on a shake or volume press without scheduling a snooze.</p>
-            <p>Full-screen access alone does not guarantee that every phone will wake its display. Schedule an alarm with the screen off to check it.</p>
+        <section class="settings-section android-only android-alarm-settings" aria-labelledby="settings-android">
+          <h3 id="settings-android" class="sr-only">Permissions</h3>
+          <details class="settings-category" open>
+            <summary><span class="settings-category-title">Permissions</span></summary>
+            <div class="settings-category-body">
+            <button class="gel" id="android-permissions-refresh" type="button">Check again</button>
+            <p id="android-alarm-status" class="editor-note" role="status">Checking Android settings…</p>
+            <ul class="android-permission-list">
+              <li class="android-permission-row">
+                <div class="android-permission-heading"><strong>Alarms &amp; reminders</strong><span id="android-exact-status" class="android-permission-state">Checking…</span></div>
+                <p id="android-exact-help">Lets Aerowave schedule alarms at the right time.</p>
+                <button class="gel" type="button" data-android-setting="exact">Open alarm access</button>
+              </li>
+              <li class="android-permission-row">
+                <div class="android-permission-heading"><strong>Notifications</strong><span id="android-notifications-status" class="android-permission-state">Checking…</span></div>
+                <p id="android-notifications-help">Shows the ringing alarm and its Dismiss and Snooze controls.</p>
+                <button class="gel" type="button" data-android-setting="notifications">Open notifications</button>
+              </li>
+              <li class="android-permission-row">
+                <div class="android-permission-heading"><strong>Alarm alerts</strong><span id="android-channel-status" class="android-permission-state">Checking…</span></div>
+                <p id="android-channel-help">The Alarms notification channel needs high priority to appear over other apps.</p>
+                <button class="gel" type="button" data-android-setting="alarmChannel">Open alarm alerts</button>
+              </li>
+              <li class="android-permission-row">
+                <div class="android-permission-heading"><strong>Do Not Disturb</strong><span id="android-dnd-status" class="android-permission-state">Checking…</span></div>
+                <p id="android-dnd-help">Check whether Do Not Disturb allows alarm alerts, media sound, and the ringing screen.</p>
+                <button class="gel" type="button" data-android-setting="dndSettings">Open Do Not Disturb settings</button>
+              </li>
+              <li class="android-permission-row" id="android-alarm-screen-row" hidden>
+                <div class="android-permission-heading"><strong>Alarm screen during Do Not Disturb</strong><span id="android-alarm-screen-status" class="android-permission-state">Checking…</span></div>
+                <p id="android-alarm-screen-help">On Xiaomi/Redmi/POCO, Android's Display over other apps access lets Aerowave request the alarm screen for a scheduled ring with Do Not Disturb on and the screen off.</p>
+                <button class="gel" type="button" data-android-setting="alarmScreen">Open alarm screen access</button>
+              </li>
+              <li class="android-permission-row">
+                <div class="android-permission-heading"><strong>Full-screen alarm access</strong><span id="android-fullscreen-status" class="android-permission-state">Checking…</span></div>
+                <p id="android-fullscreen-help">Allows a ringing alarm to open over the lock screen when Android permits it.</p>
+                <button class="gel" id="android-fullscreen-action" type="button" data-android-setting="fullscreen">Open full-screen access</button>
+              </li>
+              <li class="android-permission-row">
+                <div class="android-permission-heading"><strong>Battery use</strong><span id="android-battery-status" class="android-permission-state">Checking…</span></div>
+                <p id="android-battery-help">Battery restrictions can interfere with background alarms and audio.</p>
+                <button class="gel" type="button" data-android-setting="battery">Open battery settings</button>
+              </li>
+              <li class="android-permission-row">
+                <div class="android-permission-heading"><strong>Phone-specific restrictions</strong><span class="android-permission-state manual">Check manually</span></div>
+                <p id="android-phone-help">Your phone may have extra lock-screen or background-start controls that Aerowave cannot read.</p>
+                <button class="gel" type="button" data-android-setting="appInfo">Open app info</button>
+              </li>
+            </ul>
+            <details class="settings-details">
+              <summary>Screen wake and quick controls</summary>
+              <p>A ringing alarm shows Dismiss and Snooze over the lock screen. Shake firmly several times to dismiss, or press either volume button while the alarm screen or Aerowave is open to snooze. Test alarms stop on a shake or volume press without scheduling a snooze.</p>
+              <p>Full-screen access alone does not guarantee that every phone will wake its display. Schedule an alarm with the screen off to check it.</p>
+            </details>
+            <details class="settings-details">
+              <summary>Alarms after a restart</summary>
+              <p>Keep the phone powered on. After restarting, music folders may need the first unlock; the system alarm sound is the fallback. Force-stopping Aerowave prevents alarms until you open it again.</p>
+            </details>
+            </div>
           </details>
-          <details class="settings-details">
-            <summary>Alarms after a restart</summary>
-            <p>Keep the phone powered on. After restarting, music folders may need the first unlock; the system alarm sound is the fallback. Force-stopping Aerowave prevents alarms until you open it again.</p>
+        </section>
+        <section class="settings-section android-only" aria-labelledby="settings-alarm-diagnostics">
+          <h3 id="settings-alarm-diagnostics" class="sr-only">Alarm diagnostics</h3>
+          <details class="settings-category">
+            <summary><span class="settings-category-title">Alarm diagnostics</span></summary>
+            <div class="settings-category-body">
+              <p class="editor-note">Recent alarm events are saved automatically on this phone. Export them after a missed alarm or playback problem.</p>
+              <p class="editor-note">The file includes alarm times and device status. Review it before sharing.</p>
+              <button class="gel" id="android-alarm-log-export" type="button">Export alarm logs</button>
+              <p class="editor-note" id="android-alarm-log-status" role="status"></p>
+            </div>
           </details>
-          </div>
-        </details>
-        <details class="settings-section android-only settings-category" aria-labelledby="settings-alarm-diagnostics">
-          <summary><h3 id="settings-alarm-diagnostics">Alarm diagnostics</h3></summary>
-          <div class="settings-category-body">
-            <p class="editor-note">Recent alarm events are saved automatically on this phone. Export them after a missed alarm or playback problem.</p>
-            <p class="editor-note">The file includes alarm times and device status. Review it before sharing.</p>
-            <button class="gel" id="android-alarm-log-export" type="button">Export alarm logs</button>
-            <p class="editor-note" id="android-alarm-log-status" role="status"></p>
-          </div>
-        </details>
+        </section>
         <details class="settings-details settings-storage" id="config-details">
           <summary>Settings storage</summary>
           <p class="wherefrom" id="config-where"></p>
@@ -574,12 +587,12 @@
       </div>
       <div class="settings-footer desktop-only">
         <p>Quitting stops playback and alarms.</p>
-        <button class="gel danger" id="btn-quit">Quit Aerowave</button>
+        <button type="button" class="gel danger" id="btn-quit">Quit Aerowave</button>
       </div>
     </div>
     <div class="android-mini-player android-only" id="mini-player" hidden>
       <button type="button" class="mini-open" id="mini-open" aria-controls="pane-player" aria-label="Open player">
-        <span class="mini-art" aria-hidden="true"><img id="mini-art-image" alt="" hidden><span id="mini-art-fallback">♫</span></span>
+        <span class="mini-art" aria-hidden="true"><img id="mini-art-image" alt="" decoding="async" hidden><span id="mini-art-fallback">♫</span></span>
         <span class="mini-copy"><strong id="mini-title"></strong><span class="mini-subline"><span id="mini-state"></span><span id="mini-track"></span></span></span>
       </button>
       <button type="button" class="mini-toggle" id="mini-toggle" aria-label="Pause playback">
@@ -593,7 +606,7 @@
 <dialog class="alarm-name-dialog panel bevel" id="al-name-dialog" aria-labelledby="al-name-dialog-title">
   <h2 id="al-name-dialog-title">Alarm name</h2>
   <div class="alarm-name-dialog-body">
-    <label class="lbl" for="al-name-input">Name (optional)<input class="field" id="al-name-input" maxlength="40" enterkeyhint="done" placeholder="Wake up"></label>
+    <label class="lbl" for="al-name-input">Name (optional)<input class="field" id="al-name-input" name="alarmNameModal" maxlength="40" enterkeyhint="done" placeholder="Wake up"></label>
   </div>
   <div class="alarm-name-dialog-actions">
     <button type="button" class="gel" id="al-name-cancel">Cancel</button>
@@ -619,8 +632,8 @@
   <p class="editor-note">Startup, PC wake, and sleep-action choices stay as they are on this device. Folder locations may need to be chosen again.</p>
   <p class="editor-note bad" id="backup-error" role="alert"></p>
   <div class="editor-actions">
-    <button class="gel" id="backup-cancel">Cancel</button>
-    <button class="gel primary" id="backup-restore">Restore backup</button>
+    <button type="button" class="gel" id="backup-cancel" autofocus>Cancel</button>
+    <button type="button" class="gel primary" id="backup-restore">Restore backup</button>
   </div>
 </dialog>
 
@@ -629,16 +642,14 @@
   <h2 id="power-title">PC power action</h2>
   <div class="power-seconds" id="power-seconds" role="timer" aria-live="off"></div>
   <p id="power-description">Audio has stopped. Cancel to keep this PC on.</p>
-  <button class="gel primary big-wide" id="power-cancel" autofocus>Cancel</button>
+  <button type="button" class="gel primary big-wide" id="power-cancel" autofocus>Cancel</button>
   <p class="editor-note bad" id="power-wake-warning" hidden>Automatic alarm wake is off or unconfirmed. This PC may not wake for an alarm. Cancel to keep this PC on.</p>
   <p class="editor-note bad hidden" id="power-error" role="alert"></p>
   <p class="editor-note">Escape also cancels.</p>
 </dialog>
 
-<div class="ringing" id="ringing" hidden role="alertdialog" aria-modal="true" aria-labelledby="ring-label" aria-describedby="ring-source">
+<dialog class="ringing" id="ringing" role="alertdialog" closedby="none" aria-labelledby="ring-label" aria-describedby="ring-source">
   <div class="ringcard panel bevel" id="ringcard">
-    <div class="corner tl"></div><div class="corner tr"></div>
-    <div class="corner bl"></div><div class="corner br"></div>
     <div class="ringpulse"></div>
     <div class="hud-label"><span class="lamp on"></span><span id="ring-trigger">Alarm</span></div>
     <div class="ringtime" id="ring-time">07:00</div>
@@ -646,15 +657,14 @@
     <div class="ringsource" id="ring-source"></div>
     <p class="editor-note" id="ring-note"></p>
     <div class="ringactions">
-      <button class="gel big-wide" id="ring-snooze">Snooze <em id="ring-snooze-mins">10 min</em></button>
-      <button class="gel big-wide primary" id="ring-dismiss">Dismiss</button>
+      <button type="button" class="gel big-wide" id="ring-snooze">Snooze <em id="ring-snooze-mins">10 min</em></button>
+      <button type="button" class="gel big-wide primary" id="ring-dismiss" autofocus>Dismiss</button>
     </div>
   </div>
-</div>
+</dialog>
 
-<script src="vendor/hls.min.js"></script>
-<script src="alarm-readiness.js"></script>
-<script src="app.js"></script>
+<script defer src="alarm-readiness.js"></script>
+<script defer src="app.js"></script>
 <script type="module" src="orb3d.js"></script>
 </body>
 </html>

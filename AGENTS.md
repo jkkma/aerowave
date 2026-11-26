@@ -142,3 +142,10 @@ to check that none is under `src/vendor/`.
   multi-valued system helper first:
   `git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin main`.
   Check that the active `gh` account owns the remote.
+- **WebView support policy:** The desktop front end targets evergreen Chromium
+  (Windows WebView2) and WebKitGTK 4.1 (Linux); the Android front end targets
+  Android System WebView. Modern features (`@layer`, native `<dialog>` top
+  layer, `<input type="checkbox" switch>`, `scrollbar-color`, `@starting-style`,
+  `content-visibility: auto`, `structuredClone`, `Array.prototype.toSorted`) are
+  adopted directly when universally supported by those WebViews or progressively
+  enhanced behind `@supports` / runtime capability checks.

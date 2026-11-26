@@ -25,14 +25,14 @@ test("native alarm rendering never starts webview playback or a desktop timer", 
   const h = createHarness({ navigator });
   h.context.fixture = snapshot(4, ring());
   h.evaluate("applyAndroidAlarmState(fixture)");
-  assert.equal(h.el("#ringing").hidden, false);
+  assert.equal(h.el("#ringing").open, true);
   assert.equal(h.el("#ring-label").textContent, "Wake");
   assert.equal(h.evaluate("ringing.native"), true);
   assert.equal(h.evaluate("autoStopTimer"), null);
   assert.equal(h.calls.length, 0);
   h.context.fixture = snapshot(5);
   h.evaluate("applyAndroidAlarmState(fixture)");
-  assert.equal(h.el("#ringing").hidden, true);
+  assert.equal(h.el("#ringing").open, false);
   assert.equal(h.calls.length, 0);
 });
 
@@ -49,7 +49,7 @@ test("a stale action reply cannot hide a later native occurrence", async () => {
   delayed.resolve(snapshot(5));
   await action;
   assert.equal(h.evaluate("ringing.occurrenceId"), "two");
-  assert.equal(h.el("#ringing").hidden, false);
+  assert.equal(h.el("#ringing").open, true);
   const request = h.calls.find(c => c.command.endsWith("|dismiss_alarm"));
   assert.deepEqual(JSON.parse(JSON.stringify(request.args)), { payload: { id: "wake", occurrenceId: "one" } });
   assert.equal(h.calls.some(c => c.command === "dismiss_alarm" || c.command.endsWith("|stop")), false);

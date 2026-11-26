@@ -283,7 +283,7 @@ test("desktop power countdown uses monotonic samples and rejects an older sample
   assert.equal(h.el("#power-seconds").textContent, "22s");
 });
 
-test("power countdown stops ordinary audio and keeps keyboard focus on Cancel", async () => {
+test("power countdown stops ordinary audio and restores keyboard focus on cancel", async () => {
   const h = powerHarness();
   h.evaluate('wire(); player.source = {kind:"folder"}');
   h.el("#sleep-action").focus();
@@ -291,11 +291,6 @@ test("power countdown stops ordinary audio and keeps keyboard focus on Cancel", 
   assert.equal(h.evaluate("player.source"), null);
   assert.equal(h.el("#power-countdown").open, true);
   assert.equal(h.document.activeElement, h.el("#power-cancel"));
-  for (const shiftKey of [false, true]) {
-    const event = await h.el("#power-countdown").dispatch("keydown", { key: "Tab", shiftKey });
-    assert.equal(event.defaultPrevented, true);
-    assert.equal(h.document.activeElement, h.el("#power-cancel"));
-  }
   snapshot(h, 11, null, "cancelled");
   assert.equal(h.el("#power-countdown").open, false);
   assert.equal(h.document.activeElement, h.el("#sleep-action"));
@@ -333,7 +328,7 @@ test("an alarm closes power UI, refuses another timer, and survives a late finis
   await flush();
   assert.equal(h.el("#power-countdown").open, false);
   assert.equal(h.document.activeElement, h.el("#ring-dismiss"));
-  assert.equal(h.el("#ringing").hidden, false);
+  assert.equal(h.el("#ringing").open, true);
   await h.evaluate("setSleep(15)");
   assert.equal(h.calls.some(c => c.command === "set_sleep_timer"), false);
   snapshot(h, 11, null, "finished");
@@ -391,7 +386,7 @@ test("dismissing a test releases only the backend preview", async () => {
   const h = powerHarness();
   h.evaluate('onAlarmFire({alarmId:"saved",trigger:"test",kind:"none",snoozeMins:10,hour:7,minute:0})');
   await h.evaluate("snoozeRing()");
-  assert.equal(h.el("#ringing").hidden, false);
+  assert.equal(h.el("#ringing").open, true);
   await h.evaluate("dismissRing()");
   assert.equal(h.calls.filter(c => c.command === "dismiss_test_alarm").length, 1);
   assert.equal(h.calls.some(c => c.command === "dismiss_alarm" || c.command === "snooze_alarm"), false);
@@ -401,7 +396,7 @@ test("rejected preview dismissal keeps the test available for retry", async () =
   const h = powerHarness({ invoke: command => command === "dismiss_test_alarm" ? Promise.reject(new Error("busy")) : undefined });
   h.evaluate('onAlarmFire({alarmId:"saved",trigger:"test",kind:"none",snoozeMins:10,hour:7,minute:0})');
   await h.evaluate("dismissRing()");
-  assert.equal(h.el("#ringing").hidden, false);
+  assert.equal(h.el("#ringing").open, true);
   assert.match(h.el("#ring-note").textContent, /Could not dismiss.*busy/);
 });
 
@@ -440,11 +435,12 @@ test("the wake switch saves the preference without changing startup intent", asy
   const label = new Element("span");
   const toggle = h.el("#wake-switch");
   toggle.className = "sw";
-  toggle.setAttribute("aria-pressed", "true");
+  toggle.checked = true;
   row.append(label, toggle);
   h.queries.set(".settings .row", [row]);
   h.evaluate("state.settings.wakeForAlarms = true; wire()");
-  await toggle.dispatch("click");
+  toggle.checked = false;
+  await toggle.dispatch("change");
   await h.fireTimer(h.evaluate("settingsSaveTimer"));
   await flush();
   const saved = h.calls.find(c => c.command === "save_settings");

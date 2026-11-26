@@ -110,7 +110,7 @@ test("an alarm that gives up resumes the interrupted radio at its previous volum
   assert.equal(h.evaluate("player.source.title"), "Alarm song");
   await expireAlarm(h);
   assert.equal(h.evaluate("ringing"), null);
-  assert.equal(h.el("#ringing").hidden, true);
+  assert.equal(h.el("#ringing").open, false);
   assert.equal(h.evaluate("player.source?.stationId"), "listening");
   assert.match(h.audios[0].src, /https%3A%2F%2Fradio\.test%2Flisten$/);
   assert.equal(h.audios[0].paused, false);
@@ -239,30 +239,19 @@ test("desktop media keys cannot stop or replace an active alarm", async () => {
   }
 });
 
-test("desktop ringing contains Tab focus and restores the previous control", async () => {
+test("desktop ringing uses modal dialog focus and restores the previous control", async () => {
   const h = harness();
-  const header = h.el("#header");
-  const footer = h.el("#footer");
-  h.queries.set("header", [header]);
-  h.queries.set("footer", [footer]);
   h.evaluate("wire()");
   const previous = h.el("#btn-min");
   previous.focus();
   await ring(h, { autoStopMins: 0 });
-  assert.equal(header.inert, true);
-  assert.equal(h.el("#app-content").inert, true);
-  assert.equal(footer.inert, true);
+  assert.equal(h.el("#ringing").open, true);
   assert.equal(h.document.activeElement, h.el("#ring-dismiss"));
-  let tab = await h.document.dispatch("keydown", { key: "Tab" });
-  assert.equal(tab.defaultPrevented, true);
-  assert.equal(h.document.activeElement, h.el("#ring-snooze"));
-  tab = await h.document.dispatch("keydown", { key: "Tab", shiftKey: true });
-  assert.equal(tab.defaultPrevented, true);
-  assert.equal(h.document.activeElement, h.el("#ring-dismiss"));
+  const cancel = await h.el("#ringing").dispatch("cancel");
+  assert.equal(cancel.defaultPrevented, true);
+  assert.equal(h.el("#ringing").open, true);
   await h.evaluate("dismissRing()");
-  assert.equal(header.inert, false);
-  assert.equal(h.el("#app-content").inert, false);
-  assert.equal(footer.inert, false);
+  assert.equal(h.el("#ringing").open, false);
   assert.equal(h.document.activeElement, previous);
 });
 
@@ -573,7 +562,7 @@ for (const autoSnoozes of [0, 1]) {
     await expireAlarm(h);
     assert.equal(h.evaluate("ringing?.alarmId"), "wake");
     assert.equal(h.evaluate("player.source?.title"), "Alarm song");
-    assert.equal(h.el("#ringing").hidden, false);
+    assert.equal(h.el("#ringing").open, true);
     await h.evaluate(`${action}()`);
     await flush();
     assert.equal(h.evaluate("ringing"), null);
@@ -599,7 +588,7 @@ for (const autoSnoozes of [0, 1]) {
       await flush();
       assert.equal(h.evaluate("ringing"), current);
       assert.equal(h.evaluate("player.source?.title"), "New occurrence");
-      assert.equal(h.el("#ringing").hidden, false);
+      assert.equal(h.el("#ringing").open, true);
       await expireAlarm(h);
       assert.equal(h.evaluate("player.source?.stationId"), "listening");
       assert.equal(h.audios[0].paused, false);

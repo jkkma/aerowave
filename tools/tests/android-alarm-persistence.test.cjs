@@ -111,7 +111,9 @@ test("settings recovery prevents ordinary alarm toggles from erasing native sour
   apply(h, native);
   h.evaluate("configLoadError='Saved settings could not be read';state.stations=[];state.settings={}");
   const toggle = h.el("#alarm-list").querySelector(".sw");
-  await toggle.dispatch("click");
+  toggle.checked = false;
+  await toggle.dispatch("change");
+  assert.equal(h.el("#alarm-list").querySelector(".sw").checked, true);
   assert.equal(native.alarms[0].enabled, true);
   assert.equal(h.calls.some(call => call.command.endsWith("|sync_alarms")), false);
   assert.match(h.el("#status-msg").textContent, /Settings are protected.*before changing alarms/);

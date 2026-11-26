@@ -104,7 +104,8 @@ test("alarm enable and edit are independent button controls, and labels stay pla
   assert.equal(edit.tagName, "BUTTON");
   assert.equal(edit.children[1].textContent, "<img src=x>");
   assert.equal(edit.children[2].textContent, "Mon, Wed");
-  await sw.dispatch("click");
+  sw.checked = false;
+  await sw.dispatch("change");
   assert.equal(h.evaluate("state.alarms[0].enabled"), false);
   assert.equal(h.evaluate("editingAlarm"), null);
   assert.equal(h.calls.filter(call => call.command === "save_alarms").length, 1);
@@ -129,11 +130,13 @@ for (const enabled of [true, false]) {
     h.evaluate("state.alarms = initial; renderAlarms()");
 
     const row = h.el("#alarm-list").children.find((item) => item.dataset.id === "wake");
-    await row.children[1].children[1].dispatch("click");
+    const sw = row.children[1].children[1];
+    sw.checked = !enabled;
+    await sw.dispatch("change");
     assert.equal(h.evaluate("state.alarms.find(a => a.id === 'wake').enabled"), enabled);
     assert.equal(native[0].enabled, enabled);
     assert.equal(h.el("#alarm-list").children.find((item) => item.dataset.id === "wake")
-      .children[1].children[1].getAttribute("aria-pressed"), String(enabled));
+      .children[1].children[1].checked, enabled);
 
     await h.evaluate("saveAlarms(state.alarms.map(a => a.id === 'other' ? {...a, label: 'Changed'} : a))");
     assert.equal(native.find((alarm) => alarm.id === "wake").enabled, enabled);
@@ -211,9 +214,11 @@ test("alarm controls ignore another action while their save is pending", async (
   h.context.initial = [wake];
   h.evaluate("state.alarms = initial; renderAlarms()");
   const switchButton = h.el("#alarm-list").children[0].children[1].children[1];
-  const saving = switchButton.dispatch("click");
+  switchButton.checked = false;
+  const saving = switchButton.dispatch("change");
   assert.equal(h.el("#alarm-list").children[0].children[1].children[1].disabled, true);
-  await switchButton.dispatch("click");
+  switchButton.checked = false;
+  await switchButton.dispatch("change");
   assert.equal(h.calls.filter((call) => call.command === "save_alarms").length, 1);
   pending.resolve();
   await saving;

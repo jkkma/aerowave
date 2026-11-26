@@ -90,7 +90,9 @@ if (IS_ANDROID) {
   $("#tab-radio").setAttribute("aria-selected", "false");
   $("#tab-radio").tabIndex = -1;
   $("#pane-radio").classList.remove("on");
+  $("#pane-radio").hidden = true;
   $("#pane-player").classList.add("on");
+  $("#pane-player").hidden = false;
   showTrackText("Choose a station or browse the directory.");
 }
 
@@ -179,7 +181,8 @@ let statusMsgTimer = null;
 function say(msg, mood, sticky) {
   const el = $("#status-msg");
   el.textContent = msg;
-  el.style.color = mood === "bad" ? "var(--alert)" : mood === "good" ? "var(--alien)" : "";
+  el.classList.toggle("bad", mood === "bad");
+  el.classList.toggle("good", mood === "good");
   // Announce it too. This one is never cleared, so the reset to Ready is not
   // read out over whatever the user is doing.
   const log = $("#a11y-log");
@@ -190,8 +193,18 @@ function say(msg, mood, sticky) {
   if (sticky) return;
   statusMsgTimer = setTimeout(() => {
     el.textContent = "Ready";
-    el.style.color = "";
+    el.classList.remove("bad", "good");
   }, 6000);
+}
+
+function syncSlider(slider, readout, suffix = "") {
+  const value = Number(slider.value);
+  const min = slider.min === "" || slider.min == null ? 0 : Number(slider.min);
+  const max = slider.max === "" || slider.max == null ? 100 : Number(slider.max);
+  const pct = max > min ? Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100)) : 0;
+  slider.style.setProperty("--fill", pct + "%");
+  slider.setAttribute("aria-valuetext", `${value}%`);
+  if (readout) readout.textContent = value + suffix;
 }
 
 // -------------------------------------------------------------- player ---
@@ -443,8 +456,7 @@ function applyAndroidPlaybackState(nativeState, { allowRestore = false } = {}) {
     player.target = Math.min(1, Math.max(0, nativeState.volume));
     const volume = Math.round(player.target * 100);
     $("#volume").value = volume;
-    $("#volval").textContent = volume;
-    $("#volume").style.setProperty("--fill", volume + "%");
+    syncSlider($("#volume"), $("#volval"));
   }
 
   if (Object.hasOwn(nativeState, "trackTitle")) {
@@ -539,7 +551,6 @@ let androidAlarmReadError = null;
 let androidAlarmSourceError = null;
 let androidAlarmSourceRequest = 0;
 const androidRingPending = new Set();
-let androidRingFocusBefore = null;
 
 function setAndroidAlarmError(kind, error) {
   if (error === (kind === "read" ? androidAlarmReadError : androidAlarmSourceError)) return;
@@ -580,19 +591,15 @@ function applyAndroidAlarmState(snapshot, { authoritative = true } = {}) {
   if (!nextRing) {
     if (ringing?.native) {
       ringing = null;
-      $("#ringing").hidden = true;
+      closeRingingDialog();
       $("#ring-dismiss").disabled = false;
       $("#ring-snooze").disabled = false;
-      $("#app-content").inert = false;
-      if (androidRingFocusBefore?.isConnected) androidRingFocusBefore.focus();
-      androidRingFocusBefore = null;
       renderSleepTimer();
     }
     renderAndroidMiniPlayer();
     return;
   }
   const changed = !ringing?.native || ringing.occurrenceId !== nextRing.occurrenceId;
-  if (!ringing?.native) androidRingFocusBefore = document.activeElement;
   ringing = { ...nextRing, native: true };
   interruptBackupPreview();
   $("#ring-trigger").textContent = nextRing.trigger === "test" ? "Alarm test"
@@ -607,8 +614,7 @@ function applyAndroidAlarmState(snapshot, { authoritative = true } = {}) {
   $("#ring-dismiss").disabled = actionPending;
   $("#ring-snooze").title = nextRing.canSnooze ? "" : "Test alarms cannot be snoozed";
   $("#ringcard").classList.remove("silent");
-  $("#ringing").hidden = false;
-  $("#app-content").inert = true;
+  openRingingDialog();
   renderSleepTimer();
   renderAndroidMiniPlayer();
   if (changed) $("#ring-dismiss").focus();
@@ -917,6 +923,51 @@ function fadeOut(seconds, now = Date.now) {
  * server answers - plenty of stations serve a perfectly good HTTP response
  * that the media element then refuses. This is the check that counts.
  */
+let hlsScriptPromise = null;
+function ensureHls() {
+  const existing = typeof Hls !== "undefined" ? Hls : globalThis.Hls;
+  if (existing) return Promise.resolve(existing);
+  if (!hlsScriptPromise) {
+    hlsScriptPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "vendor/hls.min.js";
+      script.addEventListener("load", () => {
+        const loaded = typeof Hls !== "undefined" ? Hls : globalThis.Hls;
+        if (loaded) resolve(loaded);
+        else {
+          hlsScriptPromise = null;
+          reject(new Error("HLS support could not initialize"));
+        }
+      }, { once: true });
+      script.addEventListener("error", () => {
+        hlsScriptPromise = null;
+        script.remove?.();
+        reject(new Error("could not load HLS player"));
+      }, { once: true });
+      (document.head || document.documentElement || document.body).append(script);
+    });
+  }
+  return hlsScriptPromise;
+}
+
+function openRingingDialog() {
+  const overlay = $("#ringing");
+  if (typeof overlay.showModal === "function") {
+    if (!overlay.open) overlay.showModal();
+  } else {
+    overlay.open = true;
+  }
+}
+
+function closeRingingDialog() {
+  const overlay = $("#ringing");
+  if (typeof overlay.close === "function") {
+    if (overlay.open) overlay.close();
+  } else {
+    overlay.open = false;
+  }
+}
+
 function canDecode(url, timeoutMs = 9000, { hls = false, signal, source = { kind: "station" }, directFallbackAllowed = false } = {}) {
   return new Promise((resolve) => {
     const probe = new Audio();
@@ -973,7 +1024,9 @@ function canDecode(url, timeoutMs = 9000, { hls = false, signal, source = { kind
     timer = setTimeout(() => done({ ok: false, reason: "no audio within " + Math.round(timeoutMs / 1000) + "s" }), timeoutMs);
     const connect = async () => {
       if (hls) {
-        if (typeof Hls === "undefined" || !Hls.isSupported()) {
+        const HlsLib = (typeof Hls !== "undefined" && Hls) || await ensureHls().catch(() => null);
+        if (settled) return;
+        if (!HlsLib || !HlsLib.isSupported()) {
           done({ ok: false, reason: "this build cannot play HLS" });
           return;
         }
@@ -981,8 +1034,8 @@ function canDecode(url, timeoutMs = 9000, { hls = false, signal, source = { kind
         if (settled) { if (opened) closeHlsSession(opened); return; }
         base = opened;
         if (!base) { done({ ok: false, reason: "could not open an HLS session" }); return; }
-        decoder = new Hls({ enableWorker: false, loader: relayLoader(Hls.DefaultConfig.loader, base) });
-        decoder.on(Hls.Events.ERROR, (_event, data) => {
+        decoder = new HlsLib({ enableWorker: false, loader: relayLoader(HlsLib.DefaultConfig.loader, base) });
+        decoder.on(HlsLib.Events.ERROR, (_event, data) => {
           if (data?.fatal) done({ ok: false, reason: "HLS " + (data.details || data.type || "error") });
         });
         decoder.loadSource(url);
@@ -1272,7 +1325,9 @@ async function startHls(source, url, generation) {
   switchingSource = true;
   clearInterval(player.metaTimer);
   player.metaTimer = null;
-  if (typeof Hls === "undefined" || !Hls.isSupported()) {
+  const HlsLib = (typeof Hls !== "undefined" && Hls) || await ensureHls().catch(() => null);
+  if (superseded(generation) || player.source !== source || player.paused || givingUp) return false;
+  if (!HlsLib || !HlsLib.isSupported()) {
     failure("this build cannot play HLS", { fatal: true });
     return false;
   }
@@ -1290,19 +1345,19 @@ async function startHls(source, url, generation) {
   }
   hlsBase = base;
 
-  const hls = new Hls({
+  const hls = new HlsLib({
     // The default worker is spawned from a blob: URL, which this app's policy
     // refuses - and it fails silently rather than throwing, which would look
     // like a station that simply never starts. Demuxing one audio stream on
     // the main thread costs nothing worth having.
     enableWorker: false,
-    loader: relayLoader(Hls.DefaultConfig.loader, base),
+    loader: relayLoader(HlsLib.DefaultConfig.loader, base),
   });
   hlsPlayer = hls;
   player.hls = true;
   const load = beginMediaLoad();
 
-  hls.on(Hls.Events.ERROR, (_event, data) => {
+  hls.on(HlsLib.Events.ERROR, (_event, data) => {
     if (hlsPlayer !== hls || superseded(generation) || player.source !== source) return;
     // hls.js spends its own retry budget - two for a playlist, six for a
     // fragment - before it calls anything fatal, so by here it has already
@@ -1311,7 +1366,7 @@ async function startHls(source, url, generation) {
     failMediaLoad(load, "HLS " + (data.details || data.type || "error"));
   });
 
-  hls.on(Hls.Events.FRAG_PARSING_METADATA, (_event, data) => {
+  hls.on(HlsLib.Events.FRAG_PARSING_METADATA, (_event, data) => {
     if (hlsPlayer !== hls || !data || !data.samples) return;
     for (const sample of data.samples) {
       if (!sample || !sample.data) continue;
@@ -1343,10 +1398,10 @@ async function startHls(source, url, generation) {
     bits.push("HLS");
     $("#np-meta").textContent = bits.join("  ·  ");
   };
-  hls.on(Hls.Events.MANIFEST_PARSED, showLevel);
-  hls.on(Hls.Events.LEVEL_SWITCHED, showLevel);
+  hls.on(HlsLib.Events.MANIFEST_PARSED, showLevel);
+  hls.on(HlsLib.Events.LEVEL_SWITCHED, showLevel);
   // The playlist may say nothing about the codec; the demuxer always knows.
-  hls.on(Hls.Events.BUFFER_CODECS, (_event, data) => {
+  hls.on(HlsLib.Events.BUFFER_CODECS, (_event, data) => {
     if (hlsPlayer !== hls) return;
     if (data && data.audio && data.audio.codec) hlsCodec = data.audio.codec;
     showLevel();
@@ -1789,6 +1844,7 @@ function stationThumbnail(mark, station, letter, { recoverArtwork = false } = {}
   const image = document.createElement("img");
   image.className = "station-thumbnail";
   image.alt = "";
+  image.decoding = "async";
   image.hidden = true;
   image.addEventListener("load", () => {
     image.hidden = false;
@@ -3519,7 +3575,7 @@ function renderBrowse() {
   const focusedUrl = focusedRow?.dataset.url;
   const focusedAction = focused?.classList.contains("browse-save") ? ".browse-save" : ".browse-listen";
   releaseStationThumbnails(list);
-  list.innerHTML = "";
+  list.replaceChildren();
   list.setAttribute("aria-busy", String(browseBusy));
   $("#browse-count").textContent = browseResults.length
     ? `${browseResults.length} station${browseResults.length === 1 ? "" : "s"} loaded`
@@ -3605,6 +3661,7 @@ function renderBrowse() {
   const tail = document.createElement("li");
   tail.className = "empty";
   const more = document.createElement("button");
+  more.type = "button";
   more.className = "gel browse-more";
   more.textContent = browseBusy ? "Loading…" : "More stations";
   more.disabled = browseBusy;
@@ -3637,7 +3694,6 @@ let givingUp = false;
 let ringActionFailures = 0;
 let ringCompletionIntent = null;
 let latestAlarmOccurrence = null;
-let desktopRingFocusBefore = null;
 /** How long an alarm takes to recede once it has given up. */
 const GIVE_UP_FADE_SECS = 6;
 const RING_ACTION_RETRY_MS = 30000;
@@ -3778,7 +3834,6 @@ function onAlarmFire(payload) {
   // A replacement ring still interrupts the same listening session. Capture
   // it only once, before the alarm's source and volume replace the player's.
   if (!ringing) {
-    if (!IS_ANDROID) desktopRingFocusBefore = document.activeElement;
     interruptedPlayback = player.source ? {
       source: { ...player.source },
       position: player.source.kind === "folder" ? player.pendingPosition ?? audio.currentTime : 0,
@@ -3820,17 +3875,9 @@ function onAlarmFire(payload) {
   $("#ring-snooze-mins").textContent = payload.snoozeMins + " min";
   $("#ring-snooze").disabled = payload.trigger === "test";
   $("#ring-snooze").title = payload.trigger === "test" ? "Test alarms cannot be snoozed" : "";
-  overlay.hidden = false;
-  if (!IS_ANDROID) {
-    // The titlebar and footer sit outside #app-content, so they need the same
-    // modal treatment as the main controls while the alarm is on screen.
-    for (const selector of ["header", "#app-content", "footer"]) {
-      const background = $(selector);
-      if (background) background.inert = true;
-    }
-  }
-  // After unhiding, not before: focus() on a hidden subtree does nothing, and
-  // an alarm nobody can dismiss from the keyboard is not much of an alarm.
+  openRingingDialog();
+  // Focus Dismiss cleanly after opening the top-layer dialog, including when
+  // an incoming occurrence replaces an already-open alarm card.
   $("#ring-dismiss").focus();
 
   const opts = { volume: payload.volume, fadeSecs: payload.fadeSecs };
@@ -3959,16 +4006,8 @@ function finishRing(resumePrevious) {
   givingUp = false;
   ringActionFailures = 0;
   ringCompletionIntent = null;
-  $("#ringing").hidden = true;
+  closeRingingDialog();
   ringing = null;
-  if (!IS_ANDROID) {
-    for (const selector of ["header", "#app-content", "footer"]) {
-      const background = $(selector);
-      if (background) background.inert = false;
-    }
-    if (desktopRingFocusBefore?.isConnected) desktopRingFocusBefore.focus();
-    desktopRingFocusBefore = null;
-  }
   renderSleepTimer();
   if (previous) {
     folderHistory = previous.history;
@@ -4288,6 +4327,7 @@ async function moveStation(id, targetId, after = false) {
     if (!ringing && (document.activeElement === document.body ||
         document.activeElement?.closest(".station-row")?.dataset.id === id)) {
       row?.querySelector(".station-play")?.focus({ preventScroll: true });
+      row?.scrollIntoView?.({ block: "nearest" });
     }
   }
 }
@@ -4296,7 +4336,7 @@ function clearStationDrag() {
   const drag = stationDrag;
   stationDrag = null;
   if (!drag) return;
-  clearInterval(drag.timer);
+  if (drag.rafId && typeof cancelAnimationFrame === "function") cancelAnimationFrame(drag.rafId);
   const list = $("#station-list");
   if (list.hasPointerCapture(drag.pointerId)) list.releasePointerCapture(drag.pointerId);
   list.classList.remove("reordering");
@@ -4350,14 +4390,23 @@ function wireStationDragging() {
       list.setPointerCapture(event.pointerId);
       list.classList.add("reordering");
       Array.from(list.children).find(row => row.dataset.id === drag.id)?.classList.add("station-dragging");
-      drag.timer = setInterval(() => {
-        const bounds = list.getBoundingClientRect();
-        if (drag.x < bounds.left || drag.x > bounds.right || drag.y < bounds.top || drag.y > bounds.bottom) return;
-        const edge = Math.min(40, bounds.height / 4);
-        const speed = drag.y < bounds.top + edge ? -Math.ceil((bounds.top + edge - drag.y) / 4)
-          : drag.y > bounds.bottom - edge ? Math.ceil((drag.y - bounds.bottom + edge) / 4) : 0;
-        if (speed) { list.scrollTop += speed; updateStationDrop(); }
-      }, 16);
+      if (typeof requestAnimationFrame === "function") {
+        let lastAt = 0;
+        const tickScroll = (now) => {
+          if (stationDrag !== drag || !drag.active) return;
+          const dt = lastAt ? Math.min(48, now - lastAt) / 16 : 1;
+          lastAt = now;
+          const bounds = list.getBoundingClientRect();
+          if (drag.x >= bounds.left && drag.x <= bounds.right && drag.y >= bounds.top && drag.y <= bounds.bottom) {
+            const edge = Math.min(40, bounds.height / 4);
+            const speed = drag.y < bounds.top + edge ? -Math.ceil((bounds.top + edge - drag.y) / 4)
+              : drag.y > bounds.bottom - edge ? Math.ceil((drag.y - bounds.bottom + edge) / 4) : 0;
+            if (speed) { list.scrollTop += speed * dt; updateStationDrop(); }
+          }
+          drag.rafId = requestAnimationFrame(tickScroll);
+        };
+        drag.rafId = requestAnimationFrame(tickScroll);
+      }
     }
     event.preventDefault();
     updateStationDrop();
@@ -4440,7 +4489,7 @@ function renderStations() {
     ? `${visibleStations.length} of ${state.stations.length} stations`
     : `${state.stations.length} saved station${state.stations.length === 1 ? "" : "s"}`;
   $("#station-reset").hidden = !filtered;
-  list.innerHTML = "";
+  list.replaceChildren();
 
   if (!visibleStations.length) {
     const li = document.createElement("li");
@@ -4689,8 +4738,8 @@ function renderAlarms() {
     : focused?.classList.contains("alarm-duplicate") ? ".alarm-duplicate"
     : focused?.classList.contains("alarm-delete") ? ".alarm-delete"
     : focused?.classList.contains("sw") ? ".sw" : ".alarm-card-main";
-  list.innerHTML = "";
-  const sorted = [...state.alarms].sort((a, b) => a.hour - b.hour || a.minute - b.minute);
+  list.replaceChildren();
+  const sorted = state.alarms.toSorted((a, b) => a.hour - b.hour || a.minute - b.minute);
   $("#btn-add-alarm").hidden = IS_ANDROID && !sorted.length;
 
   if (!sorted.length) {
@@ -4746,20 +4795,26 @@ function renderAlarms() {
     const status = document.createElement("span");
     status.className = "alarm-card-status";
     status.textContent = alarm.enabled ? "On" : "Off";
-    const sw = document.createElement("button");
-    sw.type = "button";
+    const sw = document.createElement("input");
+    sw.type = "checkbox";
+    sw.setAttribute("switch", "");
+    sw.setAttribute("role", "switch");
     sw.className = "sw";
+    sw.checked = !!alarm.enabled;
     sw.disabled = !!alarmSkipPending || !!alarmSavePending || !!alarmDeletePending || setupRestorePending;
-    sw.setAttribute("aria-pressed", String(!!alarm.enabled));
     sw.setAttribute("aria-label", `${alarm.label || "Alarm"} at ${fmtAlarmTime(alarm.hour, alarm.minute)}`);
-    sw.addEventListener("click", async (e) => {
+    sw.addEventListener("change", async (e) => {
       e.stopPropagation();
-      if (alarmSkipPending || alarmSavePending || alarmDeletePending || setupRestorePending) return;
+      if (alarmSkipPending || alarmSavePending || alarmDeletePending || setupRestorePending) {
+        sw.checked = !!alarm.enabled;
+        return;
+      }
+      const nextEnabled = !!sw.checked;
       const alarms = state.alarms.map((item) =>
-        item.id === alarm.id ? { ...item, enabled: !item.enabled } : item);
+        item.id === alarm.id ? { ...item, enabled: nextEnabled } : item);
       const saving = saveAlarms(alarms);
       renderAlarms();
-      await saving;
+      if (!(await saving)) sw.checked = !!alarm.enabled;
     });
 
     toggle.append(status, sw);
@@ -4935,15 +4990,13 @@ function renderSettings() {
   $$(".settings .row").forEach((row) => {
     const key = row.dataset.setting;
     const sw = row.querySelector(".sw");
-    sw.setAttribute("aria-pressed", String(!!state.settings[key]));
-    // The switches are empty buttons; without this they announce as "button".
+    sw.checked = !!state.settings[key];
     const label = row.querySelector("span");
-    if (label) sw.setAttribute("aria-label", label.textContent.trim());
+    if (label && !sw.getAttribute("aria-labelledby")) sw.setAttribute("aria-label", label.textContent.trim());
   });
   const vol = Math.round((state.settings.volume ?? 0.8) * 100);
   $("#volume").value = vol;
-  $("#volval").textContent = vol;
-  $("#volume").style.setProperty("--fill", vol + "%");
+  syncSlider($("#volume"), $("#volval"));
   if (IS_ANDROID) return;
   $("#sleep-action").value = state.settings.sleepTimerAction || "stop";
   renderSleepTimer();
@@ -5166,7 +5219,7 @@ function queueSettingsSave() {
       ++settingsReadRequest;
       if (reflectedAutostart === false && settingsAutostartRevision === autostartRevision) {
         state.settings.startWithWindows = false;
-        $("#setting-startup").setAttribute("aria-pressed", "false");
+        $("#setting-startup").checked = false;
       }
     } catch (error) {
       settingsSaveFailures++;
@@ -5508,6 +5561,7 @@ function openStationEditor(station) {
   $("#st-name").value = station ? station.name : "";
   $("#st-url").value = station ? station.url : "";
   $("#st-tag").value = station ? station.tag || "" : "";
+  $("#st-url").removeAttribute("aria-invalid");
   $("#st-note").textContent = "";
   $("#st-note").className = "editor-note";
   $("#st-delete").classList.toggle("hidden", !station);
@@ -5713,6 +5767,7 @@ function updateDayHint() {
 function setKind(kind) {
   ++editorFolderRequest;
   editorKind = kind;
+  $("#al-station").removeAttribute("aria-invalid");
   $$("#al-kind .chip").forEach((c) => {
     c.classList.toggle("on", c.dataset.kind === kind);
     c.setAttribute("aria-pressed", String(c.dataset.kind === kind));
@@ -5738,7 +5793,7 @@ function setKind(kind) {
 
 function fillStationSelect(selected) {
   const sel = $("#al-station");
-  sel.innerHTML = "";
+  sel.replaceChildren();
   if (!state.stations.length) {
     const opt = document.createElement("option");
     opt.textContent = "No stations yet";
@@ -5878,11 +5933,11 @@ function openAlarmEditor(alarm, { copy = false } = {}) {
   fillStationSelect(src.kind === "station" ? src.stationId : (state.stations[0] || {}).id);
   setKind(src.kind);
 
+  $("#al-station").removeAttribute("aria-invalid");
   const alarmVolume = Math.round((base.volume ?? 0.8) * 100);
   $("#al-volume").min = Math.min(10, alarmVolume);
   $("#al-volume").value = alarmVolume;
-  $("#al-volval").textContent = $("#al-volume").value + "%";
-  $("#al-volume").style.setProperty("--fill", $("#al-volume").value + "%");
+  syncSlider($("#al-volume"), $("#al-volval"), "%");
   setSelectValue($("#al-fade"), base.fadeSecs ?? 20, (v) => v + " s");
   setSelectValue($("#al-snooze"), base.snoozeMins ?? 10, (v) => v + " min");
   setSelectValue($("#al-autostop"), base.autoStopMins ?? 30, (v) =>
@@ -6018,7 +6073,7 @@ function readAlarmEditor() {
       label: $("#al-label").value.trim(),
       hour,
       minute,
-      days: [...editorDays].sort((a, b) => a - b),
+      days: editorDays.toSorted((a, b) => a - b),
       enabled: alarmDraftEnabled,
       source,
       volume: Number($("#al-volume").value) / 100,
@@ -6287,14 +6342,8 @@ function wire() {
     });
   }
 
-  document.addEventListener("keydown", event => {
-    if (!ringing || event.key !== "Tab") return;
-    const controls = [$("#ring-snooze"), $("#ring-dismiss")].filter(button => !button.disabled);
-    if (!controls.length) { event.preventDefault(); return; }
-    const at = controls.indexOf(document.activeElement);
-    const next = (at + (event.shiftKey ? -1 : 1) + controls.length) % controls.length;
+  $("#ringing").addEventListener("cancel", (event) => {
     event.preventDefault();
-    controls[next].focus();
   });
 
   // window controls
@@ -6314,8 +6363,7 @@ function wire() {
   $("#volume").addEventListener("input", (e) => {
     if (activeWindowActions.size) return;
     const v = +e.target.value;
-    e.target.style.setProperty("--fill", v + "%");
-    $("#volval").textContent = v;
+    syncSlider(e.target, $("#volval"));
     state.settings.volume = v / 100;
     // Apply it always: the slider used to persist a value it refused to act
     // on while an alarm rang, which is the one time you most want it. Cancels
@@ -6360,12 +6408,6 @@ function wire() {
       event.preventDefault();
       setSleep(0);
     });
-    $("#power-countdown").addEventListener("keydown", (event) => {
-      if (event.key === "Tab") {
-        event.preventDefault();
-        $("#power-cancel").focus();
-      }
-    });
   }
 
   // tabs
@@ -6391,7 +6433,12 @@ function wire() {
         t.tabIndex = t === tab ? 0 : -1;
       });
       const pane = tab.dataset.pane;
-      $$(".pane").forEach((p) => p.classList.toggle("on", p.id === "pane-" + pane));
+      $$(".pane").forEach((p) => {
+        const active = p.id === "pane-" + pane;
+        p.classList.toggle("on", active);
+        p.hidden = !active;
+      });
+      window.aerowaveOrb?.syncVisibility?.();
       if (IS_ANDROID) {
         if (pane !== "player") androidPlayerReturnPane = null;
         renderAndroidMiniPlayer();
@@ -6446,6 +6493,7 @@ function wire() {
   $("#station-filter").addEventListener("input", renderStations);
   $("#station-filter").addEventListener("keydown", (event) => {
     if (IS_ANDROID && event.key === "Enter") {
+      if (event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
       dismissAndroidKeyboard();
     }
@@ -6478,6 +6526,8 @@ function wire() {
       const note = $("#st-note");
       note.textContent = "The URL must start with http:// or https://";
       note.className = "editor-note bad";
+      $("#st-url").setAttribute("aria-invalid", "true");
+      $("#st-url").focus();
       return;
     }
     try { new URL(url); }
@@ -6485,8 +6535,11 @@ function wire() {
       const note = $("#st-note");
       note.textContent = "Enter a valid stream URL.";
       note.className = "editor-note bad";
+      $("#st-url").setAttribute("aria-invalid", "true");
+      $("#st-url").focus();
       return;
     }
+    $("#st-url").removeAttribute("aria-invalid");
     const changes = { name, url, tag: $("#st-tag").value.trim() };
     if (!editingStation) changes.favorite = false;
     else if (editingStation.url !== url) Object.assign(changes, { logo: "", hls: false, directoryStreamId: null });
@@ -6500,6 +6553,7 @@ function wire() {
 
   $("#st-url").addEventListener("input", () => {
     cancelStationTest();
+    $("#st-url").removeAttribute("aria-invalid");
     $("#st-note").textContent = "";
     $("#st-note").className = "editor-note";
   });
@@ -6561,7 +6615,7 @@ function wire() {
   $("#browse-reset").addEventListener("click", clearBrowseFilters);
   $("#browse-query").addEventListener("input", updateBrowseResetVisibility);
   $("#browse-query").addEventListener("keydown", (e) => {
-    if (e.key !== "Enter") return;
+    if (e.key !== "Enter" || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
     browseSearch(false);
   });
@@ -6612,7 +6666,7 @@ function wire() {
     $("#al-name-cancel").addEventListener("click", () => closeAlarmNameDialog());
     $("#al-name-done").addEventListener("click", () => closeAlarmNameDialog(true));
     $("#al-name-input").addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
+      if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
       closeAlarmNameDialog(true);
     });
@@ -6678,6 +6732,7 @@ function wire() {
   );
 
   $$("#al-kind .chip").forEach((chip) => chip.addEventListener("click", () => setKind(chip.dataset.kind)));
+  $("#al-station").addEventListener("change", () => $("#al-station").removeAttribute("aria-invalid"));
 
   $("#al-folderbtn").addEventListener("click", async () => {
     const request = ++editorFolderRequest;
@@ -6702,8 +6757,7 @@ function wire() {
   $("#al-autosnooze").addEventListener("change", syncAutoSnooze);
 
   $("#al-volume").addEventListener("input", (e) => {
-    e.target.style.setProperty("--fill", e.target.value + "%");
-    $("#al-volval").textContent = e.target.value + "%";
+    syncSlider(e.target, $("#al-volval"), "%");
   });
 
   $("#alarm-editor").addEventListener("submit", async (e) => {
@@ -6714,8 +6768,15 @@ function wire() {
       const note = $("#al-sourcenote");
       note.className = "editor-note bad";
       note.textContent = result.error;
+      if (editorKind === "station") {
+        $("#al-station").setAttribute("aria-invalid", "true");
+        $("#al-station").focus();
+      } else {
+        $("#al-folderbtn").focus();
+      }
       return;
     }
+    $("#al-station").removeAttribute("aria-invalid");
     const idx = state.alarms.findIndex((a) => a.id === result.alarm.id);
     if (editingAlarm && idx < 0) {
       say("This alarm was removed. Cancel this edit and create a new alarm.", "bad", true);
@@ -6814,14 +6875,16 @@ function wire() {
     if ($("#config-details").open) refreshStorageStatus();
   });
   $$(".settings .row").forEach((row) => {
-    row.querySelector(".sw").addEventListener("click", (e) => {
-      if (activeWindowActions.size) return;
+    row.querySelector(".sw").addEventListener("change", (e) => {
       const sw = e.currentTarget;
-      const next = sw.getAttribute("aria-pressed") !== "true";
+      const next = !!sw.checked;
+      if (activeWindowActions.size) {
+        sw.checked = !next;
+        return;
+      }
       // The hour field holds 12- or 24-hour digits according to this very
       // setting, so take the time in the old reading before switching.
       const was = row.dataset.setting === "clock24h" && !IS_ANDROID ? readEditorTime() : null;
-      sw.setAttribute("aria-pressed", String(next));
       state.settings[row.dataset.setting] = next;
       if (row.dataset.setting === "showMetadata") refreshMetadataPreference();
       if (row.dataset.setting === "clock24h") {
@@ -7053,8 +7116,8 @@ async function boot() {
 }
 
 boot().catch((e) => {
-  document.body.innerHTML =
-    '<pre style="padding:30px;color:#ff9c86;font:13px monospace">Aerowave failed to start:\n\n' +
-    String(e) +
-    "</pre>";
+  const pre = document.createElement("pre");
+  pre.className = "boot-error";
+  pre.textContent = "Aerowave failed to start:\n\n" + String(e);
+  document.body.replaceChildren(pre);
 });

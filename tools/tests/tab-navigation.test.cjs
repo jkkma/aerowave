@@ -31,7 +31,9 @@ function tabHarness(android = false) {
   h.queries.set(".pane", paneNames.map((name) => {
     const pane = h.el(`#pane-${name}`);
     pane.id = `pane-${name}`;
-    pane.classList.toggle("on", name === (android ? "player" : "radio"));
+    const active = name === (android ? "player" : "radio");
+    pane.classList.toggle("on", active);
+    pane.hidden = !active;
     return pane;
   }));
   const categories = Array.from({ length: 4 }, () => {
@@ -54,6 +56,7 @@ function assertActive(h, name, { focus = true } = {}) {
   assert.equal(active.getAttribute("aria-selected"), "true");
   assert.equal(active.tabIndex, 0);
   assert.equal(h.el(`#pane-${pane}`).classList.contains("on"), true);
+  assert.equal(h.el(`#pane-${pane}`).hidden, false);
   for (const other of names.filter((item) => item !== name)) {
     assert.equal(h.el(`#tab-${other}`).classList.contains("on"), false);
     assert.equal(h.el(`#tab-${other}`).getAttribute("aria-selected"), "false");
@@ -61,6 +64,7 @@ function assertActive(h, name, { focus = true } = {}) {
   }
   for (const other of paneNames.filter((item) => item !== pane)) {
     assert.equal(h.el(`#pane-${other}`).classList.contains("on"), false);
+    assert.equal(h.el(`#pane-${other}`).hidden, true);
   }
 }
 
@@ -167,4 +171,17 @@ test("Android Settings categories start closed and remain open after rendering",
   h.evaluate("renderSettings()");
   assert.equal(h.settingsCategories[0].open, true);
   assert.equal(h.settingsCategories.slice(1).every((category) => !category.open), true);
+});
+
+
+test("switching tabs updates panel hidden attributes and notifies orb visibility", async () => {
+  const h = tabHarness();
+  let visibilitySyncs = 0;
+  h.context.window.aerowaveOrb = { syncVisibility: () => { visibilitySyncs++; } };
+  await h.el("#tab-browse").dispatch("click");
+  assertActive(h, "browse", { focus: false });
+  assert.equal(visibilitySyncs, 1);
+  await h.el("#tab-radio").dispatch("click");
+  assertActive(h, "radio", { focus: false });
+  assert.equal(visibilitySyncs, 2);
 });
