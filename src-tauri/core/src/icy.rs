@@ -19,6 +19,86 @@ pub fn looks_like_playlist(url: &str, content_type: &str) -> bool {
         || content_type.contains("x-ms-asx")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaylistPrefix {
+    Recognized,
+    Incomplete,
+    Other,
+}
+
+/// Recognize a playlist in the prefix of a response with no useful MIME hint.
+/// The caller stops reading at its prefix budget even if the format is unclear.
+pub fn playlist_prefix(bytes: &[u8], eof: bool) -> PlaylistPrefix {
+    use PlaylistPrefix::{Incomplete, Other, Recognized};
+
+    let bom = b"\xef\xbb\xbf";
+    let undecided = if eof { Other } else { Incomplete };
+    if bytes.len() < bom.len() && bom.starts_with(bytes) {
+        return undecided;
+    }
+    let bytes = bytes.strip_prefix(bom).unwrap_or(bytes);
+    let Some(start) = bytes.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return undecided;
+    };
+    let bytes = &bytes[start..];
+    if bytes.starts_with(b"<") {
+        let mut reader = Reader::from_reader(bytes);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(root) | Event::Empty(root)) => {
+                    return if root.name().as_ref().eq_ignore_ascii_case(b"asx") {
+                        Recognized
+                    } else {
+                        Other
+                    };
+                }
+                Ok(Event::Decl(_) | Event::Comment(_) | Event::PI(_)) => {}
+                Ok(Event::Text(text)) if text.as_ref().iter().all(u8::is_ascii_whitespace) => {}
+                Ok(Event::Eof) | Err(quick_xml::Error::Syntax(_)) => return undecided,
+                _ => return Other,
+            }
+        }
+    }
+
+    let line_end = bytes.iter().position(|byte| matches!(byte, b'\r' | b'\n'));
+    let line = &bytes[..line_end.unwrap_or(bytes.len())];
+    let end = line
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(0, |end| end + 1);
+    let line = &line[..end];
+    let markers: &[&[u8]] = &[b"#EXTM3U", b"[playlist]", b"[reference]"];
+    let schemes: &[&[u8]] = &[b"http://", b"https://"];
+    let url_line = schemes.iter().any(|scheme| {
+        line.get(..scheme.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+    });
+    if line_end.is_none() && !eof {
+        let partial_marker = markers.iter().chain(schemes).any(|marker| {
+            marker
+                .get(..line.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(line))
+        });
+        return if partial_marker || url_line {
+            Incomplete
+        } else {
+            Other
+        };
+    }
+    if markers.iter().any(|marker| line.eq_ignore_ascii_case(marker))
+        || (url_line
+            && !line.iter().any(u8::is_ascii_whitespace)
+            && std::str::from_utf8(line)
+                .ok()
+                .and_then(|line| url::Url::parse(line).ok())
+                .is_some_and(|url| url.has_host()))
+    {
+        Recognized
+    } else {
+        Other
+    }
+}
+
 fn playlist_assignment<'a>(line: &'a str, prefix: &str, numbered: bool) -> Option<&'a str> {
     let (key, value) = line.split_once('=')?;
     let key = key.trim().to_ascii_lowercase();
@@ -146,7 +226,7 @@ pub fn playlist_urls(body: &str, base_url: &str, content_type: &str, limit: usiz
 /// take the other path - hls.js, fed through `hls.rs` - rather than being
 /// handed to the media element as if they were a stream.
 pub fn is_hls(body: &str) -> bool {
-    body.contains("#EXT-X-")
+    body.lines().any(|line| line.trim_start().starts_with("#EXT-X-"))
 }
 
 /// Error pages must not reach the audio decoder, whether the server answers
@@ -1142,7 +1222,30 @@ mod tests {
     #[test]
     fn spots_hls() {
         assert!(is_hls("#EXTM3U\n#EXT-X-VERSION:3\n"));
-        assert!(!is_hls("#EXTM3U\nhttps://x/y.mp3\n"));
+        assert!(!is_hls("#EXTM3U\nhttps://x/y.mp3#EXT-X-VERSION:3\n"));
+    }
+
+    #[test]
+    fn detects_extensionless_playlists_from_incremental_prefixes() {
+        use PlaylistPrefix::{Incomplete, Other, Recognized};
+
+        for signature in [
+            &b"\xef\xbb\xbf#EXTM3U\r"[..],
+            b"  [Playlist]\n",
+            b"[Reference]\n",
+            b"<?xml version=\"1.0\"?>\n<!-- station --><aSx version=\"3.0\">",
+            b"https://example.com/audio.mp3\n",
+        ] {
+            for end in 0..signature.len() {
+                assert_eq!(playlist_prefix(&signature[..end], false), Incomplete);
+            }
+            assert_eq!(playlist_prefix(signature, false), Recognized);
+        }
+        assert_eq!(playlist_prefix(b"http://example.com/song", true), Recognized);
+        assert_eq!(playlist_prefix(b"http://example.com/ is down\n", true), Other);
+        assert_eq!(playlist_prefix(b"#EXT binary\0", false), Other);
+        assert_eq!(playlist_prefix(b"<!-- offline --><html>", false), Other);
+        assert_eq!(playlist_prefix(b"<ASX-wrapper>", false), Other);
     }
 
     #[test]

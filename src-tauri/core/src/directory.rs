@@ -344,14 +344,34 @@ pub fn stream_key(url: &str) -> String {
     if suffix.is_empty() {
         bare.trim_end_matches('/').to_string()
     } else {
+        // HTTP sends "/" for an omitted root slash. Keep non-root paths and
+        // the query selector verbatim as they may identify another stream.
+        let bare = if suffix.starts_with('?') {
+            bare.strip_suffix('/')
+                .filter(|authority| !authority.is_empty() && !authority.contains('/'))
+                .unwrap_or(bare)
+        } else {
+            bare
+        };
         format!("{bare}{suffix}")
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct DirectoryStreamIdentity {
+    pub id: String,
+    pub legacy_id: Option<String>,
+}
+
+/// The current identifier used for a new save.
+pub fn directory_stream_id(url: &str, resolved_url: &str) -> Option<String> {
+    directory_stream_identity(url, resolved_url).map(|identity| identity.id)
 }
 
 /// Remember a directory match without retaining its checked URL. A permanent
 /// query selector can identify a stream, while a changed signature produces
 /// a different identity and leaves the submitted tuning URL usable.
-pub fn directory_stream_id(url: &str, resolved_url: &str) -> Option<String> {
+pub fn directory_stream_identity(url: &str, resolved_url: &str) -> Option<DirectoryStreamIdentity> {
     let submitted = parse_http_url(url)?;
     let address = if resolved_url.is_empty() { url } else { resolved_url };
     let resolved = parse_http_url(address)?;
@@ -366,7 +386,18 @@ pub fn directory_stream_id(url: &str, resolved_url: &str) -> Option<String> {
     {
         return None;
     }
-    Some(format!("{:x}", Sha256::digest(stream_key(address))))
+    let key = stream_key(address);
+    // Before the root forms were merged, a slash before the query affected
+    // the persisted hash. Recognize that old hash even when the directory
+    // now reports the form with an omitted slash.
+    let legacy_id = key
+        .split_once('?')
+        .filter(|(authority, _)| !authority.contains('/'))
+        .map(|(authority, query)| format!("{:x}", Sha256::digest(format!("{authority}/?{query}"))));
+    Some(DirectoryStreamIdentity {
+        id: format!("{:x}", Sha256::digest(key)),
+        legacy_id,
+    })
 }
 
 pub fn is_directory_stream_id(value: &str) -> bool {
@@ -764,6 +795,24 @@ mod tests {
         ] {
             assert_ne!(first, directory_stream_id(plain, address), "{address}");
         }
+    }
+
+    #[test]
+    fn directory_stream_identity_merges_root_query_forms_and_preserves_both_old_ids() {
+        let submitted = "https://wrapper.example/listen.m3u";
+        let omitted = "https://cdn.example?station=A";
+        let explicit = "http://CDN.example/?station=A";
+        assert_eq!(stream_key(omitted), stream_key(explicit));
+        assert_ne!(stream_key(explicit), stream_key("http://cdn.example//?station=A"));
+        assert_ne!(stream_key(explicit), stream_key("http://cdn.example/?station=a"));
+
+        let identity = directory_stream_identity(submitted, omitted).unwrap();
+        assert_eq!(Some(&identity), directory_stream_identity(submitted, explicit).as_ref());
+        assert_eq!(identity.id, format!("{:x}", Sha256::digest("cdn.example?station=A")));
+        assert_eq!(
+            identity.legacy_id,
+            Some(format!("{:x}", Sha256::digest("cdn.example/?station=A")))
+        );
     }
 
     #[test]

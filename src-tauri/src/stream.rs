@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use aerowave_core::icy::{
     decode_text, head_end, is_hls, is_playable_type, looks_like_playlist, metadata_interval,
-    parse_head, playlist_urls, socket_host, Head, MetaStrip,
+    parse_head, playlist_prefix, playlist_urls, socket_host, Head, MetaStrip, PlaylistPrefix,
 };
 use aerowave_core::network::{clear_userinfo, inherit_userinfo, StationNetwork};
 use aerowave_core::stream_tags::StreamTags;
@@ -45,6 +45,7 @@ const MAX_HEAD_BYTES: usize = 8 * 1024;
 /// to megabytes is a broken or hostile server, and buffering it whole would
 /// let it decide how much memory this process uses.
 const MAX_PLAYLIST_BYTES: usize = 256 * 1024;
+const MAX_PLAYLIST_PREFIX_BYTES: usize = 1024;
 pub(crate) const RELAY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const ICY_HEAD_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_REDIRECTS: usize = 6;
@@ -212,6 +213,45 @@ enum Resolved {
     },
 }
 
+impl Resolved {
+    /// A playlist can name a mount that sends audio headers before it fails.
+    /// Check for initial bytes while the resolver can still try another entry.
+    async fn confirm_audio(&mut self) -> Result<(), String> {
+        let primed = match self {
+            Self::Stream { resp, primed, .. } => {
+                metadata_interval(header(resp, "icy-metaint").as_deref())?;
+                while primed.is_empty() {
+                    let Some(chunk) = resp.chunk().await.map_err(|e| describe(&e.without_url()))?
+                    else {
+                        break;
+                    };
+                    primed.extend_from_slice(&chunk);
+                }
+                primed
+            }
+            Self::Icy {
+                socket,
+                head,
+                primed,
+                ..
+            } => {
+                metadata_interval(head.get("icy-metaint"))?;
+                if primed.is_empty() {
+                    let mut chunk = [0u8; 2048];
+                    let read = socket.read(&mut chunk).await.map_err(|e| e.to_string())?;
+                    primed.extend_from_slice(&chunk[..read]);
+                }
+                primed
+            }
+            Self::Hls { .. } => return Ok(()),
+        };
+        if primed.is_empty() {
+            return Err("the station returned an empty audio response".into());
+        }
+        Ok(())
+    }
+}
+
 enum Candidate {
     Source(Resolved),
     Playlist(Vec<String>),
@@ -246,10 +286,9 @@ async fn station_response(
     url: &str,
     want_metadata: bool,
     network: &mut StationNetwork,
-) -> Result<(reqwest::Response, reqwest::Url, bool), ResolveError> {
+) -> Result<(reqwest::Response, reqwest::Url), ResolveError> {
     let mut current = reqwest::Url::parse(url.trim())
         .map_err(|error| ResolveError::refused(format!("invalid station URL: {error}")))?;
-    let mut redirected_playlist = false;
     for redirects in 0..=MAX_REDIRECTS {
         network.admit(&current).map_err(ResolveError::refused)?;
         let mut request = clients.get(*network).get(current.clone());
@@ -268,7 +307,7 @@ async fn station_response(
         })?;
         let status = response.status();
         if status.is_success() {
-            return Ok((response, current, redirected_playlist));
+            return Ok((response, current));
         }
         if !is_redirect(status) {
             return Err(ResolveError::new(
@@ -286,7 +325,6 @@ async fn station_response(
             .ok_or_else(|| {
                 ResolveError::refused("the stream redirect had no valid Location header")
             })?;
-        redirected_playlist |= looks_like_playlist(current.path(), "");
         current = redirect_target(&current, location).map_err(ResolveError::refused)?;
     }
     unreachable!("the redirect limit returns before another request")
@@ -319,25 +357,22 @@ async fn read_capped(resp: reqwest::Response, mut body: Vec<u8>) -> Result<Strin
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
-/// A playlist address can redirect to an untyped URL. Read only far enough
-/// to recognize an M3U header, retaining any bytes read for an audio response.
-async fn sniff_m3u(resp: &mut reqwest::Response, primed: &mut Vec<u8>) -> Result<bool, String> {
-    let prefixes: &[&[u8]] = &[
-        b"#EXTM3U\n",
-        b"#EXTM3U\r",
-        b"\xef\xbb\xbf#EXTM3U\n",
-        b"\xef\xbb\xbf#EXTM3U\r",
-    ];
+/// A generic URL or MIME type can still lead to a playlist. Keep every byte
+/// consumed while inspecting its prefix so an audio body can be replayed whole.
+async fn sniff_playlist(resp: &mut reqwest::Response, primed: &mut Vec<u8>) -> Result<bool, String> {
     loop {
-        if prefixes.iter().any(|prefix| primed.starts_with(prefix)) {
-            return Ok(true);
-        }
-        if !prefixes.iter().any(|prefix| prefix.starts_with(primed)) {
-            return Ok(false);
+        let inspected = primed.len().min(MAX_PLAYLIST_PREFIX_BYTES);
+        match playlist_prefix(&primed[..inspected], false) {
+            PlaylistPrefix::Recognized => return Ok(true),
+            PlaylistPrefix::Other => return Ok(false),
+            PlaylistPrefix::Incomplete if inspected == MAX_PLAYLIST_PREFIX_BYTES => {
+                return Ok(false);
+            }
+            PlaylistPrefix::Incomplete => {}
         }
         match resp.chunk().await.map_err(|e| describe(&e.without_url()))? {
             Some(chunk) => primed.extend_from_slice(&chunk),
-            None => return Ok(false),
+            None => return Ok(playlist_prefix(primed, true) == PlaylistPrefix::Recognized),
         }
     }
 }
@@ -357,35 +392,33 @@ async fn open_candidate(
     network: &mut StationNetwork,
     skip_resolve: bool,
 ) -> Result<Candidate, ResolveError> {
-    let (mut resp, final_url, redirected_playlist) =
-        match station_response(clients, url, want_metadata, network).await {
-            Ok(response) => response,
-            Err(error) => {
-                let Some(raw_url) = error.raw_url.as_deref() else {
-                    return Err(error);
-                };
-                // An HTTP client cannot parse Shoutcast v1's status line. Prefer
-                // the raw server's reason only when it proves it speaks ICY.
-                return match icy_connect(raw_url, want_metadata, network).await {
-                    Ok((socket, head, primed, final_url)) => Ok(Candidate::Source(Resolved::Icy {
-                        socket,
-                        head,
-                        primed,
-                        final_url,
-                    })),
-                    Err(icy) if icy.proven => Err(ResolveError::refused(icy.message)),
-                    Err(_) => Err(error),
-                };
-            }
-        };
+    let (mut resp, final_url) = match station_response(clients, url, want_metadata, network).await {
+        Ok(response) => response,
+        Err(error) => {
+            let Some(raw_url) = error.raw_url.as_deref() else {
+                return Err(error);
+            };
+            // An HTTP client cannot parse Shoutcast v1's status line. Prefer
+            // the raw server's reason only when it proves it speaks ICY.
+            return match icy_connect(raw_url, want_metadata, network).await {
+                Ok((socket, head, primed, final_url)) => Ok(Candidate::Source(Resolved::Icy {
+                    socket,
+                    head,
+                    primed,
+                    final_url,
+                })),
+                Err(icy) if icy.proven => Err(ResolveError::refused(icy.message)),
+                Err(_) => Err(error),
+            };
+        }
+    };
     let content_type = content_type_of(&resp);
     let mut primed = Vec::new();
     let mime = content_type.split(';').next().unwrap_or("").trim();
     let playlist = !skip_resolve
         && (looks_like_playlist(final_url.path(), &content_type)
-            || (redirected_playlist
-                && matches!(mime, "" | "application/octet-stream" | "text/plain")
-                && sniff_m3u(&mut resp, &mut primed)
+            || (matches!(mime, "" | "application/octet-stream" | "text/plain")
+                && sniff_playlist(&mut resp, &mut primed)
                     .await
                     .map_err(ResolveError::refused)?));
     if playlist {
@@ -467,13 +500,19 @@ async fn resolve(
         let result = if pending.is_empty() {
             attempt.await
         } else {
-            tokio::time::timeout(ALTERNATE_WAIT, attempt)
-                .await
-                .unwrap_or_else(|_| {
-                    Err(ResolveError::refused(
-                        "timed out talking to a playlist entry",
-                    ))
-                })
+            tokio::time::timeout(ALTERNATE_WAIT, async {
+                let mut candidate = attempt.await?;
+                if let Candidate::Source(source) = &mut candidate {
+                    source.confirm_audio().await.map_err(ResolveError::refused)?;
+                }
+                Ok(candidate)
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(ResolveError::refused(
+                    "timed out talking to a playlist entry",
+                ))
+            })
         };
 
         let error = match result {

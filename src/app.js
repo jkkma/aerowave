@@ -244,6 +244,7 @@ const player = {
   fadeTimer: null,
   pendingFadeSeconds: 0,
   metaTimer: null,
+  metadataPoll: null,
   metadataStarted: false, // keep retries from reopening a titleless poll
   retries: 0,
   retryProgressSeconds: 0, // decoded audio since this reconnect began
@@ -312,9 +313,9 @@ function markPlaying(on) {
 
 function clearTimers() {
   clearInterval(player.fadeTimer);
-  clearInterval(player.metaTimer);
+  stopMetadata();
   clearTimeout(player.retryTimer);
-  player.fadeTimer = player.metaTimer = player.retryTimer = null;
+  player.fadeTimer = player.retryTimer = null;
 }
 
 function stopPlayback(quiet, { skipNative = false } = {}) {
@@ -882,7 +883,7 @@ function fadeTo(target, seconds) {
     return;
   }
   const started = Date.now();
-  const from = 0.02;
+  const from = Math.min(target, 0.02);
   audio.volume = from;
   player.fadeTimer = setInterval(() => {
     const t = Math.min(1, (Date.now() - started) / (seconds * 1000));
@@ -1120,9 +1121,8 @@ function refreshMetadataPreference() {
     }).catch(() => {});
   }
   if (state.settings.showMetadata === false) {
-    clearInterval(player.metaTimer);
-    player.metaTimer = null;
-  } else if (!player.hls) {
+    stopMetadata();
+  } else if (!player.hls && !source.hls) {
     startMetadata(source);
   }
 }
@@ -1323,8 +1323,10 @@ function closeHlsSession(base) {
 async function startHls(source, url, generation) {
   if (superseded(generation) || player.source !== source || player.paused || givingUp) return false;
   switchingSource = true;
-  clearInterval(player.metaTimer);
-  player.metaTimer = null;
+  stopMetadata();
+  player.metadataStarted = false;
+  player.streamTitle = false;
+  player.relayed = false;
   const HlsLib = (typeof Hls !== "undefined" && Hls) || await ensureHls().catch(() => null);
   if (superseded(generation) || player.source !== source || player.paused || givingUp) return false;
   if (!HlsLib || !HlsLib.isSupported()) {
@@ -1522,10 +1524,16 @@ async function play(source, opts = {}) {
   player.retryProgressSeconds = 0;
   player.streamTitle = false;
   const volume = opts.volume !== undefined ? opts.volume : state.settings.volume ?? 0.8;
-  if (sleepFadeVolume != null) audio.volume = Math.min(sleepFadeVolume, volume);
   // A second alarm can interrupt this connection before the media URL arrives.
   // Keep the intended volume and position available for its snapshot too.
   player.target = volume;
+  if (!IS_ANDROID) {
+    // A retry may be the first attempt that reaches the audio element. Set its
+    // volume now, so later slider input takes precedence over this request.
+    player.pendingFadeSeconds = sleepFadeVolume == null ? opts.fadeSecs || 0 : 0;
+    const initialVolume = player.pendingFadeSeconds > 0 ? Math.min(volume, 0.02) : volume;
+    audio.volume = sleepFadeVolume == null ? initialVolume : Math.min(sleepFadeVolume, initialVolume);
+  }
   player.pendingPosition = source.kind === "folder"
     ? (Number.isFinite(opts.startTime) && opts.startTime > 0 ? opts.startTime : 0)
     : null;
@@ -1617,22 +1625,6 @@ async function play(source, opts = {}) {
     audio.currentTime = player.pendingPosition;
   }
   player.pendingPosition = null;
-  const continuingSleepFade = sleepFadeVolume != null && sleepFading;
-  if (continuingSleepFade && (!sleepSnapshot.timer || sleepSnapshot.timer.executeAtMs != null ||
-      sleepTimeLeft(sleepSnapshot.timer) <= 0)) {
-    stopPlayback();
-    return;
-  }
-  audio.volume = continuingSleepFade
-    ? Math.min(audio.volume, opts.fadeSecs > 0 ? 0.02 : volume)
-    : opts.fadeSecs > 0 ? 0.02 : volume;
-  player.pendingFadeSeconds = continuingSleepFade ? 0 : opts.fadeSecs || 0;
-  if (continuingSleepFade) {
-    // Source resolution may have taken most of the time left. Resume from its
-    // faded level only when the replacement can actually start making sound.
-    sleepFading = false;
-    renderSleepTimer();
-  }
   if (player.paused || givingUp) return;
   if (!(await playLoadedAudio(generation))) return;
 
@@ -2015,44 +2007,54 @@ async function setOrbArt(source, retry = 0) {
   showOrbArt(source, picture);
 }
 
-function startMetadata(source, initialInfo = null) {
+function stopMetadata() {
   clearInterval(player.metaTimer);
+  player.metaTimer = null;
+  player.metadataPoll = null;
+}
+
+function startMetadata(source, initialInfo = null) {
+  stopMetadata();
   if (state.settings.showMetadata === false) return;
   player.metadataStarted = true;
   // Plenty of stations send no ICY titles at all. Polling one of those opens a
   // connection a minute, for ever, to learn nothing - so give up after three.
   let titleless = 0;
   const generation = playGeneration;
+  const current = () => player.metadataPoll === poll && !player.hls &&
+    !superseded(generation) && player.source === source;
   const poll = async (initial = null) => {
-    if (player.source !== source) return;
+    if (!current()) return;
+    let info;
     try {
-      const info = initial || await invoke("probe_stream", {
+      info = initial || await invoke("probe_stream", {
         url: player.resolved || source.url,
         wantTitle: true,
         skipResolve: player.probed,
       });
-      if (superseded(generation) || player.source !== source) return;
-      if (typeof info.title === "string") {
-        titleless = 0;
-        // Unless the stream has already said, on the connection that is
-        // actually playing. This poll was in flight before that arrived.
-        if (!player.streamTitle) setTrackTitle(info.title);
-      } else if (!initial && ++titleless >= 3) {
-        clearInterval(player.metaTimer);
-        player.metaTimer = null;
-        return;
-      }
-      const bits = [];
-      if (info.bitrate) bits.push(info.bitrate + " kbps");
-      if (info.genre) bits.push(info.genre);
-      if (info.name && info.name !== source.title) bits.push(info.name);
-      // Only when the server actually said something. A probe that comes back
-      // empty must not rub out what the caller already knew.
-      if (bits.length) $("#np-meta").textContent = bits.join("  ·  ");
     } catch {
-      /* metadata is a nicety; a failure here must not disturb playback */
+      // A rejected probe still used a connection without finding a title.
     }
+    if (!current()) return;
+    if (typeof info?.title === "string") {
+      titleless = 0;
+      // Unless the stream has already said, on the connection that is
+      // actually playing. This poll was in flight before that arrived.
+      if (!player.streamTitle) setTrackTitle(info.title);
+    } else if (!initial && ++titleless >= 3) {
+      stopMetadata();
+      return;
+    }
+    if (!info) return;
+    const bits = [];
+    if (info.bitrate) bits.push(info.bitrate + " kbps");
+    if (info.genre) bits.push(info.genre);
+    if (info.name && info.name !== source.title) bits.push(info.name);
+    // Only when the server actually said something. A probe that comes back
+    // empty must not rub out what the caller already knew.
+    if (bits.length) $("#np-meta").textContent = bits.join("  ·  ");
   };
+  player.metadataPoll = poll;
   poll(initialInfo);
   // The first poll is the one that matters: it fills in bitrate, genre and
   // the station's own name, none of which change. Titles come from the relay
@@ -2303,6 +2305,18 @@ function setAudioSource(url) {
 async function playLoadedAudio(generation) {
   const load = mediaLoad;
   if (!load || load.failed) return false;
+  if (sleepFading) {
+    if (!sleepSnapshot.timer || sleepSnapshot.timer.executeAtMs != null || sleepTimeLeft(sleepSnapshot.timer) <= 0) {
+      stopPlayback();
+      return false;
+    }
+    if (!player.fadeTimer) {
+      // A change of source cleared the fade. Start from the retained volume
+      // and cover only the time remaining when the new route can play.
+      sleepFading = false;
+      renderSleepTimer();
+    }
+  }
   const request = Symbol();
   load.playRequest = request;
   const current = () => load === mediaLoad && load.playRequest === request && !load.failed &&
@@ -2321,10 +2335,10 @@ async function playLoadedAudio(generation) {
     await audio.play();
     if (!current()) return false;
     player.probeError = null;
-    if (player.pendingFadeSeconds > 0) {
+    if (player.pendingFadeSeconds > 0 && !sleepFading) {
       fadeTo(player.target, player.pendingFadeSeconds);
-      player.pendingFadeSeconds = 0;
     }
+    player.pendingFadeSeconds = 0;
     return true;
   } catch (error) {
     if (current() && !isAbort(error)) {
@@ -2558,8 +2572,7 @@ function pausePlayback() {
     // waiting on IPC or play(), so even its late failure cannot restart audio.
     playGeneration += 1;
     clearMediaProgressWatchdog();
-    clearInterval(player.metaTimer);
-    player.metaTimer = null;
+    stopMetadata();
   }
   if (IS_ANDROID) androidPlaybackStatus = "paused";
   if (IS_ANDROID) {
@@ -2789,11 +2802,29 @@ function step(delta) {
     stepFolder(delta);
     return;
   }
+  if (stationRecentOnly) {
+    stepRecent(delta);
+    return;
+  }
   const list = visibleStations.length ? visibleStations : state.stations;
   if (!list.length) return;
   const here = list.findIndex((s) => s.id === (player.source && player.source.stationId));
   const next = list[(here + delta + list.length * 2) % list.length] || list[0];
   playStation(next);
+}
+
+function stepRecent(delta) {
+  const visible = new Map(visibleStations.map(station => [station.id, station]));
+  if (!visible.size) return;
+  // Playback moves an entry to the top of Recent. Keep walking the order
+  // the listener started with while looking up each station's current details.
+  const previous = recentStepOrder && recentStepOrder.source === player.source ? recentStepOrder.ids : null;
+  const ids = previous?.length === visible.size && previous.every(id => visible.has(id))
+    ? previous : [...visible.keys()];
+  const here = ids.indexOf(playingRecentStation(visibleStations)?.id);
+  const next = here < 0 ? (delta > 0 ? 0 : ids.length - 1) : (here + delta + ids.length) % ids.length;
+  playStation(visible.get(ids[next]));
+  recentStepOrder = { source: player.source, ids, query: $("#station-filter").value.trim().toLowerCase() };
 }
 
 /** Through the browse results, in the order they are shown. */
@@ -2879,7 +2910,8 @@ let browseError = "";
 let browseLooked = false;
 /** Whether the current result query has completed successfully. */
 let browseSearched = false;
-let browseFiltersLoading = null;
+let browseCountriesLoading = null;
+let browseTagsLoading = null;
 const pendingBrowseAdds = new Set();
 /**
  * Which search the list belongs to. Changing a filter while one is in flight
@@ -2907,7 +2939,12 @@ const sameStream = (a, b) => {
     const suffixAt = url.search(/[?#]/);
     const address = suffixAt < 0 ? url : url.slice(0, suffixAt);
     const bare = address.replace(/[A-Z]+/g, (upper) => upper.toLowerCase()).replace(/^https?:\/\//, "");
-    return suffixAt < 0 ? bare.replace(/\/+$/, "") : bare + url.slice(suffixAt);
+    if (suffixAt < 0) return bare.replace(/\/+$/, "");
+    const suffix = url.slice(suffixAt);
+    // An omitted root slash is sent as "/" by HTTP. A non-root path or
+    // the rest of the query can still identify a different stream.
+    const addressWithQuery = suffix.startsWith("?") ? bare.replace(/^([^/]+)\/$/, "$1") : bare;
+    return addressWithQuery + suffix;
   };
   return !!tidy(a) && tidy(a) === tidy(b);
 };
@@ -2919,8 +2956,12 @@ const sameStream = (a, b) => {
  */
 const browseStreamOf = (st) => st.resolvedUrl || st.url;
 
+// Browse rows and previews also recognize the former hash of a root URL
+// with an explicit slash. Existing station records keep their original ID.
 const sameSavedStream = (a, b) => sameStream(a.url, b.url) ||
-  (!!a.directoryStreamId && a.directoryStreamId === b.directoryStreamId);
+  (!!a.directoryStreamId && (a.directoryStreamId === b.directoryStreamId ||
+    a.directoryStreamId === b.legacyDirectoryStreamId)) ||
+  (!!b.directoryStreamId && b.directoryStreamId === a.legacyDirectoryStreamId);
 
 /**
  * A stable directory identity survives a search whose aliases are different.
@@ -3037,7 +3078,7 @@ function scheduleBrowseSearch() {
 }
 
 /** Run a search. `more` adds the next page instead of starting over. */
-async function browseSearch(more, nameOverride) {
+async function browseSearch(more, nameOverride, { refreshFacets = false } = {}) {
   // A dropdown change still settling owns the next request. Paging the old
   // query from its old offset would fill the list with stations the dropdowns
   // no longer describe, so More runs the new search instead.
@@ -3065,7 +3106,7 @@ async function browseSearch(more, nameOverride) {
     $("#browse-list").scrollTop = 0;
     // Search is also the retry affordance for an initial list that failed.
     // Successful lists stay cached, and concurrent retries share one request.
-    loadBrowseFilters();
+    loadBrowseFilters(refreshFacets);
     renderBrowseFilters();
   }
   browseNote(more ? "Fetching more…" : "Searching the directory…");
@@ -3153,60 +3194,44 @@ const asTag = (t) => [t.value, t.name, t.stations];
  * world nor the directory's busiest genres change while the app is open, and
  * both are a convenience - searching still works if they will not load.
  */
-function loadBrowseFilters() {
-  // A submitted name or filter change makes every old count stale. Refresh
-  // immediately even when the global lists are still loading; each dropdown's
-  // generation guard prevents older facet replies from painting over this one.
-  if (browseFiltersLoading) {
-    return Promise.all([refreshBrowseFilters(), browseFiltersLoading]);
+function loadBrowseFilters(refreshFacets = false) {
+  if (!browseCountries && !browseCountriesLoading) {
+    browseCountriesLoading = invoke("browse_countries")
+      .then((countries) => { browseCountries = countries; })
+      .catch(() => say("could not load the country list", "bad"))
+      .finally(() => {
+        browseCountriesLoading = null;
+        return refreshBrowseCountries();
+      });
   }
-  const jobs = [];
-  if (!browseCountries) {
-    jobs.push(
-      invoke("browse_countries")
-        .then((countries) => { browseCountries = countries; })
-        .catch(() => say("could not load the country list", "bad"))
-    );
+  if (!browseTags && !browseTagsLoading) {
+    browseTagsLoading = invoke("browse_tags")
+      .then((tags) => { browseTags = tags; })
+      .catch(() => say("could not load the genre list", "bad"))
+      .finally(() => {
+        browseTagsLoading = null;
+        return refreshBrowseTags();
+      });
   }
-  if (!browseTags) {
-    jobs.push(
-      invoke("browse_tags")
-        .then((tags) => { browseTags = tags; })
-        .catch(() => say("could not load the genre list", "bad"))
-    );
-  }
-  if (!jobs.length) return refreshBrowseFilters();
-
-  let loading;
-  loading = Promise.all(jobs)
-    .then(() => {
-      if (browseFiltersLoading === loading) browseFiltersLoading = null;
-      return refreshBrowseFilters();
-    })
-    .finally(() => {
-      if (browseFiltersLoading === loading) browseFiltersLoading = null;
-    });
-  browseFiltersLoading = loading;
-  return Promise.all([refreshBrowseFilters(), loading]);
+  return Promise.all([refreshBrowseFilters(refreshFacets), browseCountriesLoading, browseTagsLoading]);
 }
 
-/** What one filter leaves available to the other, worked out once and kept. */
-function facetsFor(query) {
+/** Reuse an in-flight tally even when a new submission asks to refresh it. */
+function facetsFor(query, refresh) {
   const key = JSON.stringify(query);
-  if (!browseFacets.has(key)) {
-    // The request is kept, not the answer it settles on. Both dropdowns ask
-    // the moment a format is picked, and with nothing else set they ask the
-    // same question - which, cached only once it had returned, was a megabyte
-    // fetched twice. A failure is dropped so the next try is a real one.
-    browseFacets.set(
-      key,
-      invoke("browse_facets", { query }).catch((e) => {
-        browseFacets.delete(key);
-        throw e;
-      })
-    );
-  }
-  return browseFacets.get(key);
+  const cached = browseFacets.get(key);
+  if (cached && (!refresh || cached.pending)) return cached.promise;
+
+  const entry = { pending: true };
+  entry.promise = invoke("browse_facets", { query }).then((facets) => {
+    entry.pending = false;
+    return facets;
+  }, (e) => {
+    browseFacets.delete(key);
+    throw e;
+  });
+  browseFacets.set(key, entry);
+  return entry.promise;
 }
 
 /**
@@ -3231,64 +3256,52 @@ function facetQuery(base, omit) {
   return query;
 }
 
+function refreshBrowseTags(refresh) {
+  const selector = "#browse-tag";
+  if (browseCountry || browseName || browseCodec || browseBitrate) {
+    const query = facetQuery({ countryCode: browseCountry, retainTag: browseTag });
+    return narrow(selector, facetsFor(query, refresh), (f) => f.tags, asTag, "genre");
+  }
+  invalidateBrowseNarrow(selector);
+  // The global list contains only the most popular genres. Omission does
+  // not tell us whether a genre selected from a narrower tally has matches.
+  setBrowseOptions(selector, browseTags || [], asTag, browseTag, browseTagLabel, { missingCountIsZero: false });
+  markBrowseFilterBusy($(selector), !!browseTagsLoading);
+}
+
+function refreshBrowseCountries(refresh) {
+  const selector = "#browse-country";
+  if (browseTag || browseName || browseCodec || browseBitrate) {
+    const query = facetQuery({ tag: browseTag });
+    return narrow(selector, facetsFor(query, refresh), (f) => f.countries, asCountry, "country");
+  }
+  invalidateBrowseNarrow(selector);
+  setBrowseOptions(selector, browseCountries || [], asCountry, browseCountry, browseCountryLabel,
+    { missingCountIsZero: !!browseCountries });
+  markBrowseFilterBusy($(selector), !!browseCountriesLoading);
+}
+
 /**
- * Point each dropdown at what the others leave: the genres that a chosen
- * country actually has, the countries that carry a chosen genre, and both of
- * them counted under whatever format and bitrate are set. With nothing set
- * anywhere else, the directory's own list is the right list.
- *
- * The counts have to answer for the format and bitrate too. "Paraguay (68)"
- * beside a 320k filter is a promise the next search cannot keep - the country
- * has 68 stations and none of them are 320k - and a filter that lies about
- * what it will find is worse than one that offers no count at all.
- *
- * The tally can be megabytes, so each submitted name and filter combination
- * shares one cached request for the rest of the run.
+ * Point each dropdown at what the other filters leave. The tally can be
+ * megabytes, so filter changes reuse cached requests. Submitting a search
+ * refreshes counts alongside the result page.
  */
-async function refreshBrowseFilters() {
-  const jobs = [];
-  // Name, format and bitrate narrow both lists, so neither global list is
-  // right any more once one of them is set.
-  const narrowed = !!browseName || !!browseCodec || !!browseBitrate;
-
-  if (browseCountry || narrowed) {
-    jobs.push(
-      narrow("#browse-tag", facetQuery({ countryCode: browseCountry, retainTag: browseTag }), (f) => f.tags, asTag, "genre")
-    );
-  } else if (browseTags) {
-    invalidateBrowseNarrow("#browse-tag");
-    setBrowseOptions("#browse-tag", browseTags, asTag, browseTag, browseTagLabel);
-  } else {
-    invalidateBrowseNarrow("#browse-tag");
-    setBrowseFallback("#browse-tag", [], asTag, browseTag, browseTagLabel);
-    markBrowseFilterBusy($("#browse-tag"), !!browseFiltersLoading);
-  }
-
-  if (browseTag || narrowed) {
-    jobs.push(
-      narrow("#browse-country", facetQuery({ tag: browseTag }), (f) => f.countries, asCountry, "country")
-    );
-  } else if (browseCountries) {
-    invalidateBrowseNarrow("#browse-country");
-    setBrowseOptions("#browse-country", browseCountries, asCountry, browseCountry, browseCountryLabel);
-  } else {
-    invalidateBrowseNarrow("#browse-country");
-    setBrowseFallback("#browse-country", [], asCountry, browseCountry, browseCountryLabel);
-    markBrowseFilterBusy($("#browse-country"), !!browseFiltersLoading);
-  }
-
+async function refreshBrowseFilters(refresh) {
+  const jobs = [refreshBrowseTags(refresh), refreshBrowseCountries(refresh)];
   // The fixed lists are only worth counting once something else is narrowing
   // them. With nothing set the answer would be the whole directory, and a
   // tally is megabytes - the browse tab is meant to cost nothing until asked.
   const place = { countryCode: browseCountry, tag: browseTag };
   const anywhereElse = !!browseName || !!browseCountry || !!browseTag;
   if (anywhereElse || !!browseBitrate) {
-    jobs.push(narrowFixed("#browse-codec", facetQuery(place, "codec"), (f) => f.codecs, "format"));
+    const query = facetQuery(place, "codec");
+    jobs.push(narrowFixed("#browse-codec", facetsFor(query, refresh), (f) => f.codecs, "format"));
   } else {
     resetFixed("#browse-codec");
   }
   if (anywhereElse || !!browseCodec) {
-    jobs.push(narrowFixed("#browse-bitrate", facetQuery(place, "bitrate"), (f) => f.bitrates, "bitrate"));
+    const query = facetQuery(place, "bitrate");
+    jobs.push(narrowFixed("#browse-bitrate", facetsFor(query, refresh), (f) => f.bitrates, "bitrate"));
   } else {
     resetFixed("#browse-bitrate");
   }
@@ -3356,14 +3369,14 @@ function clearFixedCounts(selector) {
   });
 }
 
-async function narrowFixed(selector, query, pick, what) {
+async function narrowFixed(selector, request, pick, what) {
   const select = $(selector);
   const mine = (browseNarrows.get(selector) || 0) + 1;
   browseNarrows.set(selector, mine);
   clearFixedCounts(selector);
   markBrowseFilterBusy(select, true);
   try {
-    const facets = await facetsFor(query);
+    const facets = await request;
     if (browseNarrows.get(selector) !== mine) return;
     annotateFixed(selector, pick(facets), facets.sampled);
   } catch {
@@ -3376,7 +3389,7 @@ async function narrowFixed(selector, query, pick, what) {
   }
 }
 
-async function narrow(selector, query, pick, unpack, what) {
+async function narrow(selector, request, pick, unpack, what) {
   const select = $(selector);
   // A cached tally resolves a microtask later than an uncached one, so two of
   // these can be in flight on one dropdown and finish out of order. Newest
@@ -3390,11 +3403,11 @@ async function narrow(selector, query, pick, unpack, what) {
   setBrowseFallback(selector, fallback || [], unpack, chosen.value, chosen.label);
   markBrowseFilterBusy(select, true);
   try {
-    const facets = await facetsFor(query);
+    const facets = await request;
     if (browseNarrows.get(selector) !== mine) return;
     const current = filterNow(selector);
     const globalEntries = selector === "#browse-tag" ? browseTags : browseCountries;
-    setBrowseOptions(selector, pick(facets), unpack, current.value, current.label, facets.sampled, globalEntries);
+    setBrowseOptions(selector, pick(facets), unpack, current.value, current.label, { sampled: facets.sampled, globalEntries });
   } catch {
     if (browseNarrows.get(selector) !== mine) return;
     // The old list belongs to different filters. Replace its now-false counts
@@ -3448,7 +3461,9 @@ function setBrowseFallback(selector, entries, unpack, value, label) {
  * person reads, which are not always the same string - so the label rides
  * along on the option for anything that saves it.
  */
-function setBrowseOptions(selector, entries, unpack, value, label, sampled, globalEntries) {
+function setBrowseOptions(selector, entries, unpack, value, label, {
+  sampled = false, globalEntries, missingCountIsZero = !sampled,
+} = {}) {
   const select = $(selector);
   const choices = new Map(entries.map(unpack).map(entry => [entry[0], entry]));
   if (sampled) {
@@ -3458,7 +3473,7 @@ function setBrowseOptions(selector, entries, unpack, value, label, sampled, glob
       if (!choices.has(optionValue)) choices.set(optionValue, [optionValue, optionLabel]);
     }
   }
-  if (value && !choices.has(value)) choices.set(value, [value, label || value, sampled ? undefined : 0]);
+  if (value && !choices.has(value)) choices.set(value, [value, label || value, missingCountIsZero ? 0 : undefined]);
 
   while (select.options.length > 1) select.remove(1);
   inBrowseOrder([...choices.values()]).forEach(([optionValue, optionLabel, stations]) => {
@@ -3488,6 +3503,7 @@ function previewBrowse(st) {
     tag: st.tags || st.tag || "",
     stationId: null,
     directoryStreamId: st.directoryStreamId,
+    legacyDirectoryStreamId: st.legacyDirectoryStreamId,
     // The directory's HLS flag describes the address its checker reached. It
     // can start hls.js directly only when that is also the address played;
     // behind a playlist or redirect, the probe finds a fresh manifest instead
@@ -3572,8 +3588,8 @@ function renderBrowse() {
   const scrollTop = list.scrollTop;
   const focused = document.activeElement;
   const focusedRow = focused?.closest(".browse-row");
-  const focusedUrl = focusedRow?.dataset.url;
-  const focusedAction = focused?.classList.contains("browse-save") ? ".browse-save" : ".browse-listen";
+  const focusedStream = focusedRow?.dataset.streamUrl;
+  const focusedSave = focused?.classList.contains("browse-save");
   releaseStationThumbnails(list);
   list.replaceChildren();
   list.setAttribute("aria-busy", String(browseBusy));
@@ -3598,7 +3614,9 @@ function renderBrowse() {
       action.type = "button";
       action.className = "gel " + (browseError ? "browse-retry" : "browse-clear");
       action.textContent = browseError ? "Try again" : "Clear filters";
-      action.addEventListener("click", () => browseError ? browseSearch(browseMore, browseName) : clearBrowseFilters());
+      action.addEventListener("click", () => browseError
+        ? browseSearch(browseMore, browseName, { refreshFacets: true })
+        : clearBrowseFilters());
       li.append(action);
     }
     list.append(li);
@@ -3606,6 +3624,7 @@ function renderBrowse() {
     const li = document.createElement("li");
     li.className = "row browse-row";
     li.dataset.url = st.url;
+    li.dataset.streamUrl = browseStreamOf(st);
     if (browsePlaying(st)) li.classList.add("on");
 
     const mark = document.createElement("span");
@@ -3651,8 +3670,8 @@ function renderBrowse() {
     // input without nesting a Save button inside another accessible button.
     li.addEventListener("click", () => previewBrowse(st));
     list.append(li);
-    if (focusedUrl && sameStream(st.url, focusedUrl)) {
-      li.querySelector(focusedAction)?.focus({ preventScroll: true });
+    if (focusedStream && sameStream(li.dataset.streamUrl, focusedStream)) {
+      (focusedSave && !add.disabled ? add : listen).focus({ preventScroll: true });
     }
   });
 
@@ -4180,6 +4199,7 @@ async function refreshNextAlarm() {
 
 let stationFavoritesOnly = false;
 let stationRecentOnly = false;
+let recentStepOrder = null;
 let stationMovePending = false;
 let stationDrag = null;
 let stationDragClickBlocked = false;
@@ -4192,20 +4212,39 @@ function recentStations() {
   return Array.isArray(state.settings.recentStations) ? state.settings.recentStations : [];
 }
 
+function matchRecentStation(stations, id, stream) {
+  return stations.find(station => station.id === id) ||
+    stations.find(station => station.recentId && station.recentId === id) ||
+    stations.find(station => station.url === stream.url) ||
+    stations.find(station => sameSavedStream(station, stream));
+}
+
 function resolveRecentStation(recent) {
-  return stationById(recent.id) || state.stations.find(saved => saved.recentId === recent.id) ||
-    state.stations.find(saved => sameSavedStream(saved, recent)) || recent;
+  return matchRecentStation(state.stations, recent.id, recent) || recent;
 }
 
 function currentRecentStations() {
+  const savedIds = new Set(state.stations.map(station => station.id));
   const current = [];
   for (const recent of recentStations()) {
     const station = resolveRecentStation(recent);
-    // An edit can make separate history snapshots converge on one saved row or
-    // stream. Keep its newest position without changing the stored snapshots.
-    if (!current.some(item => item.id === station.id || sameSavedStream(item, station))) current.push(station);
+    // Two saved IDs can identify distinct mounts even when Browse considers
+    // them aliases. Exact duplicate URLs still share one place in the view.
+    if (!current.some(item => item.id === station.id || item.url === station.url ||
+        ((!savedIds.has(item.id) || !savedIds.has(station.id)) && sameSavedStream(item, station)))) {
+      current.push(station);
+    }
   }
   return current;
+}
+
+function playingRecentStation(recent) {
+  const source = player.source;
+  if (source?.kind !== "station") return null;
+  const saved = matchRecentStation(state.stations, source.stationId, source);
+  if (!saved) return matchRecentStation(recent, source.stationId, source);
+  return recent.find(station => station.id === saved.id) ||
+    recent.find(station => station.url === saved.url);
 }
 
 function renderAndroidQuickAccess() {
@@ -4264,15 +4303,15 @@ function rememberPlayedStation() {
   if (ringing || source?.kind !== "station" || !/^https?:\/\//i.test(source.url || "") || historyRecordedSource === source) return;
   historyRecordedSource = source;
   const previous = recentStations();
-  const saved = state.stations.find(station => sameSavedStream(station, source));
-  const old = previous.find(station => sameSavedStream(station, source));
+  const saved = matchRecentStation(state.stations, source.stationId, source);
+  const old = saved ? null : matchRecentStation(previous, source.stationId, source);
   const entry = saved ? { ...saved } : {
     id: old?.id || source.stationId || newId(), name: source.title || "Live radio", url: source.url,
     tag: source.tag || old?.tag || "", logo: source.logo || old?.logo || "", favorite: false,
     directoryStreamId: source.directoryStreamId || old?.directoryStreamId,
   };
   const history = [entry, ...previous.filter(station => resolveRecentStation(station).id !== entry.id &&
-    station.id !== entry.id && !sameSavedStream(station, entry))].slice(0, 20);
+    (saved || !sameSavedStream(station, entry)))].slice(0, 20);
   if (JSON.stringify(history) === JSON.stringify(previous)) return;
   state.settings.recentStations = history;
   saveSettings(null, "recentStations");
@@ -4443,9 +4482,9 @@ function wireStationDragging() {
 }
 
 function refreshStationIndicators() {
+  const activeId = stationRecentOnly ? playingRecentStation(visibleStations)?.id : player.source?.stationId;
   Array.from($("#station-list").children).forEach((row) => {
-    const selected = !!player.source && (player.source.stationId === row.dataset.id ||
-      (stationRecentOnly && row.dataset.url && sameStream(player.source.url, row.dataset.url)));
+    const selected = !!activeId && activeId === row.dataset.id;
     row.classList.toggle("on", selected);
     const button = row.querySelector(".station-play");
     if (selected) button?.setAttribute("aria-current", "true");
@@ -4458,6 +4497,7 @@ function renderStations() {
   clearStationDrag();
   renderAndroidQuickAccess();
   const q = $("#station-filter").value.trim().toLowerCase();
+  if (!stationRecentOnly || recentStepOrder?.query !== q) recentStepOrder = null;
   const list = $("#station-list");
   const scrollTop = list.scrollTop;
   const focused = document.activeElement;
@@ -5599,6 +5639,7 @@ let stationDraftId = null;
 
 async function saveStationEditorChange(change, message) {
   if (stationEditorSaving) return;
+  cancelStationTest();
   stationEditorSaving = true;
   const editor = $("#station-editor");
   editor.inert = true;
@@ -6377,6 +6418,7 @@ function wire() {
         if (player.nativeGeneration === generation) applyAndroidPlaybackState(nativeState);
       }).catch((error) => say("Could not change volume: " + String(error), "bad"));
     } else {
+      player.pendingFadeSeconds = 0;
       audio.volume = player.target;
     }
     // Carry it into the ring so a later fallback does not snap back.
@@ -6611,13 +6653,14 @@ function wire() {
   });
 
   // browse
-  $("#btn-browse").addEventListener("click", () => browseSearch(false));
+  const submitBrowseSearch = () => browseSearch(false, undefined, { refreshFacets: true });
+  $("#btn-browse").addEventListener("click", submitBrowseSearch);
   $("#browse-reset").addEventListener("click", clearBrowseFilters);
   $("#browse-query").addEventListener("input", updateBrowseResetVisibility);
   $("#browse-query").addEventListener("keydown", (e) => {
     if (e.key !== "Enter" || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
-    browseSearch(false);
+    submitBrowseSearch();
   });
   const browseFiltersToggle = $("#browse-filters-toggle");
   const browseFilterFields = $("#browse-filter-fields");

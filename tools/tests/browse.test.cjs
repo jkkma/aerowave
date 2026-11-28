@@ -749,6 +749,29 @@ test("More restores focus to a new Listen button unless the user moved away", as
   assert.equal(h.document.activeElement, h.el("#browse-query"));
 });
 
+test("More keeps keyboard focus on a stream whose higher-voted representative changes", async () => {
+  const secondPage = deferred();
+  const first = { ...directoryStation("First", "https://first.test/listen", 1), resolvedUrl: "https://cdn.test?station=A" };
+  const winner = { ...directoryStation("Winner", "https://winner.test/listen", 9), resolvedUrl: "https://cdn.test/?station=A" };
+  const h = browseHarness(({ query }) => query.offset === 0
+    ? { offered: 40, hasMore: true, stations: [first] }
+    : secondPage.promise);
+  seedSelects(h);
+  await h.evaluate("browseSearch(false)");
+  const list = h.el("#browse-list");
+
+  const more = list.querySelector(".browse-more");
+  more.focus();
+  const loading = more.dispatch("click");
+  list.querySelector(".browse-listen").focus();
+  secondPage.resolve({ offered: 1, hasMore: false, stations: [winner] });
+  await loading;
+
+  assert.equal(list.querySelectorAll(".browse-row").length, 1);
+  assert.equal(list.querySelector(".browse-row").dataset.url, winner.url);
+  assert.equal(h.document.activeElement, list.querySelector(".browse-listen"));
+});
+
 test("submitted name and selected filters produce matching counts and empty state", async () => {
   const facetQueries = [];
   const stationQueries = [];
@@ -900,6 +923,40 @@ test("a name-only search narrows every filter from one shared facet tally", asyn
   assert.equal(h.el("#browse-codec").options[2].textContent, "FLAC (0)");
   assert.equal(h.el("#browse-bitrate").options[1].textContent, "128k (17)");
   assert.equal(h.el("#browse-bitrate").options[2].textContent, "320k (2)");
+});
+
+test("explicit searches refresh completed facets and share an in-flight tally", async () => {
+  const first = deferred();
+  const refreshed = deferred();
+  let facetCalls = 0;
+  const h = createHarness({ invoke(command) {
+    if (command === "browse_facets") return ++facetCalls === 1 ? first.promise : refreshed.promise;
+    if (command === "browse_stations") return { offered: 0, hasMore: false, stations: [] };
+  } });
+  const tally = (stations) => ({ countries: [], tags: [], codecs: [{ key: "FLAC", stations }], bitrates: [] });
+  seedSelects(h);
+  h.evaluate("browseCountries = []; browseTags = []; wire()");
+  const input = h.el("#browse-query");
+  const search = h.el("#btn-browse");
+  input.value = "radio";
+
+  await search.dispatch("click");
+  await input.dispatch("keydown", { key: "Enter" });
+  assert.equal(facetCalls, 1);
+  first.resolve(tally(0));
+  await flush();
+  const flac = h.el("#browse-codec").options[2];
+  assert.equal(flac.textContent, "FLAC (0)");
+  assert.equal(flac.disabled, true);
+
+  await input.dispatch("keydown", { key: "Enter" });
+  await search.dispatch("click");
+  assert.equal(facetCalls, 2);
+  assert.equal(flac.textContent, "FLAC");
+  refreshed.resolve(tally(1));
+  await flush();
+  assert.equal(flac.textContent, "FLAC (1)");
+  assert.equal(flac.disabled, false);
 });
 
 test("unsubmitted name edits leave counts and More alone, while clearing restores globals", async () => {
@@ -1070,6 +1127,32 @@ test("a retained genre absent from the filtered directory still displays zero", 
   assert.equal(h.el("#browse-tag").selectedOptions[0].disabled, false);
 });
 
+test("a retained genre omitted from the global list has no invented zero", async () => {
+  const station = directoryStation("Deep Earth", "https://deep-earth.test/live");
+  const h = createHarness({ invoke(command) {
+    if (command === "browse_facets") return {
+      countries: [{ code: "FR", name: "France", stations: 1 }],
+      tags: [{ value: "ambient drone", name: "Ambient Drone", stations: 1 }],
+      codecs: [], bitrates: [],
+    };
+    if (command === "browse_stations") return { offered: 1, hasMore: false, stations: [station] };
+  } });
+  seedSelects(h);
+  h.evaluate(`browseCountry = "FR"; browseCountryLabel = "France";
+    browseTag = "ambient drone"; browseTagLabel = "Ambient Drone";
+    browseCountries = [{code:"FR",name:"France",stations:100}];
+    browseTags = [{value:"rock",name:"Rock",stations:5000}]`);
+  await h.evaluate("browseSearch(false)");
+  const tag = h.el("#browse-tag");
+  assert.equal(tag.selectedOptions[0].textContent, "Ambient Drone (1)");
+
+  const country = h.el("#browse-active-filters").children.find((chip) => chip.dataset.filter === "country");
+  await country.dispatch("click");
+  assert.equal(tag.value, "ambient drone");
+  assert.equal(tag.selectedOptions[0].textContent, "Ambient Drone");
+  assert.equal(h.el("#browse-count").textContent, "1 station loaded");
+});
+
 test("sampled zero format, bitrate and selected dynamic buckets remain selectable", () => {
   const h = createHarness();
   seedSelects(h);
@@ -1085,7 +1168,7 @@ test("sampled zero format, bitrate and selected dynamic buckets remain selectabl
   assert.equal(h.el("#browse-codec").options[2].disabled, true);
   assert.equal(h.el("#browse-bitrate").options[2].disabled, true);
 
-  h.evaluate(`setBrowseOptions("#browse-country", [], asCountry, "DE", "Germany", true)`);
+  h.evaluate(`setBrowseOptions("#browse-country", [], asCountry, "DE", "Germany", { sampled: true })`);
   assert.equal(h.el("#browse-country").selectedOptions[0].textContent, "Germany");
   assert.equal(h.el("#browse-country").selectedOptions[0].disabled, false);
 });
@@ -1166,6 +1249,31 @@ test("missing initial lists retry independently and concurrent entry points coal
   await flush();
   assert.equal(countryCalls, 2);
   assert.deepEqual(h.el("#browse-country").options.map((entry) => entry.value), ["", "US"]);
+});
+
+test("Browse shows countries as soon as they arrive while the genre list is pending", async () => {
+  const countries = deferred();
+  const genres = deferred();
+  const h = createHarness({ invoke(command) {
+    if (command === "browse_countries") return countries.promise;
+    if (command === "browse_tags") return genres.promise;
+    if (command === "browse_stations") return { offered: 0, hasMore: false, stations: [] };
+  } });
+  seedSelects(h);
+  h.evaluate("browseFirstLook()");
+  assert.equal(h.el("#browse-country").disabled, true);
+  assert.equal(h.el("#browse-tag").disabled, true);
+
+  countries.resolve([{ code: "FR", name: "France", stations: 5 }]);
+  await flush();
+  assert.equal(h.el("#browse-country").disabled, false);
+  assert.deepEqual(h.el("#browse-country").options.map((entry) => entry.textContent), ["Any country", "France (5)"]);
+  assert.equal(h.el("#browse-tag").disabled, true);
+
+  genres.resolve([{ value: "jazz", name: "Jazz", stations: 6 }]);
+  await flush();
+  assert.equal(h.el("#browse-tag").disabled, false);
+  assert.deepEqual(h.el("#browse-tag").options.map((entry) => entry.textContent), ["Any genre", "Jazz (6)"]);
 });
 
 test("clearing a fixed filter removes a narrowed subset when its global list is unavailable", async () => {
@@ -1527,6 +1635,25 @@ test("a directory match across separate searches survives a pending save and reo
   assert.equal(add(reopened).disabled, true);
 });
 
+test("a Browse result recognizes a stored directory ID from before root query normalization", () => {
+  const legacy = "a".repeat(64);
+  const h = createHarness();
+  h.evaluate(`state.stations = [{ id: "old", name: "Old", url: "https://old.test/listen",
+    directoryStreamId: "${legacy}" }];
+    browseResults = [{ name: "New", url: "https://new.test/listen",
+      resolvedUrl: "https://cdn.test?station=A", directoryStreamId: "${"b".repeat(64)}",
+      legacyDirectoryStreamId: "${legacy}" }];
+    renderBrowse()`);
+
+  const save = h.el("#browse-list").querySelector(".browse-save");
+  assert.equal(save.textContent, "Saved");
+  assert.equal(save.disabled, true);
+  assert.equal(h.evaluate("addBrowseStation(browseResults[0])"), undefined);
+  h.evaluate("previewBrowse(browseResults[0])");
+  assert.equal(h.evaluate("sameSavedStream(state.stations[0], player.source)"), true);
+  assert.equal(h.evaluate("state.stations[0].directoryStreamId"), legacy);
+});
+
 function filterHarness(stationQueries, reply = () => ({ offered: 0, hasMore: false, stations: [] })) {
   const h = createHarness({ invoke(command, args) {
     if (command === "browse_countries" || command === "browse_tags") return [];
@@ -1643,7 +1770,7 @@ test("filter lists sort in the reader's alphabet, with a leading The set aside",
   ]);
   const expected = ["", "GM", "DE", "TN", "TR", "TV"];
 
-  h.evaluate(`setBrowseOptions("#browse-country", ${byteOrder}, asCountry, "", "", false)`);
+  h.evaluate(`setBrowseOptions("#browse-country", ${byteOrder}, asCountry, "", "")`);
   assert.deepEqual(h.el("#browse-country").options.map((entry) => entry.value), expected);
   h.evaluate(`setBrowseFallback("#browse-country", ${byteOrder}, asCountry, "", "")`);
   assert.deepEqual(h.el("#browse-country").options.map((entry) => entry.value), expected);
@@ -1657,4 +1784,6 @@ test("stream comparison folds only ASCII case, as the backend's stream key does"
   assert.equal(h.evaluate('sameStream("https://radio.test/Live?station=A", "http://radio.test/live?station=A")'), true);
   assert.equal(h.evaluate('sameStream("https://radio.test/live?station=A", "https://radio.test/live?station=a")'), false);
   assert.equal(h.evaluate('sameStream("https://radio.test/live?station=A/", "https://radio.test/live?station=A")'), false);
+  assert.equal(h.evaluate('sameStream("https://radio.test?station=A", "https://radio.test/?station=A")'), true);
+  assert.equal(h.evaluate('sameStream("https://radio.test?station=A", "https://radio.test//?station=A")'), false);
 });

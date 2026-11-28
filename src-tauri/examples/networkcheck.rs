@@ -634,13 +634,32 @@ async fn playlists_reach_a_working_alternate_and_keep_redirected_audio_bytes() {
                         socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
                         return;
                     }
-                    "/live.m3u8" | "/audio.m3u8" => {
-                        let location = if path == "/live.m3u8" { "/manifest" } else { "/untyped" };
+                    "/live.m3u8" | "/audio.m3u8" | "/redirect.pls" => {
+                        let location = match path {
+                            "/live.m3u8" => "/manifest",
+                            "/redirect.pls" => "/pls",
+                            _ => "/untyped",
+                        };
                         let response = format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                         socket.write_all(response.as_bytes()).await.unwrap();
                         return;
                     }
                     "/manifest" => ("application/octet-stream", "#EXTM3U\n#EXT-X-TARGETDURATION:5\n#EXTINF:5,\nsegment.ts\n"),
+                    "/m3u" => ("application/octet-stream", "\u{feff}#EXTM3U\r\nsong\r\n"),
+                    "/pls" => ("text/plain; charset=utf-8", "[Playlist]\nFile1=song\n"),
+                    "/asx" => ("text/plain", "<?xml version=\"1.0\"?>\n<ASX><ENTRY><REF HREF='song'/></ENTRY></ASX>"),
+                    "/bare-m3u" => {
+                        let body = format!("http://{addr}/song");
+                        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        socket.write_all(response.as_bytes()).await.unwrap();
+                        return;
+                    }
+                    "/long-prefix" => {
+                        let body = format!("{:1024}#EXTM3U\nsong\n", "");
+                        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        socket.write_all(response.as_bytes()).await.unwrap();
+                        return;
+                    }
                     "/untyped" => ("application/octet-stream", "#EXTbinary payload"),
                     "/error-page" => ("text/html", "<html>Station offline</html>"),
                     "/song" => ("audio/mpeg", "song"),
@@ -656,7 +675,9 @@ async fn playlists_reach_a_working_alternate_and_keep_redirected_audio_bytes() {
     });
     let relay = relay::Relay::start(Arc::new(|_, _| {})).await.unwrap();
     let base = format!("http://{addr}");
-    for playlist in ["list.pls", "list.m3u", "list.asx"] {
+    for playlist in [
+        "list.pls", "list.m3u", "list.asx", "m3u", "pls", "asx", "bare-m3u", "redirect.pls",
+    ] {
         let url = format!("{base}/{playlist}");
         let info = stream::probe(&url, false, false).await.unwrap();
         assert_eq!(info.url, format!("{base}/song"));
@@ -664,20 +685,107 @@ async fn playlists_reach_a_working_alternate_and_keep_redirected_audio_bytes() {
         assert!(response.status().is_success());
         assert_eq!(response.bytes().await.unwrap().as_ref(), b"song");
     }
-    let hls = stream::probe(&format!("{base}/live.m3u8"), false, false)
-        .await
-        .unwrap();
-    assert!(hls.hls);
-    assert_eq!(hls.url, format!("{base}/manifest"));
+    for playlist in ["live.m3u8", "manifest"] {
+        let url = format!("{base}/{playlist}");
+        let hls = stream::probe(&url, false, false).await.unwrap();
+        assert!(hls.hls);
+        assert_eq!(hls.url, format!("{base}/manifest"));
+        assert_eq!(reqwest::get(relay.route(&url)).await.unwrap().status(), 502);
+    }
 
-    let audio = format!("{base}/audio.m3u8");
-    assert!(!stream::probe(&audio, false, false).await.unwrap().hls);
+    for source in ["audio.m3u8", "untyped"] {
+        let audio = format!("{base}/{source}");
+        assert!(!stream::probe(&audio, false, false).await.unwrap().hls);
+        let response = reqwest::get(relay.route(&audio)).await.unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"#EXTbinary payload");
+    }
+    let audio = format!("{base}/long-prefix");
     let response = reqwest::get(relay.route(&audio)).await.unwrap();
     assert!(response.status().is_success());
     assert_eq!(
-        response.bytes().await.unwrap().as_ref(),
-        b"#EXTbinary payload"
+        response.text().await.unwrap(),
+        format!("{:1024}#EXTM3U\nsong\n", ""),
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn playlists_check_for_audio_before_skipping_the_remaining_entries() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let request = request(&mut socket).await;
+                let path = request.split_whitespace().nth(1).unwrap();
+                if let Some(first) = path.strip_prefix("/list.m3u?first=") {
+                    let body = format!("#EXTM3U\n/{first}\n/song\n");
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    return;
+                }
+                let response: &[u8] = match path {
+                    "/empty" => b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n",
+                    "/stall" => b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nTransfer-Encoding: chunked\r\n\r\n",
+                    "/invalid-interval" => b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nicy-metaint: invalid\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbad",
+                    "/raw-empty" | "/raw-stall" => b"ICY 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n",
+                    "/raw-invalid-interval" => b"ICY 200 OK\r\nContent-Type: audio/mpeg\r\nicy-metaint: invalid\r\n\r\nbad",
+                    "/raw-song" => b"ICY 200 OK\r\nContent-Type: audio/mpeg\r\nicy-metaint: 3\r\n\r\n",
+                    "/song" => b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsong",
+                    "/http-song" => b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 4\r\nConnection: close\r\n\r\nhttp",
+                    _ => panic!("Unexpected fixture path {path}"),
+                };
+                socket.write_all(response).await.unwrap();
+                if matches!(path, "/stall" | "/raw-stall") {
+                    let mut byte = [0];
+                    let _ = socket.read(&mut byte).await;
+                } else if path == "/raw-song" {
+                    // The raw reader must retain bytes pulled in after the head.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let _ = socket.write_all(b"raw\0aud\0io").await;
+                }
+            });
+        }
+    });
+    let relay = relay::Relay::start(Arc::new(|_, _| {})).await.unwrap();
+    let base = format!("http://{addr}");
+    let first_entries = [
+        "empty",
+        "stall",
+        "invalid-interval",
+        "raw-empty",
+        "raw-stall",
+        "raw-invalid-interval",
+        "raw-song",
+        "http-song",
+    ];
+    futures_util::future::join_all(first_entries.into_iter().map(|first| {
+        let base = &base;
+        let relay = &relay;
+        async move {
+            let url = format!("{base}/list.m3u?first={first}");
+            let route = relay.route(&url);
+            let (info, response) = tokio::join!(
+                stream::probe(&url, false, false),
+                reqwest::get(route),
+            );
+            let (chosen, expected): (_, &[u8]) = match first {
+                "raw-song" => ("raw-song", b"rawaudio"),
+                "http-song" => ("http-song", b"http"),
+                _ => ("song", b"song"),
+            };
+            assert_eq!(info.unwrap().url, format!("{base}/{chosen}"), "{first}");
+            let response = response.unwrap();
+            assert!(response.status().is_success(), "{first}");
+            assert_eq!(response.bytes().await.unwrap().as_ref(), expected, "{first}");
+        }
+    }))
+    .await;
     server.abort();
 }
 

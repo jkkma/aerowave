@@ -134,6 +134,46 @@ test("late metadata polling cannot replace a relay title or a newer station", as
   assert.equal(h.el("#np-track").textContent, "Current");
 });
 
+test("an ordinary station's pending metadata cannot overwrite its HLS replacement", async () => {
+  const pending = deferred();
+  let probes = 0;
+  const h = mediaHarness({ invoke: (command, args) => {
+    if (command !== "probe_stream") return;
+    if (args.wantTitle) return pending.promise;
+    return ++probes === 1 ? { url: "https://radio.test/live", hls: false }
+      : { url: "https://radio.test/live.m3u8", hls: true };
+  } });
+  await h.evaluate("play({kind:'station',url:'https://radio.test/listen',title:'Station'})");
+  h.evaluate("failure('first drop')");
+  await h.fireTimer(h.evaluate("player.retryTimer"));
+  const oldPoll = h.fireTimer(h.evaluate("player.metaTimer"));
+  h.evaluate("failure('second drop')");
+  await h.fireTimer(h.evaluate("player.retryTimer"));
+
+  const decoder = h.hlsInstances[0];
+  decoder.levels = [{ bitrate: 96000 }];
+  decoder.emit("MANIFEST_PARSED");
+  decoder.emit("FRAG_PARSING_METADATA", { samples: [{ pts: 0, data: tag([textFrame("Current HLS song")]) }] });
+  await h.audios[0].dispatch("timeupdate");
+  pending.resolve({ title: "Old relay song", bitrate: 128 });
+  await oldPoll;
+  assert.equal(h.el("#np-track").textContent, "Current HLS song");
+  assert.equal(h.el("#np-meta").textContent, "96 kbps  ·  HLS");
+});
+
+test("a rejected metadata probe counts toward the three titleless polls", async () => {
+  const h = mediaHarness({ invoke: (command, args) => {
+    if (command === "probe_stream" && args.wantTitle) throw new Error("metadata connection declined");
+  } });
+  await h.evaluate("play({kind:'station',url:'https://radio.test/live',title:'Station'})");
+  const timer = h.evaluate("player.metaTimer");
+  for (let attempt = 0; attempt < 3; attempt++) await h.fireTimer(timer);
+  assert.equal(h.calls.filter(({ command, args }) => command === "probe_stream" && args.wantTitle).length, 3);
+  assert.equal(h.timers.has(timer), false);
+  assert.equal(h.evaluate("player.metaTimer"), null);
+  assert.equal(h.audios[0].paused, false);
+});
+
 test("a relay title received during buffering prevents redundant periodic polling", async () => {
   const h = mediaHarness();
   await h.evaluate("play({kind:'station',url:'https://radio.test/live',title:'Station'})");

@@ -80,6 +80,25 @@ test("a pending station save keeps the editor busy and rejects a duplicate submi
   assert.equal(h.el("#station-editor").inert, false);
 });
 
+test("a late station TEST cannot overwrite a failed editor save", async () => {
+  const h = fixture(command => {
+    if (command === "save_stations") throw new Error("disk full");
+  });
+  h.evaluate("openStationEditor(null)");
+  h.el("#st-name").value = "Draft";
+  h.el("#st-url").value = "https://radio.test/draft";
+  const testing = h.el("#st-test").dispatch("click");
+  await flush();
+  const probe = h.audios[1];
+  assert.match(h.el("#st-note").textContent, /checking the player/);
+  await h.el("#station-editor").dispatch("submit");
+  await probe.dispatch("canplay");
+  await testing;
+  assert.match(h.el("#st-note").textContent, /Could not save.*disk full/);
+  assert.equal(h.el("#station-editor").classList.contains("hidden"), false);
+  assert.deepEqual(clone(h.evaluate("state.stations")), [original]);
+});
+
 test("editing a station preserves its directory identity until the stream changes", async () => {
   const h = fixture();
   const directoryStreamId = "a".repeat(64);

@@ -6,6 +6,80 @@ function folderHarness(pick) {
   return createHarness({ invoke: (command) => command === "random_track" ? pick.promise : undefined });
 }
 
+test("muting while a station connects controls the volume when audio starts", async () => {
+  const probe = deferred();
+  const volumes = [];
+  const h = createHarness({
+    invoke: command => command === "probe_stream" ? probe.promise : undefined,
+    onPlay: audio => volumes.push(audio.volume),
+  });
+  h.evaluate("wire(); state.settings.volume = 0.8");
+  const starting = h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Live' })");
+  h.el("#volume").value = 0;
+  await h.el("#volume").dispatch("input");
+  probe.resolve({ url: "https://radio.test/live", hls: false });
+  await starting;
+  assert.deepEqual(volumes, [0]);
+});
+
+test("an HLS retry after a failed initial probe starts muted at a saved zero volume", async () => {
+  let probes = 0;
+  const volumes = [];
+  const h = createHarness({
+    invoke: command => command === "probe_stream" ? (++probes === 1
+      ? Promise.reject(new Error("initial timeout"))
+      : { url: "https://radio.test/live.m3u8", hls: true }) : undefined,
+    onPlay: audio => volumes.push(audio.volume),
+  });
+  h.evaluate("state.settings.volume = 0");
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/radio.m3u8', title: 'Radio' })");
+  assert.deepEqual(volumes, []);
+  await fireRetry(h);
+  assert.equal(h.evaluate("player.hls"), true);
+  assert.deepEqual(volumes, [0]);
+});
+
+test("the volume slider overrides an alarm fade before audio begins", async () => {
+  const pending = deferred();
+  const h = createHarness({ onPlay: () => pending.promise });
+  h.evaluate("wire()");
+  const starting = h.evaluate("play({ kind: 'station', url: 'https://radio.test/live', title: 'Radio' }, { volume: 0.8, fadeSecs: 20 })");
+  await flush();
+  assert.equal(h.audios[0].volume, 0.02);
+  h.el("#volume").value = 0;
+  await h.el("#volume").dispatch("input");
+  pending.resolve();
+  await starting;
+  assert.equal(h.audios[0].volume, 0);
+  assert.equal(h.evaluate("player.fadeTimer"), null);
+});
+
+test("a station retry during the final sleep fade retains the faded volume", async () => {
+  let probeAttempts = 0;
+  let now = 0;
+  const volumes = [];
+  const h = createHarness({
+    performance: { now: () => now },
+    invoke: (command, args) => command === "probe_stream" && args.url.endsWith(".m3u8")
+      ? (++probeAttempts === 1 ? Promise.reject(new Error("initial timeout")) : { url: args.url, hls: true })
+      : undefined,
+    onPlay: audio => volumes.push(audio.volume),
+  });
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/old', title: 'Old' })");
+  h.evaluate(`applySleepSnapshot({ revision: 1, timer: {minutes: 15, action: 'stop',
+    remainingMs: 10000, executeAtMs: null} })`);
+  now = 5000;
+  await h.fireTimer(h.evaluate("player.fadeTimer"));
+  const faded = h.audios[0].volume;
+  await h.evaluate("play({ kind: 'station', url: 'https://radio.test/new.m3u8', title: 'New' })");
+  await fireRetry(h);
+  assert.deepEqual(volumes, [0.8, faded]);
+  assert.ok(h.evaluate("player.fadeTimer"));
+  now = 8000;
+  await h.fireTimer(h.evaluate("player.fadeTimer"));
+  assert.ok(h.audios[0].volume < faded);
+});
+
 test("Pause cancels a scheduled station reconnect and Resume rejoins the station", async () => {
   let plays = 0;
   const h = createHarness({

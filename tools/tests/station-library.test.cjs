@@ -151,6 +151,64 @@ test("Recent stays newest-first while name sorting and search filter its results
   assert.deepEqual(rowNames(h), ["Zulu Jazz", "Alpha Jazz"]);
 });
 
+test("Recent transport follows the starting order while actual playback promotes each station", async () => {
+  const stations = ["a", "b", "c", "d"].map(id => station(id, `Station ${id}`));
+  const h = libraryHarness({ stations, recentStations: stations });
+  const audio = h.audios[0];
+  audio.readyState = 3;
+  const hear = async (button, id) => {
+    await button.dispatch("click");
+    await flush();
+    assert.equal(h.evaluate("player.source.stationId"), id);
+    audio.currentTime++;
+    await audio.dispatch("timeupdate");
+    assert.equal(rowIds(h)[0], id);
+  };
+  const playRow = id => rows(h).find(row => row.dataset.id === id).querySelector(".station-play");
+
+  await h.el("#station-recent").dispatch("click");
+  await hear(playRow("a"), "a");
+  await hear(h.el("#btn-next"), "b");
+  await hear(h.el("#btn-next"), "c");
+  await hear(h.el("#btn-prev"), "b");
+
+  await hear(playRow("d"), "d");
+  assert.deepEqual(rowIds(h), ["d", "b", "c", "a"]);
+  await hear(h.el("#btn-next"), "b");
+  h.el("#station-filter").value = "Station";
+  await h.el("#station-filter").dispatch("input");
+  assert.deepEqual(rowIds(h), ["b", "d", "c", "a"]);
+  await hear(h.el("#btn-next"), "d");
+
+  h.el("#station-filter").value = "no such station";
+  await h.el("#station-filter").dispatch("input");
+  await h.el("#btn-next").dispatch("click");
+  assert.equal(h.evaluate("player.source.stationId"), "d");
+});
+
+test("Recent records and highlights the exact saved ID for case-sensitive mounts", async () => {
+  const upper = station("upper", "Uppercase", { url: "https://radio.test/Live", directoryStreamId: "shared" });
+  const lower = station("lower", "Lowercase", { url: "https://radio.test/live", directoryStreamId: "shared" });
+  const h = libraryHarness({ stations: [upper, lower] });
+  const audio = h.audios[0];
+  audio.readyState = 3;
+  for (const saved of [upper, lower]) {
+    await rows(h).find(row => row.dataset.id === saved.id).querySelector(".station-play").dispatch("click");
+    await flush();
+    audio.currentTime++;
+    await audio.dispatch("timeupdate");
+  }
+  assert.deepEqual(jsonClone(h.evaluate("recentStations().map(station => station.id)")), ["lower", "upper"]);
+  await h.el("#station-recent").dispatch("click");
+  assert.deepEqual(rowIds(h), ["lower", "upper"]);
+  assert.deepEqual(rows(h).filter(row => row.classList.contains("on")).map(row => row.dataset.id), ["lower"]);
+
+  await h.el("#btn-next").dispatch("click");
+  await flush();
+  assert.equal(h.evaluate("player.source.url"), upper.url);
+  assert.deepEqual(rows(h).filter(row => row.classList.contains("on")).map(row => row.dataset.id), ["upper"]);
+});
+
 test("Recent plays the current saved station after its stream URL changes", async () => {
   const old = station("saved", "Before edit", { url: "https://radio.test/old" });
   const h = libraryHarness({

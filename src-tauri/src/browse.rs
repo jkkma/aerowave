@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use aerowave_core::directory::{
     art_query_urls, bitrate_band_by_key, clean_name, directory_failure_forgets_mirror,
-    directory_host_candidates, directory_page_window, directory_stream_id, directory_tag_buckets,
+    directory_host_candidates, directory_page_window, directory_stream_identity, directory_tag_buckets,
     exact_tag_filter, first_tag, image_kind, is_country_code, is_directory_host, listen_url,
     playable_url, resolved_directory_url, select_directory_host, sort_key, stream_key,
     stream_matches, tally_directory_facets,
@@ -510,6 +510,9 @@ pub struct BrowseStation {
     pub resolved_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory_stream_id: Option<String>,
+    /// Matches existing saves whose checked root address included a slash.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_directory_stream_id: Option<String>,
     /// Other submitted addresses the directory resolved to the same stream.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
@@ -1075,6 +1078,10 @@ pub async fn search(query: Query) -> Result<Page, String> {
         // exactly as the facet tally and the webview's own pass compare them.
         let resolved_url = resolved_directory_url(text(&entry.url_resolved)).unwrap_or_default();
         let key = stream_key(if resolved_url.is_empty() { &url } else { &resolved_url });
+        let (directory_stream_id, legacy_directory_stream_id) =
+            directory_stream_identity(&url, &resolved_url)
+                .map(|identity| (Some(identity.id), identity.legacy_id))
+                .unwrap_or_default();
 
         let tags = clean_name(text(&entry.tags), 120);
         let hls = number(&entry.hls) != 0
@@ -1082,7 +1089,8 @@ pub async fn search(query: Query) -> Result<Page, String> {
         let mut station = BrowseStation {
             uuid: entry.stationuuid.unwrap_or_default(),
             name,
-            directory_stream_id: directory_stream_id(&url, &resolved_url),
+            directory_stream_id,
+            legacy_directory_stream_id,
             url,
             resolved_url,
             aliases: Vec::new(),

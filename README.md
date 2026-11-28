@@ -26,7 +26,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   first, including stations tried in Browse. Unsaved discoveries can be saved
   from that list. An edited station saved from Recent keeps its link to that
   history entry. Saved stations reflect their current names and stream URLs
-  after edits. History survives restarting the app and travels with backups.
+  after edits. Next and Previous follow the order you started stepping through,
+  even as each station that plays moves to the top of Recent. History survives
+  restarting the app and travels with backups.
 - Drag a station with the mouse to change its **Saved order**, including within
   search results or favourites. The list scrolls as you drag near its edges.
   Keyboard users can focus a station and press Alt + Up/Down. Moves save before
@@ -79,6 +81,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   now, so a playlist that does not admit to being one in its file name is
   followed just the same. Relative entries resolve against the playlist's final
   address after redirects; ASX references can point to ordinary MP3 streams.
+  When a playlist offers several streams, an empty response, a connection that
+  stalls before sending audio, or an invalid ICY interval lets the player try
+  the next entry.
 - Ordinary station discovery and relaying check the destination of each request,
   including redirects, playlist entries and the raw ICY fallback. Private and
   loopback IP literals, `localhost`, `.local` and `.home.arpa` names, and single-label
@@ -151,9 +156,9 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   strings or fragments. They skip local addresses and check the DNS answers
   before sending a URL to the directory.
 - A short-lived second connection is still opened once when a station starts,
-  for the bitrate, genre and station name — none of which change. It repeats
-  once a minute only for a station the relay is not carrying, and gives up
-  after three turns that find no title.
+  for bitrate, genre and station name. Until a live title arrives, a follow-up
+  poll can run once a minute. Three consecutive errors or replies without a
+  title end polling. HLS takes its song information from the active stream.
 - **ICY text has no charset**, so it is decoded as UTF-8 where that parses and
   Windows-1252 where it does not. `from_utf8_lossy` was doing both jobs and
   turning every byte it could not read into U+FFFD — a station sending the
@@ -317,7 +322,8 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   for formats and bitrates as well. If a tally fails, the
   filters fall back to uncounted choices instead of showing another selection's
   old counts. Missing initial country and genre lists are retried on the next
-  visit or search.
+  visit or search. On first load, each list becomes available as soon as it
+  arrives.
 - Duplicate submissions are collapsed twice over: within a page as it arrives,
   and again against everything already on screen, so pressing MORE cannot bring
   back a stream you are already looking at. Matching is on the stream URL,
@@ -354,9 +360,10 @@ Wake up to a radio station, or to a random track out of a folder you point it at
   available, because either corresponding filtered search can find the stream.
 - radio-browser publishes no crossed counts, so all of this is tallied from the
   stations themselves — up to about six megabytes, since the first 5,000 United
-  States stations came to 5.6 MB — which is why it happens only when a filter
-  changes, and is remembered for the rest of the run. Nothing is tallied
-  at all until something is narrowing. For the largest countries the tally reads
+  States stations came to 5.6 MB. Dropdowns that need the same tally share a
+  request. Submitting Search again refreshes its counts, and loading more stations keeps
+  the current counts. Nothing is tallied until something is narrowing.
+  For the largest countries the tally reads
   the first five thousand stations, so those counts are a floor rather than a
   total, and say so with a `+`.
 - The searching happens in Rust: it asks the directory which mirrors are up, picks
